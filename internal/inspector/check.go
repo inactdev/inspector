@@ -121,19 +121,33 @@ func classifyResult(cmd *exec.Cmd, err error, output string) (CheckResult, error
 		}, nil
 	}
 
-	// cmd.Run can fail without an *exec.ExitError when the check command
-	// itself finished but left a subprocess holding stdout/stderr open
-	// past WaitDelay (e.g. `npm test && (npm run dev &)`) - Go's own
-	// wait4 on the primary process already completed by then, so
-	// cmd.ProcessState is populated correctly even though the returned
-	// error wraps exec.ErrWaitDelay instead of being nil or an
-	// *exec.ExitError. Scoped specifically to that error, not any
-	// non-ExitError: a caller's own writer failing (e.g. stdout
-	// redirected to a full disk) also reaches this branch with
-	// ProcessState populated and a misleadingly clean exit code, and
-	// that failure belongs in the generic error path below, not folded
-	// into a false green.
-	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil {
+	// cmd.Run can fail without an *exec.ExitError in two situations,
+	// both still leaving cmd.ProcessState populated correctly from the
+	// process's own completed wait4:
+	//
+	//  - WaitDelay elapsed waiting for a leaked subprocess to release
+	//    stdout/stderr (e.g. `npm test && (npm run dev &)`) - the
+	//    returned error wraps exec.ErrWaitDelay.
+	//  - The check process exited right as inspector's own deadline
+	//    fired. If it was already fully reaped by the time Cancel's
+	//    kill ran, killProcessGroup maps that to os.ErrProcessDone and
+	//    this whole function is unreachable for it - Wait keeps
+	//    reflecting the real exit and err is nil or an *exec.ExitError.
+	//    But if it was still a zombie (exited, not yet reaped) when the
+	//    kill ran, kill(-pid, SIGKILL) silently no-ops - a zombie can't
+	//    act on any signal, so it "succeeds" - and Cancel returns nil
+	//    rather than os.ErrProcessDone. Per exec.Cmd.Cancel's own
+	//    documented contract, that makes Wait adopt the context's own
+	//    error instead of the process's, so the returned error is a
+	//    bare context.DeadlineExceeded.
+	//
+	// Gated specifically to these two errors, not any non-ExitError: a
+	// caller's own writer failing (e.g. stdout redirected to a full
+	// disk) reaches this branch too, with ProcessState populated and a
+	// misleadingly clean exit code, but surfaces as neither of these -
+	// so it correctly falls through instead of being folded into a
+	// false green.
+	if (errors.Is(err, exec.ErrWaitDelay) || errors.Is(err, context.DeadlineExceeded)) && cmd.ProcessState != nil {
 		return CheckResult{
 			ExitCode: cmd.ProcessState.ExitCode(),
 			Signal:   classifySignal(cmd.ProcessState),
