@@ -34,7 +34,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("inspector", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repoPath := fs.String("repo", ".", "path to the repository to inspect")
-	expectCommit := fs.String("commit", "", "assert HEAD resolves to this commit (full or short SHA, branch, tag - anything git resolves unambiguously); refuse on mismatch or ambiguity")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, `usage: inspector [flags] [claim text...]
 
@@ -50,11 +49,10 @@ flags:
 	}
 
 	opts := inspector.Options{
-		RepoPath:     *repoPath,
-		Claim:        strings.Join(fs.Args(), " "),
-		ExpectCommit: *expectCommit,
-		Stdout:       stdout,
-		Stderr:       stderr,
+		RepoPath: *repoPath,
+		Claim:    strings.Join(fs.Args(), " "),
+		Stdout:   stdout,
+		Stderr:   stderr,
 	}
 
 	result, err := inspector.Run(opts)

@@ -65,19 +65,19 @@ on disk):
 inspector
 ```
 
-This runs the configured check command against the repo's current HEAD and prints
-green or red.
+This runs the configured check command against the repo's current HEAD and
+prints green or red, always naming the exact commit it inspected - that's how
+a caller compares what inspector blessed against what it expects.
 
 Exit codes reserve `0`, `1`, and `2` for verdicts only:
 
 - `0` green
 - `1` red
 - `2` refused - inspector tried to reach a verdict and couldn't: no check
-  command configured, a dirty working tree, a `--commit` that doesn't resolve
-  to HEAD, a check command killed by a signal before it could finish on its own
-  (the OOM killer, an external kill - it never judged the code, so its exit
-  status is not a verdict either way), or an infrastructure failure. Never
-  treat `2` as red.
+  command configured, a dirty working tree, a check command killed by a signal
+  before it could finish on its own (the OOM killer, an external kill - it
+  never judged the code, so its exit status is not a verdict either way), or
+  an infrastructure failure. Never treat `2` as red.
 - `64` usage - not a verdict attempt at all: `--help`, an unrecognized flag, or
   bad usage. Distinct from `0`/`1`/`2` so a caller can never mistake a help
   request for a result; `64` follows the BSD
@@ -87,12 +87,6 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
 Flags:
 
 - `--repo <path>` - inspect a repo other than the current directory
-- `--commit <ref>` - assert HEAD resolves to this commit; accepts anything git
-  itself would resolve unambiguously (a full SHA, a short prefix, a branch, a
-  tag), resolved through `git rev-parse` the same way git would resolve it.
-  Refuses rather than silently inspecting the wrong commit both on a genuine
-  mismatch and on a `ref` that doesn't resolve to exactly one commit (an
-  ambiguous short prefix, or one that doesn't exist)
 
 Anything after the flags is a free-text claim, recorded for context and not acted
 on:
