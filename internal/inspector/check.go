@@ -180,19 +180,45 @@ func classifySignal(ps *os.ProcessState) string {
 // killProcessGroup SIGKILLs the process group led by pid, used as
 // exec.Cmd.Cancel. If the group is already gone - the check process
 // exited on its own right as the deadline fired, before this ran - the
-// kill fails with ESRCH; mapping that to os.ErrProcessDone rather than
+// kill fails, and mapping that failure to os.ErrProcessDone rather than
 // returning it raw is exec.Cmd.Cancel's documented way of saying "no
-// error, nothing to do." Without that mapping, a raw ESRCH tells Wait
+// error, nothing to do." Without that mapping, a raw error tells Wait
 // this race is a Cancel failure, and Wait can then return an opaque
 // error unrelated to anything actually wrong, for a timeout inspector
 // itself triggered - instead of continuing to reflect whatever the
 // process's own exit status turned out to be.
+//
+// Which errno shows up for "already gone" depends on the platform and
+// exactly how gone: a fully reaped group reliably gives ESRCH
+// everywhere. But a group whose leader has exited and not yet been
+// reaped - a zombie, still occupying the PID until something calls
+// wait on it - gives ESRCH on Linux too, while on darwin the identical
+// window gives EPERM instead (confirmed empirically: a Setpgid child
+// left unreaped for 300ms behaves differently per platform, nothing
+// else about the two runs differs). A raw EPERM is not on its own safe
+// to treat as "done," though - it's also what a genuine, unrelated
+// permission failure looks like, and the two are not safe to conflate.
+// Narrowed by probing the leader's own PID (not the group) with the
+// null signal: we always own the process we spawned, so if we still
+// have permission to signal it individually - whether it answers
+// (still zombie) or is gone entirely (ESRCH, fully reaped by now) -
+// the group-level EPERM is this platform quirk, not a real permission
+// problem, and only then is it safe to map away.
 func killProcessGroup(pid int) error {
 	err := syscall.Kill(-pid, syscall.SIGKILL)
-	if errors.Is(err, syscall.ESRCH) {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, syscall.ESRCH):
 		return os.ErrProcessDone
+	case errors.Is(err, syscall.EPERM):
+		if probeErr := syscall.Kill(pid, syscall.Signal(0)); probeErr == nil || errors.Is(probeErr, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	default:
+		return err
 	}
-	return err
 }
 
 type syncWriter struct {

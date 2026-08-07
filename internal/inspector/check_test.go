@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -151,6 +152,39 @@ func TestKillProcessGroup_AlreadyExited(t *testing.T) {
 	err := killProcessGroup(cmd.Process.Pid)
 	if !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("killProcessGroup(already-exited) = %v, want os.ErrProcessDone", err)
+	}
+}
+
+func TestKillProcessGroup_ZombieUnreaped(t *testing.T) {
+	// Regression guard for the platform-specific half of the same
+	// race: a Setpgid child that has exited but not yet been reaped -
+	// still a zombie, occupying its PID and group until something
+	// calls Wait - behaves differently per platform when its group is
+	// signaled. Confirmed empirically: Linux returns success for the
+	// identical window (killProcessGroup then returns nil, from the
+	// group kill's own success), while darwin returns EPERM instead
+	// (killProcessGroup then returns os.ErrProcessDone, having
+	// confirmed via the narrower individual-PID probe that this is the
+	// zombie-group quirk and not a genuine permission failure). Both
+	// outcomes are correct and portable; a raw, unmapped EPERM (or any
+	// other error) is not.
+	cmd := exec.Command("sh", "-c", "exit 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting process: %v", err)
+	}
+	pid := cmd.Process.Pid
+
+	// Give it time to exit without reaping it, reproducing the exact
+	// unreaped-zombie window the real timeout path can hit.
+	time.Sleep(300 * time.Millisecond)
+
+	if err := killProcessGroup(pid); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("killProcessGroup(zombie, unreaped) = %v, want nil or os.ErrProcessDone", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("unexpected error reaping the process: %v", err)
 	}
 }
 
