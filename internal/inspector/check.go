@@ -82,25 +82,33 @@ func RunCheck(repoRoot, command string, timeout time.Duration, stdout, stderr io
 	// the caller has read to EOF is the classic way to truncate output,
 	// since Wait closes the read end once the process exits.
 	err := cmd.Run()
-
 	result, resultErr := classifyResult(cmd, err, capture.String())
-	if resultErr != nil {
-		return CheckResult{}, resultErr
-	}
 
 	// The Go documentation for CommandContext recommends judging a
 	// timeout from ctx.Err() rather than from the shape of the returned
 	// error, since Cancel firing doesn't guarantee any particular error
-	// value once the process is reaped - including a race where the
-	// command happens to exit cleanly on its own right as the deadline
-	// fires, before SIGKILL lands. Applied last and unconditionally, so
-	// that race can't leave a timed-out run looking like ExitCode 0.
+	// value once the process is reaped. That includes classifyResult's
+	// own error return: Cancel is syscall.Kill(-pgid, SIGKILL), and if
+	// the check process happens to exit on its own right as the
+	// deadline fires, the kill can race an already-reaped process
+	// group and fail with ESRCH - an error classifyResult can't turn
+	// into a CheckResult, so it would otherwise surface as an
+	// infrastructure failure for a timeout inspector itself triggered.
+	// Checked first and unconditionally, so no error shape from that
+	// race - now or in the future - can bypass it: inspector already
+	// knows why the process is gone, and a refusal that says so is
+	// never wrong here, whatever classifyResult made of the error.
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		result.TimedOut = true
 		result.ExitCode = -1
 		if result.Signal == "" {
 			result.Signal = "killed"
 		}
+		return result, nil
+	}
+
+	if resultErr != nil {
+		return CheckResult{}, resultErr
 	}
 	return result, nil
 }
@@ -109,7 +117,10 @@ func RunCheck(repoRoot, command string, timeout time.Duration, stdout, stderr io
 // output already captured. The returned error is reserved for genuine
 // infrastructure failures - sh could not be started, or a caller's own
 // writer failed - as opposed to the check command's own exit status,
-// which never produces a Go error here.
+// which never produces a Go error here. Output is populated even on
+// the error return, since a timed-out run needs it regardless of what
+// classifyResult made of the underlying error - see the timeout check
+// in RunCheck, which overrides the rest of this result but keeps it.
 func classifyResult(cmd *exec.Cmd, err error, output string) (CheckResult, error) {
 	if err == nil {
 		return CheckResult{ExitCode: 0, Output: output}, nil
@@ -144,7 +155,7 @@ func classifyResult(cmd *exec.Cmd, err error, output string) (CheckResult, error
 		}, nil
 	}
 
-	return CheckResult{}, err
+	return CheckResult{Output: output}, err
 }
 
 // classifySignal reports what killed the process behind ps, checking
