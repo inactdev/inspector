@@ -66,9 +66,20 @@ inspector
 ```
 
 This runs the configured check command against the repo's current HEAD and prints
-green or red. Exit codes: `0` green, `1` red, `2` refused (no check configured, a
-dirty working tree, or a `--commit` mismatch) - never treat `2` as red, it means
-inspector didn't reach a verdict at all.
+green or red.
+
+Exit codes reserve `0`, `1`, and `2` for verdicts only:
+
+- `0` green
+- `1` red
+- `2` refused - inspector tried to reach a verdict and couldn't: no check
+  command configured, a dirty working tree, a `--commit` mismatch, or an
+  infrastructure failure. Never treat `2` as red.
+- `64` usage - not a verdict attempt at all: `--help`, an unrecognized flag, or
+  bad usage. Distinct from `0`/`1`/`2` so a caller can never mistake a help
+  request for a result; `64` follows the BSD
+  [sysexits.h](https://man.freebsd.org/cgi/man.cgi?query=sysexits) convention
+  for a command-line usage error.
 
 Flags:
 

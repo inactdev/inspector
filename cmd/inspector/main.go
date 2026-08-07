@@ -12,13 +12,18 @@ import (
 	"github.com/inactdev/inspector/internal/inspector"
 )
 
-// Exit codes are a deliberate three-way split: 0 and 1 are a verdict on
-// the code, 2 means inspector did not reach a verdict at all (refused or
-// hit an infrastructure error). Callers must not treat 2 as red.
+// Exit codes reserve 0, 1, and 2 for verdicts only: 0 green, 1 red, 2
+// refused (inspector tried to reach a verdict and could not - no check
+// command configured, a dirty working tree, a --commit mismatch, or an
+// infrastructure failure). exitUsage is for everything that is not a
+// verdict attempt at all - --help, an unrecognized flag, bad usage - so
+// a caller can never mistake a help request for a result. 64 follows the
+// BSD sysexits.h convention for a command-line usage error (EX_USAGE).
 const (
 	exitGreen   = 0
 	exitRed     = 1
 	exitRefused = 2
+	exitUsage   = 64
 )
 
 func main() {
@@ -41,7 +46,7 @@ flags:
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return exitRefused
+		return exitUsage
 	}
 
 	opts := inspector.Options{

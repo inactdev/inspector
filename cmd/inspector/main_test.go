@@ -90,6 +90,30 @@ func TestCLI_RefusesWithoutConfig(t *testing.T) {
 	}
 }
 
+func TestCLI_HelpExitsWithUsageCode(t *testing.T) {
+	dir := newTestRepo(t, nil)
+
+	code, _, stderr := runCLI(t, dir, "--help")
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (not a verdict code)", code, exitUsage)
+	}
+	if code == exitGreen || code == exitRed || code == exitRefused {
+		t.Fatalf("--help exit code %d collides with a verdict code", code)
+	}
+	if !strings.Contains(stderr, "usage:") {
+		t.Fatalf("stderr = %q, want usage text", stderr)
+	}
+}
+
+func TestCLI_UnknownFlagExitsWithUsageCode(t *testing.T) {
+	dir := newTestRepo(t, nil)
+
+	code, _, _ := runCLI(t, dir, "--not-a-real-flag")
+	if code != exitUsage {
+		t.Fatalf("exit code = %d, want %d (not a verdict code)", code, exitUsage)
+	}
+}
+
 func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 
