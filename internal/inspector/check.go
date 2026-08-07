@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -17,10 +18,16 @@ type CheckResult struct {
 	ExitCode int
 	// Signal is set when the check command was terminated by a signal
 	// (e.g. the OOM killer, an external kill, inspector's own timeout)
-	// rather than exiting on its own. ExitCode is -1 in that case - Go's
-	// os/exec convention, not a real process exit status - so callers
-	// must check Signal rather than treating a -1 or otherwise nonzero
-	// ExitCode as the process's own verdict on the code.
+	// rather than exiting on its own - detected two ways, since a
+	// signal-killed process only sometimes looks like one. A directly
+	// signaled process reports it through the OS wait status, and
+	// ExitCode is -1 in that case (Go's os/exec convention, not a real
+	// exit status). But `sh -c "a && b"` forks a child per command and
+	// survives a killed one, exiting normally with 128+N - the shell's
+	// own convention for "my child died from signal N" - so Signal can
+	// also be set with ExitCode holding that 128+N value rather than
+	// -1. Either way, callers must check Signal rather than assume a
+	// nonzero ExitCode is the process's own verdict on the code.
 	Signal string
 	// TimedOut is set when RunCheck itself killed the command for
 	// exceeding timeout, as distinct from some other signal (Signal is
@@ -80,23 +87,63 @@ func RunCheck(repoRoot, command string, timeout time.Duration, stdout, stderr io
 	// timeout from ctx.Err() rather than from the shape of the returned
 	// error, since Cancel firing doesn't guarantee any particular error
 	// value once the process is reaped.
-	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return CheckResult{TimedOut: true, Signal: "killed", Output: capture.String()}, nil
-	}
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 
 	if err == nil {
-		return CheckResult{ExitCode: 0, Output: capture.String()}, nil
+		return CheckResult{ExitCode: 0, Output: capture.String(), TimedOut: timedOut}, nil
 	}
 
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		result := CheckResult{ExitCode: exitErr.ExitCode(), Output: capture.String()}
-		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			result.Signal = status.Signal().String()
-		}
-		return result, nil
+		return CheckResult{
+			ExitCode: exitErr.ExitCode(),
+			Signal:   classifySignal(exitErr.ProcessState),
+			TimedOut: timedOut,
+			Output:   capture.String(),
+		}, nil
+	}
+
+	// cmd.Run can fail without an *exec.ExitError when the check command
+	// itself finished fine but left a subprocess holding stdout/stderr
+	// open past WaitDelay (e.g. `npm test && (npm run dev &)`) - Go's
+	// own wait4 on the primary process already completed by then, so
+	// cmd.ProcessState is still populated correctly even though the
+	// returned error wraps exec.ErrWaitDelay instead of being nil. Using
+	// it here, rather than falling through to the generic infra-error
+	// path below, keeps a check that actually finished from being
+	// reported as inspector failing to run it at all.
+	if cmd.ProcessState != nil {
+		return CheckResult{
+			ExitCode: cmd.ProcessState.ExitCode(),
+			Signal:   classifySignal(cmd.ProcessState),
+			TimedOut: timedOut,
+			Output:   capture.String(),
+		}, nil
+	}
+
+	if timedOut {
+		return CheckResult{ExitCode: -1, Signal: "killed", TimedOut: true, Output: capture.String()}, nil
 	}
 	return CheckResult{}, err
+}
+
+// classifySignal reports what killed the process behind ps, checking
+// both of the ways a POSIX wait status can say so. A process signaled
+// directly reports it through WaitStatus.Signaled(). But `sh -c "a &&
+// b"` forks a child per command and waits on it, so a compound
+// command's own killed child doesn't signal sh itself - sh instead
+// exits normally with 128+N, the shell's own convention for "my child
+// died from signal N," which is what killing a timed-out compound
+// check command, or an OOM-killed one, actually looks like from here.
+// Returns "" when neither applies.
+func classifySignal(ps *os.ProcessState) string {
+	if status, ok := ps.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		return status.Signal().String()
+	}
+	if code := ps.ExitCode(); code >= 128 {
+		return syscall.Signal(code - 128).String()
+	}
+	return ""
 }
 
 type syncWriter struct {

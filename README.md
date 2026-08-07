@@ -92,6 +92,19 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
   killer, an external kill, inspector's own deadline - it never judged the
   code, so its exit status is not a verdict either way), or an infrastructure
   failure. Never treat `2` as red.
+
+  A signal kill is detected two ways, because a compound check command like
+  `npm test && npm run lint` doesn't show it the same way a plain one does:
+  `sh -c "a && b"` forks a child for each command and waits on it, so if `a`
+  is killed by a signal, `sh` itself is never signaled - it sees its child's
+  wait status and exits normally with `128 + <signal number>`, the shell's own
+  convention for reporting exactly that. inspector treats *either* shape (the
+  shell itself signaled, or an exit code of 128 or above) as refused, not red.
+  A program could in principle choose an exit code in that range for its own
+  reasons and get called refused when it actually failed - but that direction
+  is safe, since refused still blocks the merge, while the alternative sends
+  someone hunting a bug that was never there when the check simply ran out of
+  memory.
 - `64` usage - not a verdict attempt at all: `--help`, an unrecognized flag, or
   bad usage. Distinct from `0`/`1`/`2` so a caller can never mistake a help
   request for a result; `64` follows the BSD

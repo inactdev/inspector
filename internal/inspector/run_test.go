@@ -115,6 +115,29 @@ func TestRun_SignalKilledCheckIsRefusedNotRed(t *testing.T) {
 	}
 }
 
+func TestRun_CompoundCommandSignalKilledChildIsRefusedNotRed(t *testing.T) {
+	// The motivating case: a compound check command shaped like
+	// README's own example (`npm test && npm run lint`) survives its
+	// own killed child and exits 137, a value nothing prevents a
+	// program from also choosing on its own - the client's ruling is to
+	// call that Refused anyway, since that direction is safe (Refused
+	// still blocks a merge) while the other direction sends someone
+	// hunting a bug that was never there when the machine ran out of
+	// memory.
+	dir := newTestRepo(t, map[string]string{
+		ConfigFileName: `{"check": "sh -c 'kill -9 $$' && true"}`,
+	})
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused - message: %s", result.Outcome, result.Message)
+	}
+}
+
 func TestRun_ReportWriteFailureKeepsVerdict(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{
 		ConfigFileName: `{"check": "true"}`,

@@ -144,6 +144,34 @@ func TestRunCheck_SignalKilled(t *testing.T) {
 	}
 }
 
+func TestRunCheck_CompoundCommandSurvivingKilledChild(t *testing.T) {
+	// `sh -c "a && b"` forks a for each of a and b and waits on them, so
+	// when a is a separate process that gets killed by a signal - not
+	// `kill -9 $$`, which kills the interpreter running it directly -
+	// sh itself is never signaled. It sees its child's wait status and
+	// exits normally with 128+N, the shell's own convention for "my
+	// child died from signal N." Verified directly: `sh -c "kill -9 $$"
+	// && true` from Go's os/exec reports ExitCode 137, Signaled false.
+	// README's own example check command has exactly this shape (`npm
+	// test && npm run lint`), so this is the common case, not an edge
+	// case.
+	dir := t.TempDir()
+
+	result, err := RunCheck(dir, `sh -c 'kill -9 $$' && true`, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ExitCode != 137 {
+		t.Fatalf("ExitCode = %d, want 137 (sh's own 128+9 convention)", result.ExitCode)
+	}
+	if result.Signal == "" {
+		t.Fatalf("expected Signal to be set from the 128+N exit code even though sh itself wasn't signaled, got CheckResult %+v", result)
+	}
+	if !strings.Contains(result.Signal, "killed") {
+		t.Fatalf("Signal = %q, want it to describe SIGKILL", result.Signal)
+	}
+}
+
 func TestRunCheck_Timeout(t *testing.T) {
 	dir := t.TempDir()
 
@@ -183,6 +211,33 @@ func TestRunCheck_TimeoutKillsChildProcesses(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("background child survived the timeout kill and wrote %s", marker)
+	}
+}
+
+func TestRunCheck_LeakedSubprocessDoesNotDiscardOutput(t *testing.T) {
+	// A check command can finish successfully while leaving a
+	// subprocess behind that still holds stdout/stderr open (e.g.
+	// `npm test && (npm run dev &)`). Go's own wait4 on the primary
+	// process already completed by then, but cmd.Run doesn't return
+	// nil - it returns an error wrapping exec.ErrWaitDelay once
+	// WaitDelay (5s) elapses waiting for the pipes to close. Confirms
+	// RunCheck uses cmd.ProcessState instead of discarding the result
+	// as an infrastructure failure. Genuinely takes just over 5s: this
+	// is exercising the real WaitDelay, not a shortened stand-in for it.
+	if testing.Short() {
+		t.Skip("waits out a real 5s WaitDelay; skipped in -short")
+	}
+	dir := t.TempDir()
+
+	result, err := RunCheck(dir, "echo hello; (sleep 30 &)", testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v - a leaked subprocess should not turn a finished check into an infrastructure failure", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0 - the primary command succeeded", result.ExitCode)
+	}
+	if !strings.Contains(result.Output, "hello") {
+		t.Fatalf("Output = %q, want it to contain the primary command's output, not be discarded", result.Output)
 	}
 }
 
