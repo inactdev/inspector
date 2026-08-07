@@ -127,6 +127,64 @@ func TestRun_RefusesOnCommitMismatch(t *testing.T) {
 	}
 }
 
+func TestRun_CommitFlagAcceptsShortForm(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{ConfigFileName: `{"check": "true"}`})
+	full := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	opts, _, _ := runOpts(dir)
+	opts.ExpectCommit = full[:8]
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Green {
+		t.Fatalf("Outcome = %v, want Green (message: %s)", result.Outcome, result.Message)
+	}
+}
+
+func TestRun_CommitFlagRefusesShortFormMismatch(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{"a.txt": "hello"})
+	firstCommit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "true"}`})
+	runGitT(t, dir, "add", "-A")
+	runGitT(t, dir, "commit", "-q", "-m", "add config")
+
+	opts, _, _ := runOpts(dir)
+	opts.ExpectCommit = firstCommit[:8]
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused", result.Outcome)
+	}
+	if !strings.Contains(result.Message, firstCommit) {
+		t.Fatalf("refusal message should name the commit resolved from the short form (%s), got: %s", firstCommit, result.Message)
+	}
+}
+
+func TestRun_CommitFlagRefusesAmbiguousPrefix(t *testing.T) {
+	dir := t.TempDir()
+	runGitT(t, dir, "init", "-q")
+	makeAmbiguousCommits(t, dir)
+
+	opts, _, _ := runOpts(dir)
+	opts.ExpectCommit = ambiguousPrefix
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused", result.Outcome)
+	}
+	if !strings.Contains(result.Message, "ambiguous") {
+		t.Fatalf("refusal message should mention the ambiguity, got: %s", result.Message)
+	}
+}
+
 func TestRun_RefusesOnNonRepo(t *testing.T) {
 	dir := t.TempDir()
 	opts, _, _ := runOpts(dir)

@@ -84,8 +84,12 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
 Flags:
 
 - `--repo <path>` - inspect a repo other than the current directory
-- `--commit <sha>` - assert HEAD equals this commit; refuse rather than silently
-  inspecting the wrong one
+- `--commit <ref>` - assert HEAD resolves to this commit; accepts anything git
+  itself would resolve unambiguously (a full SHA, a short prefix, a branch, a
+  tag), resolved through `git rev-parse` the same way git would resolve it.
+  Refuses rather than silently inspecting the wrong commit both on a genuine
+  mismatch and on a `ref` that doesn't resolve to exactly one commit (an
+  ambiguous short prefix, or one that doesn't exist)
 
 Anything after the flags is a free-text claim, recorded for context and not acted
 on:

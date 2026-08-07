@@ -27,6 +27,20 @@ func HeadCommit(repoRoot string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// ResolveCommit resolves ref to a full commit SHA the way git itself
+// would - accepting any form git accepts unambiguously, including a
+// short SHA prefix, a branch, or a tag - via `git rev-parse --verify`.
+// It errors if ref does not name exactly one commit: nonexistent and
+// ambiguous (a short prefix matching more than one object) both fail
+// here, with git's own message identifying which.
+func ResolveCommit(repoRoot, ref string) (string, error) {
+	out, err := runGit(repoRoot, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // WorkingTreeStatus returns the raw `git status --porcelain` output,
 // excluding RunsDirName - inspector's own report directory. Without the
 // exclusion, a repo that never gitignores RunsDirName would go dirty the

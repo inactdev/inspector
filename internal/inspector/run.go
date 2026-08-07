@@ -19,8 +19,10 @@ const (
 	// Red means the project's check command failed.
 	Red Outcome = "red"
 	// Refused means inspector did not run the check at all - no check
-	// command configured, a dirty working tree, or a commit mismatch. A
-	// refusal is loud on purpose: it must never look like a pass.
+	// command configured, a dirty working tree, or a --commit that
+	// doesn't resolve to exactly one commit (nonexistent, ambiguous, or
+	// resolves but doesn't match HEAD). A refusal is loud on purpose: it
+	// must never look like a pass.
 	Refused Outcome = "refused"
 )
 
@@ -32,9 +34,11 @@ type Options struct {
 	// It is recorded in the local report only - inspector does not act
 	// on its content.
 	Claim string
-	// ExpectCommit, if set, asserts that HEAD must equal this commit.
-	// A mismatch refuses rather than silently inspecting the wrong
-	// commit.
+	// ExpectCommit, if set, asserts that HEAD must resolve to this
+	// commit. Accepts anything git itself would resolve unambiguously -
+	// a full SHA, a short prefix, a branch, a tag. A mismatch, or a
+	// value that doesn't resolve to exactly one commit, refuses rather
+	// than silently inspecting the wrong commit.
 	ExpectCommit string
 
 	Stdout io.Writer
@@ -76,12 +80,22 @@ func Run(opts Options) (Result, error) {
 		return Result{}, err
 	}
 
-	if opts.ExpectCommit != "" && opts.ExpectCommit != commit {
-		return Result{
-			Outcome: Refused,
-			Commit:  commit,
-			Message: fmt.Sprintf("expected commit %s but HEAD is %s - refusing rather than inspecting the wrong commit.", opts.ExpectCommit, commit),
-		}, nil
+	if opts.ExpectCommit != "" {
+		resolved, err := ResolveCommit(repoRoot, opts.ExpectCommit)
+		if err != nil {
+			return Result{
+				Outcome: Refused,
+				Commit:  commit,
+				Message: fmt.Sprintf("--commit %q does not resolve to exactly one commit: %v", opts.ExpectCommit, err),
+			}, nil
+		}
+		if resolved != commit {
+			return Result{
+				Outcome: Refused,
+				Commit:  commit,
+				Message: fmt.Sprintf("expected commit %s (resolved from %q) but HEAD is %s - refusing rather than inspecting the wrong commit.", resolved, opts.ExpectCommit, commit),
+			}, nil
+		}
 	}
 
 	cfg, err := LoadConfig(repoRoot)

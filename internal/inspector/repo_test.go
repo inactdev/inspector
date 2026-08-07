@@ -39,6 +39,55 @@ func TestHeadCommit(t *testing.T) {
 	}
 }
 
+func TestResolveCommit_FullSHA(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{"a.txt": "hello"})
+	full := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+
+	got, err := ResolveCommit(dir, full)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != full {
+		t.Fatalf("ResolveCommit(%q) = %q, want %q", full, got, full)
+	}
+}
+
+func TestResolveCommit_ShortPrefix(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{"a.txt": "hello"})
+	full := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	short := full[:8]
+
+	got, err := ResolveCommit(dir, short)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != full {
+		t.Fatalf("ResolveCommit(%q) = %q, want %q", short, got, full)
+	}
+}
+
+func TestResolveCommit_Nonexistent(t *testing.T) {
+	dir := newTestRepo(t, nil)
+
+	if _, err := ResolveCommit(dir, "deadbeef"); err == nil {
+		t.Fatal("expected an error for a commit that doesn't exist")
+	}
+}
+
+func TestResolveCommit_AmbiguousPrefix(t *testing.T) {
+	dir := t.TempDir()
+	runGitT(t, dir, "init", "-q")
+	makeAmbiguousCommits(t, dir)
+
+	_, err := ResolveCommit(dir, ambiguousPrefix)
+	if err == nil {
+		t.Fatal("expected an error for a prefix matching more than one commit")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("error = %q, want it to mention the ambiguity", err.Error())
+	}
+}
+
 func TestWorkingTreeStatus_Clean(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{"a.txt": "hello"})
 
