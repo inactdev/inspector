@@ -39,6 +39,9 @@ func WriteReport(repoRoot string, r Report) (string, error) {
 	if err := os.MkdirAll(runsDir, 0o755); err != nil {
 		return "", fmt.Errorf("creating %s: %w", runsDir, err)
 	}
+	if err := ensureIgnored(filepath.Join(repoRoot, RunsDirName)); err != nil {
+		return "", err
+	}
 
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
@@ -57,6 +60,29 @@ func WriteReport(repoRoot string, r Report) (string, error) {
 	}
 
 	return path, nil
+}
+
+// ensureIgnored makes dir ignore its own contents, so reports - which
+// carry the check command's full output - never end up committed to the
+// repo being inspected. It is written once, on the first run, and an
+// existing file is left exactly as the user wrote it.
+func ensureIgnored(dir string) error {
+	path := filepath.Join(dir, ".gitignore")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if _, err := f.WriteString("*\n"); err != nil {
+		f.Close()
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
 }
 
 // writeNewFile writes data to dir/base.json without ever overwriting an
