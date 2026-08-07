@@ -34,6 +34,10 @@ type Report struct {
 
 // WriteReport persists r under repoRoot/RunsDirName/runs/ and refreshes
 // LatestReportName. It returns the path of the timestamped report file.
+//
+// r.Output is whatever RunCheck captured, unbounded, and is written out in
+// full here twice; RunsDirName also never prunes old runs. Deliberately
+// deferred - see issue #12.
 func WriteReport(repoRoot string, r Report) (string, error) {
 	runsDir := filepath.Join(repoRoot, RunsDirName, "runs")
 	if err := os.MkdirAll(runsDir, 0o755); err != nil {

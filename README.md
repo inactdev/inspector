@@ -39,6 +39,12 @@ cd inspector
 go build -o inspector ./cmd/inspector
 ```
 
+Running inspector's own tests (`script/check`, or `go test ./...` directly)
+additionally needs a C compiler: the suite runs under Go's race detector, which
+requires cgo. The race detector is itself unsupported on some platforms,
+including 32-bit x86, linux/arm, and freebsd/arm - on those, run
+`CGO_ENABLED=0 go test ./...` instead of `script/check`.
+
 ## Use
 
 In the repo you want inspected, add `.inspector.json` at the root, naming that
