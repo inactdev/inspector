@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# inspector's own definition of green. Referenced from .inspector.json so
+# inspector runs against itself the same way it runs against any other
+# repo - see AGENTS.md.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "==> gofmt"
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+  echo "not gofmt'd:"
+  echo "$unformatted"
+  exit 1
+fi
+
+echo "==> go vet"
+go vet ./...
+
+echo "==> go build"
+go build ./...
+
+echo "==> go test"
+go test ./...
