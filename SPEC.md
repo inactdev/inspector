@@ -109,9 +109,10 @@ repositories some will, some will not, and inspector can guarantee it once.
 ## 4. Who owns what
 
 **inspector owns everything from "the code is written" to "it is green in CI."**
-Running the checks, linting, proving the claimed outcomes, repairing what is
-mechanically broken, pushing, opening the pull request, watching CI, fixing what
-CI complains about, and blessing the final commit.
+Running the checks, linting, checking the documentation against the change,
+proving the claimed outcomes, repairing what is mechanically broken, pushing,
+opening the pull request, watching CI, fixing what CI complains about, and
+blessing the final commit.
 
 **Fabrica owns whether it is the right thing.** Before, by building it. After,
 through the Client's verdict and the fix loop back into the same warm worker.
@@ -134,6 +135,30 @@ Running the project's tests in more than one place is not duplication. Fabrica
 runs them to know when it is done, the way anyone runs tests while writing code.
 inspector runs them as evidence, because the builder's word is not proof. Same
 command, different purpose.
+
+### Documentation
+
+inspector reads the change and asks whether the project's documentation still
+describes reality, then fixes what has fallen out of step.
+
+It belongs on inspector's side by the same test as everything else here: asking
+whether a document still matches the code needs no knowledge of what was asked
+for. The code is right there. A README promising behavior the code no longer has
+is wrong on its face, and correcting it is repair, not authorship.
+
+Two limits keep it from wandering:
+
+- **Documentation the change made untrue is inspector's to fix.** Documentation
+  the project never had is not - deciding a project needs a guide it has never
+  had is a judgment about the product, and that belongs to the Client.
+- **Where a claimed outcome needs describing, the outcome list says what was
+  meant** (section 5). inspector writes the description; it does not invent the
+  intent behind it.
+
+This is worth having for the reason that is easy to underrate: nothing else in
+the pipeline ever notices documentation rot. Tests do not fail because a README
+lies. Left alone it decays quietly until the documents are actively misleading,
+which is worse than having none.
 
 ## 5. Independent verification
 
