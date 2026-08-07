@@ -13,9 +13,9 @@ import (
 )
 
 // Exit codes reserve 0, 1, and 2 for verdicts only: 0 green, 1 red, 2
-// refused (inspector tried to reach a verdict and could not - no check
-// command configured, a dirty working tree, a --commit mismatch, or an
-// infrastructure failure). exitUsage is for everything that is not a
+// refused (inspector tried to reach a verdict and could not - see
+// inspector.Refused for those causes, plus any infrastructure failure
+// Run reports as an error). exitUsage is for everything that is not a
 // verdict attempt at all - --help, an unrecognized flag, bad usage - so
 // a caller can never mistake a help request for a result. 64 follows the
 // BSD sysexits.h convention for a command-line usage error (EX_USAGE).
