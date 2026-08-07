@@ -1,3 +1,5 @@
+<img width="1280" height="720" alt="inspector" src="https://github.com/user-attachments/assets/a8685b63-7b08-4102-9d09-bceb811ffc68" />
+
 # inspector
 
 The shipping gate. It checks that finished work is actually finished, repairs what
