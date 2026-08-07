@@ -25,8 +25,7 @@ It never merges. Green means ready for a verdict, not merged.
 
 ## Install
 
-Requires [Go](https://go.dev) - the minimum version is the `go` line in
-[go.mod](go.mod).
+Requires [Go](https://go.dev) 1.22+.
 
 ```
 go install github.com/inactdev/inspector/cmd/inspector@latest
