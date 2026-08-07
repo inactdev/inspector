@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -127,6 +128,29 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	}
 	if len(result.Output) != size {
 		t.Fatalf("captured %d bytes, want %d - output was truncated", len(result.Output), size)
+	}
+}
+
+func TestKillProcessGroup_AlreadyExited(t *testing.T) {
+	// Regression guard for the deadline/natural-exit race: if the check
+	// process is already gone by the time the timeout's kill runs,
+	// killProcessGroup must map that to os.ErrProcessDone rather than
+	// the raw ESRCH - exec.Cmd.Cancel's documented signal that Wait
+	// should keep reflecting the process's own actual exit status
+	// instead of treating the race as a Cancel failure and returning
+	// an opaque error for a timeout that has nothing wrong with it.
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// cmd.Process.Pid is now an already-reaped PID with no process
+	// group of its own (the command above set no Setpgid), so killing
+	// -pid always misses - reproducing exactly what the timeout path's
+	// real kill hits when it loses the race.
+	err := killProcessGroup(cmd.Process.Pid)
+	if !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("killProcessGroup(already-exited) = %v, want os.ErrProcessDone", err)
 	}
 }
 
