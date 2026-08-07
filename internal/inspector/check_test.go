@@ -2,6 +2,7 @@ package inspector
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -185,6 +186,12 @@ func TestRunCheck_Timeout(t *testing.T) {
 	if !result.TimedOut {
 		t.Fatalf("expected TimedOut, got CheckResult %+v", result)
 	}
+	if result.ExitCode != -1 {
+		t.Fatalf("ExitCode = %d, want -1 (the documented convention for a signaled process) - a timed-out run must never persist an exit code that reads as a pass", result.ExitCode)
+	}
+	if result.Signal == "" {
+		t.Fatalf("expected Signal to be set on a timed-out result, got CheckResult %+v", result)
+	}
 	if elapsed > 5*time.Second {
 		t.Fatalf("RunCheck took %s to return after a 200ms timeout - the kill isn't taking effect promptly", elapsed)
 	}
@@ -238,6 +245,31 @@ func TestRunCheck_LeakedSubprocessDoesNotDiscardOutput(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "hello") {
 		t.Fatalf("Output = %q, want it to contain the primary command's output, not be discarded", result.Output)
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("simulated write failure")
+}
+
+func TestRunCheck_CallerWriterFailureIsNotSwallowed(t *testing.T) {
+	// A caller's own writer can fail for reasons that have nothing to
+	// do with the check command itself (stdout redirected to a full
+	// disk, a library caller whose writer errors) - cmd.Run returns
+	// that error directly, unwrapped, with ProcessState populated and a
+	// misleadingly clean exit code, which looks identical in shape to
+	// the WaitDelay/leaked-subprocess case RunCheck deliberately
+	// tolerates. The two must not be conflated: this one is a real
+	// infrastructure failure, and folding it into a false green would
+	// silently discard however much output never made it to the
+	// caller.
+	dir := t.TempDir()
+
+	_, err := RunCheck(dir, "echo hi", testTimeout, failingWriter{}, io.Discard)
+	if err == nil {
+		t.Fatal("expected an error when the caller's own writer fails, not a swallowed success")
 	}
 }
 

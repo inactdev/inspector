@@ -83,14 +83,36 @@ func RunCheck(repoRoot, command string, timeout time.Duration, stdout, stderr io
 	// since Wait closes the read end once the process exits.
 	err := cmd.Run()
 
+	result, resultErr := classifyResult(cmd, err, capture.String())
+	if resultErr != nil {
+		return CheckResult{}, resultErr
+	}
+
 	// The Go documentation for CommandContext recommends judging a
 	// timeout from ctx.Err() rather than from the shape of the returned
 	// error, since Cancel firing doesn't guarantee any particular error
-	// value once the process is reaped.
-	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+	// value once the process is reaped - including a race where the
+	// command happens to exit cleanly on its own right as the deadline
+	// fires, before SIGKILL lands. Applied last and unconditionally, so
+	// that race can't leave a timed-out run looking like ExitCode 0.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		result.TimedOut = true
+		result.ExitCode = -1
+		if result.Signal == "" {
+			result.Signal = "killed"
+		}
+	}
+	return result, nil
+}
 
+// classifyResult turns cmd.Run's return into a CheckResult, given the
+// output already captured. The returned error is reserved for genuine
+// infrastructure failures - sh could not be started, or a caller's own
+// writer failed - as opposed to the check command's own exit status,
+// which never produces a Go error here.
+func classifyResult(cmd *exec.Cmd, err error, output string) (CheckResult, error) {
 	if err == nil {
-		return CheckResult{ExitCode: 0, Output: capture.String(), TimedOut: timedOut}, nil
+		return CheckResult{ExitCode: 0, Output: output}, nil
 	}
 
 	var exitErr *exec.ExitError
@@ -98,32 +120,30 @@ func RunCheck(repoRoot, command string, timeout time.Duration, stdout, stderr io
 		return CheckResult{
 			ExitCode: exitErr.ExitCode(),
 			Signal:   classifySignal(exitErr.ProcessState),
-			TimedOut: timedOut,
-			Output:   capture.String(),
+			Output:   output,
 		}, nil
 	}
 
 	// cmd.Run can fail without an *exec.ExitError when the check command
-	// itself finished fine but left a subprocess holding stdout/stderr
-	// open past WaitDelay (e.g. `npm test && (npm run dev &)`) - Go's
-	// own wait4 on the primary process already completed by then, so
-	// cmd.ProcessState is still populated correctly even though the
-	// returned error wraps exec.ErrWaitDelay instead of being nil. Using
-	// it here, rather than falling through to the generic infra-error
-	// path below, keeps a check that actually finished from being
-	// reported as inspector failing to run it at all.
-	if cmd.ProcessState != nil {
+	// itself finished but left a subprocess holding stdout/stderr open
+	// past WaitDelay (e.g. `npm test && (npm run dev &)`) - Go's own
+	// wait4 on the primary process already completed by then, so
+	// cmd.ProcessState is populated correctly even though the returned
+	// error wraps exec.ErrWaitDelay instead of being nil or an
+	// *exec.ExitError. Scoped specifically to that error, not any
+	// non-ExitError: a caller's own writer failing (e.g. stdout
+	// redirected to a full disk) also reaches this branch with
+	// ProcessState populated and a misleadingly clean exit code, and
+	// that failure belongs in the generic error path below, not folded
+	// into a false green.
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil {
 		return CheckResult{
 			ExitCode: cmd.ProcessState.ExitCode(),
 			Signal:   classifySignal(cmd.ProcessState),
-			TimedOut: timedOut,
-			Output:   capture.String(),
+			Output:   output,
 		}, nil
 	}
 
-	if timedOut {
-		return CheckResult{ExitCode: -1, Signal: "killed", TimedOut: true, Output: capture.String()}, nil
-	}
 	return CheckResult{}, err
 }
 
