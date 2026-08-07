@@ -42,7 +42,8 @@ you believe is finished, checked by something that has no stake in believing you
 ## 2. Two halves
 
 **inspector** runs on your machine. It does all the work: runs the project's
-checks, repairs what it can, re-verifies, and records the result.
+checks, proves the claimed outcomes with its own end-to-end tests (section 4),
+repairs what it can, re-verifies, and records the result.
 
 **inspector-gate** runs on GitHub. It is small and dumb on purpose: does this
 exact commit carry a green inspector result, and were any protected files
@@ -92,7 +93,43 @@ The test: **if fixing it requires knowing what was asked for, it is a verdict. I
 it does not, inspector can do it.** A type error needs no knowledge of the
 request. A `--json` flag emitting the wrong shape does.
 
-## 4. How the gate knows
+## 4. Independent verification
+
+The builder must not write the exam. The Client's ruling, 2026-08-07:
+
+> "I want true separation between the thing building and the thing checking. If
+> fabrica creates the checks, then inspector running them won't make any
+> difference. Each fabrica PR should ship with a list of expected outcomes
+> (specs). Inspector should take those, interpret them however he sees fit, and
+> run end to end tests based on those specs to confirm the functionality that
+> fabrica claims is there actually exists."
+
+So verification has two layers, and only one of them counts as independent:
+
+- **The project's own checks still run and still gate.** A red suite is a red
+  result. But they are the builder's tests - passing them proves the work
+  matches the builder's idea of correct, nothing more.
+- **The claimed outcomes get inspector's own tests.** The work ships with a
+  list of expected outcomes: plain statements of observable behavior ("running
+  `x --json` prints the report as JSON"), not implementation ("added a JSON
+  serializer"). inspector interprets that list independently and writes
+  end-to-end tests from its interpretation - driving the real thing: the real
+  app headlessly, the real CLI, the real endpoint. It never reuses the
+  builder's tests as proof of the builder's claims.
+
+The verdict is per-outcome - confirmed, not confirmed, or could not be tested -
+so a red says which claimed capability is missing, not just "something failed".
+The commit status stays red unless every testable outcome is confirmed.
+
+For Fabrica, the outcome list rides with the delivery
+(github.com/inactdev/fabrica/issues/57), and an outcome Fabrica knows it did
+not deliver belongs in `gaps`, never quietly dropped from the list. For a repo
+with no Fabrica, a human hand-writes the same list.
+
+Interpretation needs the AI, so this lives entirely in the local half. Nothing
+about the cloud gate changes.
+
+## 5. How the gate knows
 
 inspector records its result as a **commit status** - a small record attached to
 one exact commit, posted through the API with a token. Not a comment, not a
@@ -117,9 +154,9 @@ tests could post its own pass. This is the same trust any CI system has, and for
 one person it is acceptable.
 
 **So the gate does not take inspector's word for the part that matters.** See
-section 5.
+section 6.
 
-## 5. Protected files
+## 6. Protected files
 
 Certain files decide whether work passes. Editing them is how a worker fakes a
 green result, and it is the most ordinary thing an agent under pressure does -
@@ -151,7 +188,7 @@ compares names. Adding a checkout would make it unsafe.
 the definition comes from the base branch: the list doing the judging is then one
 the pull request cannot rewrite.
 
-## 6. Separate from Fabrica
+## 7. Separate from Fabrica
 
 inspector is its own repository and its own roadmap. It is a tool, not the
 product - the same reason firstmate and no-mistakes are not inside Fabrica
@@ -170,14 +207,14 @@ either.
 inspector checking a new version of itself is fine; it is what every test suite
 does.
 
-## 7. Never merges
+## 8. Never merges
 
 Green means ready for a verdict, not merged. Merging is the Client's act.
 
 Auto-merge stays off deliberately. It fires the instant checks pass, which would
 let a green check close a task before the Client has ruled on it.
 
-## 8. Deprioritized
+## 9. Deprioritized
 
 **An API-driven fixer.** v1 uses the signed-in CLI, which costs throttling rather
 than money when it runs away. A direct API adapter bills a card per token, so it
@@ -187,7 +224,7 @@ gap.
 **Anything that makes protected-file changes smoother.** They should be rare. If
 they stop being rare, revisit.
 
-## 9. Open
+## 10. Open
 
 - Where the token lives so that workers on the same machine cannot read it.
 - What inspector does on a repo with no check command configured. Refusing is
