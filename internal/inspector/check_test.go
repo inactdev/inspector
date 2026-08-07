@@ -74,6 +74,30 @@ func TestRunCheck_CapturesInterleavedStreams(t *testing.T) {
 	}
 }
 
+func TestRunCheck_SameWriterForBothStreams(t *testing.T) {
+	// Passing one writer for both streams is the natural way to ask for
+	// combined output, and bytes.Buffer is not safe for concurrent use.
+	// Under -race this fails if the two copy goroutines are allowed to
+	// write to it unsynchronized.
+	dir := t.TempDir()
+	const lines = 200
+	var combined bytes.Buffer
+
+	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), &combined, &combined)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("check command itself failed: ExitCode = %d, output = %q", result.ExitCode, result.Output)
+	}
+	if got := strings.Count(combined.String(), "out"); got != lines {
+		t.Fatalf("streamed %d stdout lines, want %d", got, lines)
+	}
+	if got := strings.Count(combined.String(), "err"); got != lines {
+		t.Fatalf("streamed %d stderr lines, want %d", got, lines)
+	}
+}
+
 func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	// Regression guard for the classic exec.Cmd pitfall: os/exec's Wait
 	// closes the child's stdout/stderr pipes once the process exits, so

@@ -16,20 +16,24 @@ type CheckResult struct {
 }
 
 // RunCheck runs command with `sh -c` from repoRoot. Output is streamed to
-// stdout/stderr live and also captured for the local report. The returned
-// error is non-nil only for infrastructure failures (e.g. sh could not be
-// started) - a failing check is a normal CheckResult with a non-zero
+// stdout/stderr live and also captured for the local report. The two
+// streams are written from different goroutines, but every write - to the
+// capture buffer and to the caller's writers alike - is serialized on one
+// lock, so passing the same writer for both stdout and stderr is safe. The
+// returned error is non-nil only for infrastructure failures (e.g. sh could
+// not be started) - a failing check is a normal CheckResult with a non-zero
 // ExitCode, not a Go error.
 func RunCheck(repoRoot, command string, stdout, stderr io.Writer) (CheckResult, error) {
 	// os/exec copies stdout and stderr on separate goroutines unless the
-	// two writers are the identical value, so the shared capture buffer
-	// has to be safe for concurrent writes.
+	// two writers are the identical value, and tee never is, so the shared
+	// capture buffer and the caller's writers all have to be safe for
+	// concurrent writes.
 	capture := &syncWriter{}
 
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Dir = repoRoot
-	cmd.Stdout = io.MultiWriter(stdout, capture)
-	cmd.Stderr = io.MultiWriter(stderr, capture)
+	cmd.Stdout = capture.tee(stdout)
+	cmd.Stderr = capture.tee(stderr)
 
 	// cmd.Stdout/cmd.Stderr are io.Writer values, not *os.File, so
 	// os/exec owns the pipes itself: it copies through its own
@@ -55,14 +59,35 @@ type syncWriter struct {
 	buf bytes.Buffer
 }
 
-func (w *syncWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.Write(p)
-}
-
 func (w *syncWriter) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.buf.String()
+}
+
+// tee returns a writer that copies to dst and to w, holding w's lock for
+// both, so concurrent stdout and stderr copies never write to dst at the
+// same time.
+func (w *syncWriter) tee(dst io.Writer) io.Writer {
+	return &teeWriter{capture: w, dst: dst}
+}
+
+type teeWriter struct {
+	capture *syncWriter
+	dst     io.Writer
+}
+
+func (t *teeWriter) Write(p []byte) (int, error) {
+	t.capture.mu.Lock()
+	defer t.capture.mu.Unlock()
+
+	n, err := t.dst.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if n != len(p) {
+		return n, io.ErrShortWrite
+	}
+	t.capture.buf.Write(p)
+	return len(p), nil
 }
