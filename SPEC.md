@@ -42,8 +42,10 @@ you believe is finished, checked by something that has no stake in believing you
 ## 2. Two halves
 
 **inspector** runs on your machine. It does all the work: runs the project's
-checks, proves the claimed outcomes with its own end-to-end tests (section 4),
-repairs what it can, re-verifies, and records the result.
+checks, lints, proves the claimed outcomes with its own end-to-end tests
+(section 5), repairs what it can, re-verifies, pushes, opens the pull request,
+watches CI, fixes what CI complains about, and records the result against the
+commit it finally blessed.
 
 **inspector-gate** runs on GitHub. It is small and dumb on purpose: does this
 exact commit carry a green inspector result, and were any protected files
@@ -65,6 +67,12 @@ half-written work will confidently repair tests that are failing because the
 feature is not written yet. It would patch code mid-change into something nobody
 asked for.
 
+**Fabrica starts inspector, and nothing else does.** Not a watcher, not a push
+hook, not a supervisor telling a worker to run it - the builder hands the work
+over when it believes the work is finished, exactly as firstmate hands off to
+no-mistakes today. Anything else that could start it is a second trigger with a
+second set of assumptions about whether the work is actually done.
+
 Same shape as no-mistakes: it does not watch a branch. Something finishes and
 calls it.
 
@@ -75,9 +83,11 @@ calls it.
 
     2. fabrica hands the branch to inspector          <- the handoff IS the trigger
 
-    3. inspector runs the project's real checks
+    3. inspector runs the project's real checks and its own end-to-end tests
        repairs what is mechanically broken, re-verifies
-       records its result against the final commit
+       pushes, opens the pull request
+       watches CI and fixes what CI complains about
+       records its result against the commit it finally blessed
 
     4a. green -> the delivery reaches the Client -> verdict -> the Client merges
     4b. red after its budget -> its report travels with the delivery
@@ -91,9 +101,41 @@ assertion. A verdict handles work that is *wrong* - it built the wrong thing.
 
 The test: **if fixing it requires knowing what was asked for, it is a verdict. If
 it does not, inspector can do it.** A type error needs no knowledge of the
-request. A `--json` flag emitting the wrong shape does.
+request. A `--json` flag emitting the wrong shape does. Formatting and lint sit
+squarely on inspector's side: nothing about them needs to know what was asked
+for, and the project cannot be relied on to have run them - across many
+repositories some will, some will not, and inspector can guarantee it once.
 
-## 4. Independent verification
+## 4. Who owns what
+
+**inspector owns everything from "the code is written" to "it is green in CI."**
+Running the checks, linting, proving the claimed outcomes, repairing what is
+mechanically broken, pushing, opening the pull request, watching CI, fixing what
+CI complains about, and blessing the final commit.
+
+**Fabrica owns whether it is the right thing.** Before, by building it. After,
+through the Client's verdict and the fix loop back into the same warm worker.
+
+That is the honest form of the separation this document opens with:
+
+> **inspector never judges whether the right thing was built, and fabrica never
+> judges whether what it built works.**
+
+Neither one grades itself on the question that decides its own work.
+
+It also settles who reacts to a red build. Whoever repairs must be able to push,
+so having fabrica push and inspector repair locally would mean handing patches
+back and forth. Inspector pushes because inspector repairs. And when CI goes red
+for a reason inspector may not touch - because the feature is genuinely wrong
+rather than merely broken - that is an ordinary red: the report travels with the
+delivery and returns to fabrica through a verdict, the same path as any other.
+
+Running the project's tests in more than one place is not duplication. Fabrica
+runs them to know when it is done, the way anyone runs tests while writing code.
+inspector runs them as evidence, because the builder's word is not proof. Same
+command, different purpose.
+
+## 5. Independent verification
 
 The builder must not write the exam. The Client's ruling, 2026-08-07:
 
@@ -121,6 +163,12 @@ The verdict is per-outcome - confirmed, not confirmed, or could not be tested -
 so a red says which claimed capability is missing, not just "something failed".
 The commit status stays red unless every testable outcome is confirmed.
 
+**This list is the statement of intent, not a second thing beside it.**
+no-mistakes takes an intent - a sentence saying what the work set out to achieve
+rather than a description of the diff - handed to it by whoever starts the run,
+precisely so it never has to guess from a worker's transcript. The outcome list
+is that same statement, made testable. Do not build both.
+
 For Fabrica, the outcome list rides with the delivery
 (github.com/inactdev/fabrica/issues/57), and an outcome Fabrica knows it did
 not deliver belongs in `gaps`, never quietly dropped from the list. For a repo
@@ -129,7 +177,7 @@ with no Fabrica, a human hand-writes the same list.
 Interpretation needs the AI, so this lives entirely in the local half. Nothing
 about the cloud gate changes.
 
-## 5. How the gate knows
+## 6. How the gate knows
 
 inspector records its result as a **commit status** - a small record attached to
 one exact commit, posted through the API with a token. Not a comment, not a
@@ -154,9 +202,9 @@ tests could post its own pass. This is the same trust any CI system has, and for
 one person it is acceptable.
 
 **So the gate does not take inspector's word for the part that matters.** See
-section 6.
+section 7.
 
-## 6. Protected files
+## 7. Protected files
 
 Certain files decide whether work passes. Editing them is how a worker fakes a
 green result, and it is the most ordinary thing an agent under pressure does -
@@ -188,7 +236,7 @@ compares names. Adding a checkout would make it unsafe.
 the definition comes from the base branch: the list doing the judging is then one
 the pull request cannot rewrite.
 
-## 7. Separate from Fabrica
+## 8. Separate from Fabrica
 
 inspector is its own repository and its own roadmap. It is a tool, not the
 product - the same reason firstmate and no-mistakes are not inside Fabrica
@@ -207,14 +255,14 @@ either.
 inspector checking a new version of itself is fine; it is what every test suite
 does.
 
-## 8. Never merges
+## 9. Never merges
 
 Green means ready for a verdict, not merged. Merging is the Client's act.
 
 Auto-merge stays off deliberately. It fires the instant checks pass, which would
 let a green check close a task before the Client has ruled on it.
 
-## 9. Deprioritized
+## 10. Deprioritized
 
 **An API-driven fixer.** v1 uses the signed-in CLI, which costs throttling rather
 than money when it runs away. A direct API adapter bills a card per token, so it
@@ -224,7 +272,7 @@ gap.
 **Anything that makes protected-file changes smoother.** They should be rare. If
 they stop being rare, revisit.
 
-## 10. Settled
+## 11. Settled
 
 All three of the spec's original open questions were ruled on 2026-08-07.
 
@@ -233,7 +281,7 @@ workers on the same machine cannot read it. That was the wrong shape: a commit
 status only proves which *account* posted it, never which *program*, so hiding
 the token better never makes inspector's green distinguishable from a worker's.
 v1 accepts that - it posts with the Client's own token, and the honest limit in
-section 5 stands. The real fix is inspector holding its own identity as a GitHub
+section 6 stands. The real fix is inspector holding its own identity as a GitHub
 App, so the gate can require green *posted by inspector* rather than merely
 green; that is issue #9, deliberately deferred.
 
