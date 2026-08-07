@@ -48,38 +48,10 @@ func runCLI(t *testing.T, dir string, args ...string) (exitCode int, stdout, std
 	t.Helper()
 	var outBuf, errBuf bytes.Buffer
 
-	outFile, cleanupOut := captureToFile(t, &outBuf)
-	errFile, cleanupErr := captureToFile(t, &errBuf)
-
 	fullArgs := append([]string{"--repo", dir}, args...)
-	exitCode = run(fullArgs, outFile, errFile)
-
-	// Close the write ends and wait for the drain goroutines before
-	// reading the buffers, or the reads race the pipe.
-	cleanupOut()
-	cleanupErr()
+	exitCode = run(fullArgs, &outBuf, &errBuf)
 
 	return exitCode, outBuf.String(), errBuf.String()
-}
-
-// captureToFile pipes writes made to an *os.File into buf, since run()
-// takes concrete *os.File handles (matching os.Stdout/os.Stderr) rather
-// than io.Writer.
-func captureToFile(t *testing.T, buf *bytes.Buffer) (*os.File, func()) {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("creating pipe: %v", err)
-	}
-	done := make(chan struct{})
-	go func() {
-		buf.ReadFrom(r)
-		close(done)
-	}()
-	return w, func() {
-		w.Close()
-		<-done
-	}
 }
 
 func TestCLI_Green(t *testing.T) {
