@@ -134,12 +134,14 @@ func classifyResult(cmd *exec.Cmd, err error, output string) (CheckResult, error
 	//    this whole function is unreachable for it - Wait keeps
 	//    reflecting the real exit and err is nil or an *exec.ExitError.
 	//    But if it was still a zombie (exited, not yet reaped) when the
-	//    kill ran, kill(-pid, SIGKILL) silently no-ops - a zombie can't
-	//    act on any signal, so it "succeeds" - and Cancel returns nil
-	//    rather than os.ErrProcessDone. Per exec.Cmd.Cancel's own
-	//    documented contract, that makes Wait adopt the context's own
+	//    kill ran, kill(-pid, SIGKILL) succeeds on Linux - a zombie
+	//    can't act on any signal, so it silently no-ops - and Cancel
+	//    returns nil rather than os.ErrProcessDone. Per exec.Cmd.Cancel's
+	//    own documented contract, that makes Wait adopt the context's own
 	//    error instead of the process's, so the returned error is a
-	//    bare context.DeadlineExceeded.
+	//    bare context.DeadlineExceeded. (darwin reports EPERM for that
+	//    same window, which killProcessGroup maps to os.ErrProcessDone,
+	//    so there it takes the already-reaped path above.)
 	//
 	// Gated specifically to these two errors, not any non-ExitError: a
 	// caller's own writer failing (e.g. stdout redirected to a full
@@ -180,24 +182,25 @@ func classifySignal(ps *os.ProcessState) string {
 // killProcessGroup SIGKILLs the process group led by pid, used as
 // exec.Cmd.Cancel. If the group is already gone - the check process
 // exited on its own right as the deadline fired, before this ran - the
-// kill fails, and mapping that failure to os.ErrProcessDone rather than
-// returning it raw is exec.Cmd.Cancel's documented way of saying "no
+// kill can fail, and mapping that failure to os.ErrProcessDone rather
+// than returning it raw is exec.Cmd.Cancel's documented way of saying "no
 // error, nothing to do." Without that mapping, a raw error tells Wait
 // this race is a Cancel failure, and Wait can then return an opaque
 // error unrelated to anything actually wrong, for a timeout inspector
 // itself triggered - instead of continuing to reflect whatever the
 // process's own exit status turned out to be.
 //
-// Which errno shows up for "already gone" depends on the platform and
+// What the kill reports for "already gone" depends on the platform and
 // exactly how gone: a fully reaped group reliably gives ESRCH
 // everywhere. But a group whose leader has exited and not yet been
 // reaped - a zombie, still occupying the PID until something calls
-// wait on it - gives ESRCH on Linux too, while on darwin the identical
-// window gives EPERM instead (confirmed empirically: a Setpgid child
-// left unreaped for 300ms behaves differently per platform, nothing
-// else about the two runs differs). A raw EPERM is not on its own safe
-// to treat as "done," though - it's also what a genuine, unrelated
-// permission failure looks like, and the two are not safe to conflate.
+// wait on it - is killed successfully on Linux, while on darwin the
+// identical window gives EPERM instead (confirmed empirically: a
+// Setpgid child left unreaped for 300ms behaves differently per
+// platform, nothing else about the two runs differs). A raw EPERM is
+// not on its own safe to treat as "done," though - it's also what a
+// genuine, unrelated permission failure looks like, and the two are
+// not safe to conflate.
 // Narrowed by probing the leader's own PID (not the group) with the
 // null signal: we always own the process we spawned, so if we still
 // have permission to signal it individually - whether it answers
