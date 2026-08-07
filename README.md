@@ -25,7 +25,8 @@ It never merges. Green means ready for a verdict, not merged.
 
 ## Install
 
-Requires [Go](https://go.dev) 1.22+.
+Requires [Go](https://go.dev) - the minimum version is the `go` line in
+[go.mod](go.mod).
 
 ```
 go install github.com/inactdev/inspector/cmd/inspector@latest
@@ -76,9 +77,10 @@ on:
 inspector implemented the login flow
 ```
 
-Each run writes a small JSON report to `.inspector/` so a red result is
-actionable without re-running: the command that ran, its exit code, and its full
-output. These are notes for a human, never authority. On its first run inspector
+Each run writes a small JSON report to `.inspector/runs/`, and copies it to
+`.inspector/latest.json`, so a red result is actionable without re-running: the
+command that ran, its exit code, and its full output. These are notes for a
+human, never authority. On its first run inspector
 writes `.inspector/.gitignore` containing `*`, so reports stay out of git without
 you editing anything; an existing `.inspector/.gitignore` is left alone.
 

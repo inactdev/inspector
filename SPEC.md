@@ -3,7 +3,8 @@
 The shipping gate. It checks that finished work is actually finished, repairs what
 it can, and blocks the merge when it can't.
 
-Status: specification. Nothing built yet.
+This is the design of record, not a build report - see the Status section of
+[README.md](README.md) for what exists today.
 
 ---
 
