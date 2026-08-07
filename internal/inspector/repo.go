@@ -1,6 +1,7 @@
 package inspector
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -41,11 +42,17 @@ func WorkingTreeStatus(repoRoot string) (string, error) {
 	return out, nil
 }
 
+// runGit returns only git's stdout. Its stderr is kept separate and used
+// solely for the error message - folding it into the value would let a
+// warning git prints on an otherwise successful command be parsed as a
+// commit SHA or as a dirty working tree.
 func runGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.CombinedOutput()
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errBuf.String()))
 	}
 	return string(out), nil
 }

@@ -2,6 +2,7 @@ package inspector
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,10 +46,9 @@ func WriteReport(repoRoot string, r Report) (string, error) {
 	}
 	data = append(data, '\n')
 
-	name := fmt.Sprintf("%d-%s.json", r.FinishedAt.Unix(), shortSHA(r.Commit))
-	path := filepath.Join(runsDir, name)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", fmt.Errorf("writing %s: %w", path, err)
+	path, err := writeNewFile(runsDir, fmt.Sprintf("%d-%s", r.FinishedAt.Unix(), shortSHA(r.Commit)), data)
+	if err != nil {
+		return "", err
 	}
 
 	latest := filepath.Join(repoRoot, RunsDirName, LatestReportName)
@@ -57,6 +57,34 @@ func WriteReport(repoRoot string, r Report) (string, error) {
 	}
 
 	return path, nil
+}
+
+// writeNewFile writes data to dir/base.json without ever overwriting an
+// existing report - two runs against the same commit in the same second
+// would otherwise collide and silently lose one run's record.
+func writeNewFile(dir, base string, data []byte) (string, error) {
+	for n := 0; ; n++ {
+		name := base + ".json"
+		if n > 0 {
+			name = fmt.Sprintf("%s-%d.json", base, n)
+		}
+		path := filepath.Join(dir, name)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("writing %s: %w", path, err)
+		}
+		if _, err := f.Write(data); err != nil {
+			f.Close()
+			return "", fmt.Errorf("writing %s: %w", path, err)
+		}
+		if err := f.Close(); err != nil {
+			return "", fmt.Errorf("writing %s: %w", path, err)
+		}
+		return path, nil
+	}
 }
 
 func shortSHA(sha string) string {
