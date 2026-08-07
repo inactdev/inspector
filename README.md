@@ -57,6 +57,19 @@ project's own check command - inspector never guesses at one:
 }
 ```
 
+The check command has 15 minutes to finish before inspector kills it -
+including anything it started, like a compound command's children - and
+refuses rather than hanging forever, since SPEC.md has Fabrica invoking
+inspector unattended. If this project's checks legitimately need longer, set
+your own:
+
+```json
+{
+  "check": "npm test && npm run lint",
+  "timeoutSeconds": 1800
+}
+```
+
 Then, with your work committed (inspector refuses to run against an uncommitted
 working tree - it can only be honest about a commit that actually matches what's
 on disk):
@@ -74,10 +87,11 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
 - `0` green
 - `1` red
 - `2` refused - inspector tried to reach a verdict and couldn't: no check
-  command configured, a dirty working tree, a check command killed by a signal
-  before it could finish on its own (the OOM killer, an external kill - it
-  never judged the code, so its exit status is not a verdict either way), or
-  an infrastructure failure. Never treat `2` as red.
+  command configured, a dirty working tree, a check command that ran past its
+  timeout or was killed by a signal before it could finish on its own (the OOM
+  killer, an external kill, inspector's own deadline - it never judged the
+  code, so its exit status is not a verdict either way), or an infrastructure
+  failure. Never treat `2` as red.
 - `64` usage - not a verdict attempt at all: `--help`, an unrecognized flag, or
   bad usage. Distinct from `0`/`1`/`2` so a caller can never mistake a help
   request for a result; `64` follows the BSD

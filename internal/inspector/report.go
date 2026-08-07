@@ -30,6 +30,7 @@ type Report struct {
 	DurationMS   int64     `json:"durationMs"`
 	ExitCode     int       `json:"exitCode"`
 	Signal       string    `json:"signal,omitempty"`
+	TimedOut     bool      `json:"timedOut,omitempty"`
 	Output       string    `json:"output"`
 }
 

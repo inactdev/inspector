@@ -4,10 +4,16 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// testTimeout is generous enough that no test below should ever hit it -
+// tests of the timeout behavior itself use their own short value.
+const testTimeout = 10 * time.Second
 
 func truncate(s string, max int) string {
 	if len(s) <= max {
@@ -20,7 +26,7 @@ func TestRunCheck_Success(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "echo hi", &stdout, &stderr)
+	result, err := RunCheck(dir, "echo hi", testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -39,7 +45,7 @@ func TestRunCheck_Failure(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "echo boom >&2; exit 7", &stdout, &stderr)
+	result, err := RunCheck(dir, "echo boom >&2; exit 7", testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -59,7 +65,7 @@ func TestRunCheck_CapturesInterleavedStreams(t *testing.T) {
 	dir := t.TempDir()
 	const lines = 200
 
-	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), io.Discard, io.Discard)
+	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +89,7 @@ func TestRunCheck_SameWriterForBothStreams(t *testing.T) {
 	const lines = 200
 	var combined bytes.Buffer
 
-	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), &combined, &combined)
+	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testTimeout, &combined, &combined)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,7 +117,7 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	dir := t.TempDir()
 	const size = 500_000
 
-	result, err := RunCheck(dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), io.Discard, io.Discard)
+	result, err := RunCheck(dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -126,7 +132,7 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 func TestRunCheck_SignalKilled(t *testing.T) {
 	dir := t.TempDir()
 
-	result, err := RunCheck(dir, "kill -9 $$", io.Discard, io.Discard)
+	result, err := RunCheck(dir, "kill -9 $$", testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,11 +144,53 @@ func TestRunCheck_SignalKilled(t *testing.T) {
 	}
 }
 
+func TestRunCheck_Timeout(t *testing.T) {
+	dir := t.TempDir()
+
+	start := time.Now()
+	result, err := RunCheck(dir, "sleep 30", 200*time.Millisecond, io.Discard, io.Discard)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.TimedOut {
+		t.Fatalf("expected TimedOut, got CheckResult %+v", result)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("RunCheck took %s to return after a 200ms timeout - the kill isn't taking effect promptly", elapsed)
+	}
+}
+
+func TestRunCheck_TimeoutKillsChildProcesses(t *testing.T) {
+	// The direct child of RunCheck is always `sh`; a compound command
+	// (README's own example is `npm test && npm run lint`) forks its
+	// own children under that shell. Killing sh alone would leave a
+	// hung child running past the timeout it was supposed to enforce.
+	// Proves it by having a background grandchild announce that it
+	// woke up naturally, into a temp file, well after the timeout - if
+	// the process-group kill works, that file stays empty.
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "survived")
+
+	_, err := RunCheck(dir, fmt.Sprintf("( sleep 1 && echo alive > %s ) & wait", marker), 100*time.Millisecond, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Give a leaked background process the time it would have needed
+	// to write the marker, then confirm it never did.
+	time.Sleep(1200 * time.Millisecond)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("background child survived the timeout kill and wrote %s", marker)
+	}
+}
+
 func TestRunCheck_RunsFromRepoRoot(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "pwd -P", &stdout, &stderr)
+	result, err := RunCheck(dir, "pwd -P", testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

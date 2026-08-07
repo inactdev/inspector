@@ -50,6 +50,46 @@ func TestRun_Red(t *testing.T) {
 	}
 }
 
+func TestRun_TimedOutCheckIsRefusedNotRed(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{
+		ConfigFileName: `{"check": "sleep 30", "timeoutSeconds": 1}`,
+	})
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused (a timed-out check never reached a verdict) - message: %s", result.Outcome, result.Message)
+	}
+	if !strings.Contains(result.Message, "timeout") {
+		t.Fatalf("message should mention the timeout, got: %s", result.Message)
+	}
+	if result.ReportPath == "" {
+		t.Fatal("expected a report path - the check did run and its output is worth keeping")
+	}
+	data := readFile(t, result.ReportPath)
+	if !strings.Contains(data, `"timedOut": true`) {
+		t.Fatalf("report should record timedOut, got: %s", data)
+	}
+}
+
+func TestRun_DefaultTimeoutAppliesWhenUnconfigured(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{
+		ConfigFileName: `{"check": "true"}`,
+	})
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Green {
+		t.Fatalf("Outcome = %v, want Green - the default timeout must not fire on a fast check", result.Outcome)
+	}
+}
+
 func TestRun_SignalKilledCheckIsRefusedNotRed(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{
 		ConfigFileName: `{"check": "kill -9 $$"}`,

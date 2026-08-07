@@ -19,12 +19,14 @@ const (
 	// Red means the project's check command failed.
 	Red Outcome = "red"
 	// Refused means inspector never reached a verdict on the code - no
-	// check command configured, a dirty working tree, or a check
-	// command killed by a signal before it could finish on its own.
-	// That last case did run, unlike the others: the system killed it
-	// (the OOM killer, an external kill) before it judged the code at
-	// all, so its exit status is not a verdict on the code either way.
-	// A refusal is loud on purpose: it must never look like a pass.
+	// check command configured, a dirty working tree, a check command
+	// killed by a signal before it could finish on its own, or a check
+	// command that ran past its timeout and was killed for it. Those
+	// last two did run, unlike the others: something (the OOM killer,
+	// an external kill, inspector's own deadline) killed it before it
+	// judged the code at all, so its exit status is not a verdict on
+	// the code either way. A refusal is loud on purpose: it must never
+	// look like a pass.
 	Refused Outcome = "refused"
 )
 
@@ -106,8 +108,9 @@ func Run(opts Options) (Result, error) {
 		return Result{Outcome: Refused, Commit: commit, Message: err.Error()}, nil
 	}
 
+	timeout := cfg.Timeout()
 	started := time.Now()
-	checkResult, err := RunCheck(repoRoot, cfg.Check, opts.Stdout, opts.Stderr)
+	checkResult, err := RunCheck(repoRoot, cfg.Check, timeout, opts.Stdout, opts.Stderr)
 	if err != nil {
 		return Result{}, fmt.Errorf("running check command: %w", err)
 	}
@@ -115,7 +118,7 @@ func Run(opts Options) (Result, error) {
 
 	outcome := Green
 	switch {
-	case checkResult.Signal != "":
+	case checkResult.TimedOut, checkResult.Signal != "":
 		outcome = Refused
 	case checkResult.ExitCode != 0:
 		outcome = Red
@@ -132,6 +135,7 @@ func Run(opts Options) (Result, error) {
 		DurationMS:   finished.Sub(started).Milliseconds(),
 		ExitCode:     checkResult.ExitCode,
 		Signal:       checkResult.Signal,
+		TimedOut:     checkResult.TimedOut,
 		Output:       checkResult.Output,
 	}
 
@@ -139,6 +143,16 @@ func Run(opts Options) (Result, error) {
 	reportPath, writeErr := WriteReport(repoRoot, report)
 
 	switch {
+	case checkResult.TimedOut:
+		result.Message = fmt.Sprintf(
+			"the check command did not finish within its %s timeout and was killed, along with anything it started - inspector never reached a verdict, so this cannot be a verdict. Set timeoutSeconds in %s if this project's checks legitimately need longer.",
+			timeout, ConfigFileName,
+		)
+		if writeErr != nil {
+			result.Message += fmt.Sprintf(" Its local report also failed to save: %v", writeErr)
+		} else {
+			result.ReportPath = reportPath
+		}
 	case checkResult.Signal != "":
 		result.Message = fmt.Sprintf(
 			"the check command's process ended abnormally (%s) before it finished - inspector never judged the code, so this cannot be a verdict.",
