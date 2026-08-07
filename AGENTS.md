@@ -3,7 +3,7 @@
 This file is the project's committed home for project-intrinsic agent knowledge: build, test, release, architecture, and sharp-edge notes that should travel with the code.
 
 - Read SPEC.md before touching anything - it is the design of record and short.
-- This repo's own check command is `script/check` (gofmt, vet, build, test), wired up via `.inspector.json` - inspector dogfoods itself.
+- This repo's own check command is `script/check` (gofmt, vet, build, test), wired up via `.inspector.json` - inspector dogfoods itself. Tests run under `-race`, which needs a C compiler locally (CI's ubuntu-latest already has one) and costs about a second of suite time; keep it, the code captures subprocess output concurrently.
 - Two similarly-named paths, different jobs: `.inspector.json` (tracked, project config - the check command, and later the protected-file list) vs `.inspector/` (gitignored, one JSON report per local run, notes only, never authority).
 - `internal/inspector.Run` refuses on a dirty working tree, because a result is only honest when it's bound to a commit that actually matches what's on disk. It excludes `.inspector/` itself from that dirty check via a git pathspec (`repo.go`, `WorkingTreeStatus`) - without that exclusion, a repo that never gitignores `.inspector/` would go permanently dirty, and therefore permanently refused, after its first run. Don't drop that exclusion.
 - Exit codes are a deliberate three-way split, not pass/fail: `0` green, `1` red, `2` refused (no config, dirty tree, or a `--commit` mismatch). `2` means no verdict was reached at all - callers (the eventual gate, issue #3/#4) must not treat it as red.
