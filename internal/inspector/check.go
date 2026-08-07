@@ -31,6 +31,13 @@ func RunCheck(repoRoot, command string, stdout, stderr io.Writer) (CheckResult, 
 	cmd.Stdout = io.MultiWriter(stdout, capture)
 	cmd.Stderr = io.MultiWriter(stderr, capture)
 
+	// cmd.Stdout/cmd.Stderr are io.Writer values, not *os.File, so
+	// os/exec owns the pipes itself: it copies through its own
+	// goroutines and cmd.Run's Wait blocks until those goroutines drain
+	// to EOF before returning. Using cmd.StdoutPipe/StderrPipe instead
+	// would hand that draining to the caller, and calling Wait before
+	// the caller has read to EOF is the classic way to truncate output,
+	// since Wait closes the read end once the process exits.
 	err := cmd.Run()
 	if err == nil {
 		return CheckResult{ExitCode: 0, Output: capture.String()}, nil

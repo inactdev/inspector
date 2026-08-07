@@ -64,6 +64,28 @@ func TestRunCheck_CapturesInterleavedStreams(t *testing.T) {
 	}
 }
 
+func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
+	// Regression guard for the classic exec.Cmd pitfall: os/exec's Wait
+	// closes the child's stdout/stderr pipes once the process exits, so
+	// code that reads those pipes manually and calls Wait too early
+	// truncates output. RunCheck avoids the pitfall by construction -
+	// cmd.Stdout/cmd.Stderr are plain io.Writer values, not *os.File, so
+	// os/exec runs its own copy goroutines and Wait (called inside
+	// cmd.Run) blocks until they drain to EOF before returning. This
+	// writes far more than one pipe buffer right up to process exit, so
+	// a premature Wait would show up as a short read.
+	dir := t.TempDir()
+	const size = 500_000
+
+	result, err := RunCheck(dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Output) != size {
+		t.Fatalf("captured %d bytes, want %d - output was truncated", len(result.Output), size)
+	}
+}
+
 func TestRunCheck_RunsFromRepoRoot(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
