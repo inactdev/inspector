@@ -224,11 +224,29 @@ gap.
 **Anything that makes protected-file changes smoother.** They should be rare. If
 they stop being rare, revisit.
 
-## 10. Open
+## 10. Settled
 
-- Where the token lives so that workers on the same machine cannot read it.
-- What inspector does on a repo with no check command configured. Refusing is
-  probably right - running unprotected looks identical to running protected until
-  it matters.
-- Whether the local half needs its own record of runs, or whether the commit
-  status is the record.
+All three of the spec's original open questions were ruled on 2026-08-07.
+
+**Identity, not token storage.** The question was where to keep the token so
+workers on the same machine cannot read it. That was the wrong shape: a commit
+status only proves which *account* posted it, never which *program*, so hiding
+the token better never makes inspector's green distinguishable from a worker's.
+v1 accepts that - it posts with the Client's own token, and the honest limit in
+section 5 stands. The real fix is inspector holding its own identity as a GitHub
+App, so the gate can require green *posted by inspector* rather than merely
+green; that is issue #9, deliberately deferred.
+
+**A repo with no check command: refuse.** Running unprotected looks identical to
+running protected until it matters, so the gap must be loud rather than silent.
+
+**inspector keeps a small local report per run.** The commit status is tiny - it
+carries pass or fail and little else, which is enough to gate a merge and not
+enough to act on a failure. The report holds the useful part: which claimed
+outcome did not hold, what the fixer tried, what the failing output said. When
+Fabrica is in the loop that travels with the delivery, but at the day job there
+is no delivery to carry it, and a bare red mark would mean "something failed,
+re-run it and watch".
+
+The report is notes, never authority. The status on the commit remains the only
+thing the gate reads and the only thing that decides a merge.
