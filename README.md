@@ -103,7 +103,8 @@ inspector implemented the login flow
 
 Each run writes a small JSON report to `.inspector/runs/`, and copies it to
 `.inspector/latest.json`, so a red result is actionable without re-running: the
-command that ran, its exit code, and its full output. These are notes for a
+command that ran, its exit code (or the signal that killed it), and its full
+output. These are notes for a
 human, never authority. On its first run inspector
 writes `.inspector/.gitignore` containing `*`, so reports stay out of git without
 you editing anything; an existing `.inspector/.gitignore` is left alone.
