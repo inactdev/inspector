@@ -18,11 +18,15 @@ const (
 	Green Outcome = "green"
 	// Red means the project's check command failed.
 	Red Outcome = "red"
-	// Refused means inspector did not run the check at all - no check
-	// command configured, a dirty working tree, or a --commit that
+	// Refused means inspector never reached a verdict on the code - no
+	// check command configured, a dirty working tree, a --commit that
 	// doesn't resolve to exactly one commit (nonexistent, ambiguous, or
-	// resolves but doesn't match HEAD). A refusal is loud on purpose: it
-	// must never look like a pass.
+	// resolves but doesn't match HEAD), or a check command killed by a
+	// signal before it could finish on its own. That last case did run,
+	// unlike the others: the system killed it (the OOM killer, an
+	// external kill) before it judged the code at all, so its exit
+	// status is not a verdict on the code either way. A refusal is loud
+	// on purpose: it must never look like a pass.
 	Refused Outcome = "refused"
 )
 
@@ -47,10 +51,21 @@ type Options struct {
 
 // Result is the outcome of a Run.
 type Result struct {
-	Outcome    Outcome
-	Commit     string
-	Message    string // human-readable explanation; always set for Refused
-	ReportPath string // set for Green and Red
+	Outcome Outcome
+	Commit  string
+	Message string // human-readable explanation; always set for Refused
+	// ReportPath is set whenever the check actually ran and its report
+	// saved successfully - for Green, Red, and a signal-killed Refused,
+	// but not for a Refused that never ran a check at all, and not when
+	// Warning is set (the save itself is what failed).
+	ReportPath string
+	// Warning is set when the check reached a real verdict (Green or
+	// Red) but something worth loudly flagging happened alongside it -
+	// currently, only that the local report could not be saved. The
+	// commit status, not this local report, is the authority (SPEC.md),
+	// so a save failure must never downgrade or discard the verdict
+	// itself.
+	Warning string
 }
 
 // Run resolves the repo and its HEAD commit, loads the project's check
@@ -125,7 +140,10 @@ func Run(opts Options) (Result, error) {
 	finished := time.Now()
 
 	outcome := Green
-	if checkResult.ExitCode != 0 {
+	switch {
+	case checkResult.Signal != "":
+		outcome = Refused
+	case checkResult.ExitCode != 0:
 		outcome = Red
 	}
 
@@ -139,17 +157,39 @@ func Run(opts Options) (Result, error) {
 		FinishedAt:   finished,
 		DurationMS:   finished.Sub(started).Milliseconds(),
 		ExitCode:     checkResult.ExitCode,
+		Signal:       checkResult.Signal,
 		Output:       checkResult.Output,
 	}
 
-	reportPath, err := WriteReport(repoRoot, report)
-	if err != nil {
-		return Result{}, err
+	result := Result{Outcome: outcome, Commit: commit}
+	reportPath, writeErr := WriteReport(repoRoot, report)
+
+	switch {
+	case checkResult.Signal != "":
+		result.Message = fmt.Sprintf(
+			"the check command's process ended abnormally (%s) before it finished - inspector never judged the code, so this cannot be a verdict.",
+			checkResult.Signal,
+		)
+		if writeErr != nil {
+			result.Message += fmt.Sprintf(" Its local report also failed to save: %v", writeErr)
+		} else {
+			result.ReportPath = reportPath
+		}
+	case writeErr != nil:
+		// outcome is Green or Red here - a real verdict already reached.
+		// Discarding it because its notes failed to save would lose the
+		// answer over losing the footnote; the commit status, not this
+		// file, is authoritative (SPEC.md), so the verdict stands
+		// regardless and the failure is surfaced as a loud warning
+		// instead.
+		result.Warning = fmt.Sprintf(
+			"the %s verdict above is real, but its local report could not be saved: %v\n"+
+				"the report is notes only, never authority - the verdict stands regardless.",
+			outcome, writeErr,
+		)
+	default:
+		result.ReportPath = reportPath
 	}
 
-	return Result{
-		Outcome:    outcome,
-		Commit:     commit,
-		ReportPath: reportPath,
-	}, nil
+	return result, nil
 }

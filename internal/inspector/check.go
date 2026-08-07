@@ -6,13 +6,21 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"syscall"
 )
 
 // CheckResult is the outcome of actually running the project's check
 // command.
 type CheckResult struct {
 	ExitCode int
-	Output   string
+	// Signal is set when the check command was terminated by a signal
+	// (e.g. the OOM killer, an external kill) rather than exiting on
+	// its own. ExitCode is -1 in that case - Go's os/exec convention,
+	// not a real process exit status - so callers must check Signal
+	// rather than treating a -1 or otherwise nonzero ExitCode as the
+	// process's own verdict on the code.
+	Signal string
+	Output string
 }
 
 // RunCheck runs command with `sh -c` from repoRoot. Output is streamed to
@@ -49,7 +57,11 @@ func RunCheck(repoRoot, command string, stdout, stderr io.Writer) (CheckResult, 
 
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return CheckResult{ExitCode: exitErr.ExitCode(), Output: capture.String()}, nil
+		result := CheckResult{ExitCode: exitErr.ExitCode(), Output: capture.String()}
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			result.Signal = status.Signal().String()
+		}
+		return result, nil
 	}
 	return CheckResult{}, err
 }

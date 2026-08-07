@@ -114,6 +114,39 @@ func TestCLI_UnknownFlagExitsWithUsageCode(t *testing.T) {
 	}
 }
 
+func TestCLI_SignalKilledCheckExitsRefused(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "kill -9 $$"}`})
+
+	code, _, stderr := runCLI(t, dir)
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d (never a verdict) - stderr: %s", code, exitRefused, stderr)
+	}
+	if !strings.Contains(stderr, "killed") {
+		t.Fatalf("stderr = %q, want it to describe the signal", stderr)
+	}
+}
+
+func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
+	if err := os.WriteFile(filepath.Join(dir, ".inspector"), []byte("occupied"), 0o644); err != nil {
+		t.Fatalf("occupying .inspector: %v", err)
+	}
+
+	code, stdout, stderr := runCLI(t, dir)
+	if code != exitGreen {
+		t.Fatalf("exit code = %d, want %d - a reached verdict must survive a report-write failure", code, exitGreen)
+	}
+	if !strings.Contains(stdout, "green") {
+		t.Fatalf("stdout = %q, want it to still report green", stdout)
+	}
+	if !strings.Contains(stderr, warningBar) {
+		t.Fatalf("stderr = %q, want the loud warning bar", stderr)
+	}
+	if !strings.Contains(stderr, ".inspector") {
+		t.Fatalf("stderr = %q, want the warning to say where it failed", stderr)
+	}
+}
+
 func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 

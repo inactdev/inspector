@@ -63,15 +63,33 @@ flags:
 		return exitRefused
 	}
 
+	if result.Warning != "" {
+		fmt.Fprintf(stderr, "\n%s\n%s\n%s\n\n", warningBar, result.Warning, warningBar)
+	}
+
 	switch result.Outcome {
 	case inspector.Green:
-		fmt.Fprintf(stdout, "\ngreen - %s (report: %s)\n", result.Commit, result.ReportPath)
+		fmt.Fprintf(stdout, "\ngreen - %s%s\n", result.Commit, reportSuffix(result.ReportPath))
 		return exitGreen
 	case inspector.Red:
-		fmt.Fprintf(stdout, "\nred - %s (report: %s)\n", result.Commit, result.ReportPath)
+		fmt.Fprintf(stdout, "\nred - %s%s\n", result.Commit, reportSuffix(result.ReportPath))
 		return exitRed
 	default: // inspector.Refused
-		fmt.Fprintf(stderr, "refused: %s\n", result.Message)
+		fmt.Fprintf(stderr, "refused: %s%s\n", result.Message, reportSuffix(result.ReportPath))
 		return exitRefused
 	}
+}
+
+// warningBar makes a Warning impossible to miss among a check command's
+// own output, which inspector streams live right above it.
+const warningBar = "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+
+// reportSuffix formats the report-path annotation, or nothing when
+// there is no report - a real possibility now that a save failure
+// (Warning) or a refusal that never ran a check both leave it empty.
+func reportSuffix(path string) string {
+	if path == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (report: %s)", path)
 }

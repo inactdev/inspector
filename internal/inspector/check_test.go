@@ -123,6 +123,21 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	}
 }
 
+func TestRunCheck_SignalKilled(t *testing.T) {
+	dir := t.TempDir()
+
+	result, err := RunCheck(dir, "kill -9 $$", io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Signal == "" {
+		t.Fatalf("expected Signal to be set, got CheckResult %+v", result)
+	}
+	if !strings.Contains(result.Signal, "killed") {
+		t.Fatalf("Signal = %q, want it to describe SIGKILL", result.Signal)
+	}
+}
+
 func TestRunCheck_RunsFromRepoRoot(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer

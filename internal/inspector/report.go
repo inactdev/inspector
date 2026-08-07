@@ -29,6 +29,7 @@ type Report struct {
 	FinishedAt   time.Time `json:"finishedAt"`
 	DurationMS   int64     `json:"durationMs"`
 	ExitCode     int       `json:"exitCode"`
+	Signal       string    `json:"signal,omitempty"`
 	Output       string    `json:"output"`
 }
 
