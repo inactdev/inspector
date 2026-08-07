@@ -205,19 +205,34 @@ func classifySignal(ps *os.ProcessState) string {
 // the group-level EPERM is this platform quirk, not a real permission
 // problem, and only then is it safe to map away.
 func killProcessGroup(pid int) error {
-	err := syscall.Kill(-pid, syscall.SIGKILL)
+	return classifyKillError(
+		syscall.Kill(-pid, syscall.SIGKILL),
+		func() error { return syscall.Kill(pid, syscall.Signal(0)) },
+	)
+}
+
+// classifyKillError decides what killProcessGroup's group kill result
+// means, given a way to probe the group leader's own PID with the null
+// signal. Split out from the syscalls themselves because which errno
+// the kill-a-dead-group window produces is platform-specific - Linux
+// returns success there and darwin returns EPERM - so the branch that
+// exists for darwin is unreachable, and therefore unguarded, on a
+// Linux-only CI. This form is pure, so its whole table of cases is
+// testable everywhere. probeLeader is consulted only for EPERM, where
+// the answer actually changes the outcome.
+func classifyKillError(killErr error, probeLeader func() error) error {
 	switch {
-	case err == nil:
+	case killErr == nil:
 		return nil
-	case errors.Is(err, syscall.ESRCH):
+	case errors.Is(killErr, syscall.ESRCH):
 		return os.ErrProcessDone
-	case errors.Is(err, syscall.EPERM):
-		if probeErr := syscall.Kill(pid, syscall.Signal(0)); probeErr == nil || errors.Is(probeErr, syscall.ESRCH) {
+	case errors.Is(killErr, syscall.EPERM):
+		if probeErr := probeLeader(); probeErr == nil || errors.Is(probeErr, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
-		return err
+		return killErr
 	default:
-		return err
+		return killErr
 	}
 }
 

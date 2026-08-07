@@ -168,16 +168,36 @@ func TestKillProcessGroup_ZombieUnreaped(t *testing.T) {
 	// zombie-group quirk and not a genuine permission failure). Both
 	// outcomes are correct and portable; a raw, unmapped EPERM (or any
 	// other error) is not.
+	//
+	// The zombie window is entered without waiting on a clock: the child
+	// gets the write end of a pipe as its stdout and the parent closes
+	// its own copy, so the read below returns EOF at exactly the moment
+	// the child exits and closes the last write end - and nothing has
+	// called wait on it yet, which is precisely the state under test. A
+	// sleep here would instead race the child's exit, and losing that
+	// race SIGKILLs a live process and fails the test for a reason that
+	// has nothing to do with the behavior being pinned.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("creating pipe: %v", err)
+	}
+	defer r.Close()
+
 	cmd := exec.Command("sh", "-c", "exit 0")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = w
 	if err := cmd.Start(); err != nil {
+		w.Close()
 		t.Fatalf("starting process: %v", err)
 	}
 	pid := cmd.Process.Pid
 
-	// Give it time to exit without reaping it, reproducing the exact
-	// unreaped-zombie window the real timeout path can hit.
-	time.Sleep(300 * time.Millisecond)
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing the parent's copy of the pipe: %v", err)
+	}
+	if _, err := io.ReadAll(r); err != nil {
+		t.Fatalf("waiting for the child to exit: %v", err)
+	}
 
 	if err := killProcessGroup(pid); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("killProcessGroup(zombie, unreaped) = %v, want nil or os.ErrProcessDone", err)
@@ -185,6 +205,76 @@ func TestKillProcessGroup_ZombieUnreaped(t *testing.T) {
 
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("unexpected error reaping the process: %v", err)
+	}
+}
+
+func TestClassifyKillError(t *testing.T) {
+	// The live test above can only reach the EPERM case on darwin -
+	// Linux's group kill against the same unreaped zombie succeeds - so
+	// on a Linux-only CI that test passes whether or not the EPERM
+	// mapping exists at all. This one runs the classification directly
+	// with each errno supplied, so every branch is guarded on every
+	// platform.
+	unrelated := errors.New("some unrelated kill failure")
+	tests := []struct {
+		name       string
+		killErr    error
+		probeErr   error
+		want       error
+		wantProbes int
+	}{
+		{
+			name: "group kill succeeded",
+			want: nil,
+		},
+		{
+			name:    "group fully gone (ESRCH, every platform)",
+			killErr: syscall.ESRCH,
+			want:    os.ErrProcessDone,
+		},
+		{
+			name:       "darwin's zombie group, leader still answers",
+			killErr:    syscall.EPERM,
+			probeErr:   nil,
+			want:       os.ErrProcessDone,
+			wantProbes: 1,
+		},
+		{
+			name:       "darwin's zombie group, leader reaped before the probe",
+			killErr:    syscall.EPERM,
+			probeErr:   syscall.ESRCH,
+			want:       os.ErrProcessDone,
+			wantProbes: 1,
+		},
+		{
+			name:       "genuine permission failure is not mapped away",
+			killErr:    syscall.EPERM,
+			probeErr:   syscall.EPERM,
+			want:       syscall.EPERM,
+			wantProbes: 1,
+		},
+		{
+			name:     "unrelated failure is returned unmodified",
+			killErr:  unrelated,
+			probeErr: syscall.ESRCH,
+			want:     unrelated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			probes := 0
+			got := classifyKillError(tt.killErr, func() error {
+				probes++
+				return tt.probeErr
+			})
+			if !errors.Is(got, tt.want) {
+				t.Fatalf("classifyKillError(%v, probe -> %v) = %v, want %v", tt.killErr, tt.probeErr, got, tt.want)
+			}
+			if probes != tt.wantProbes {
+				t.Fatalf("probed the leader %d times, want %d - the probe exists only to narrow EPERM, and costs a syscall everywhere else", probes, tt.wantProbes)
+			}
+		})
 	}
 }
 
