@@ -42,10 +42,10 @@ you believe is finished, checked by something that has no stake in believing you
 ## 2. Two halves
 
 **inspector** runs on your machine. It does all the work: runs the project's
-checks, lints, proves the claimed outcomes with its own end-to-end tests
-(section 5), repairs what it can, re-verifies, pushes, opens the pull request,
-watches CI, fixes what CI complains about, and records the result against the
-commit it finally blessed.
+checks, lints, reviews the change, checks the documentation against it, proves
+the claimed outcomes with its own end-to-end tests (section 6), repairs what it
+can, re-verifies, pushes, opens the pull request, watches CI, fixes what CI
+complains about, and records the result against the commit it finally blessed.
 
 **inspector-gate** runs on GitHub. It is small and dumb on purpose: does this
 exact commit carry a green inspector result, and were any protected files
@@ -83,15 +83,19 @@ calls it.
 
     2. fabrica hands the branch to inspector          <- the handoff IS the trigger
 
-    3. inspector runs the project's real checks and its own end-to-end tests
-       repairs what is mechanically broken, re-verifies
+    3. inspector runs everything - checks, lint, review, docs, outcome tests
+       fixes what it may fix, without asking
        pushes, opens the pull request
        watches CI and fixes what CI complains about
        records its result against the commit it finally blessed
 
     4a. green -> the delivery reaches the Client -> verdict -> the Client merges
-    4b. red after its budget -> its report travels with the delivery
+    4b. red -> every finding it may not touch travels with the delivery
+        -> the Client rules on all of them at once
         -> verdict fix -> same warm worker, same branch -> back to step 2
+
+Section 5 owns that loop: inspector never stops to ask, and the verdict is the
+only decision point.
 
 For a repo with no Fabrica, step 1 is you, and step 2 is you running the command.
 
@@ -109,10 +113,10 @@ repositories some will, some will not, and inspector can guarantee it once.
 ## 4. Who owns what
 
 **inspector owns everything from "the code is written" to "it is green in CI."**
-Running the checks, linting, checking the documentation against the change,
-proving the claimed outcomes, repairing what is mechanically broken, pushing,
-opening the pull request, watching CI, fixing what CI complains about, and
-blessing the final commit.
+Running the checks, linting, reviewing the change, checking the documentation
+against it, proving the claimed outcomes, repairing what is mechanically broken,
+pushing, opening the pull request, watching CI, fixing what CI complains about,
+and blessing the final commit.
 
 **Fabrica owns whether it is the right thing.** Before, by building it. After,
 through the Client's verdict and the fix loop back into the same warm worker.
@@ -152,7 +156,7 @@ Two limits keep it from wandering:
   the project never had is not - deciding a project needs a guide it has never
   had is a judgment about the product, and that belongs to the Client.
 - **Where a claimed outcome needs describing, the outcome list says what was
-  meant** (section 5). inspector writes the description; it does not invent the
+  meant** (section 6). inspector writes the description; it does not invent the
   intent behind it.
 
 This is worth having for the reason that is easy to underrate: nothing else in
@@ -160,7 +164,95 @@ the pipeline ever notices documentation rot. Tests do not fail because a README
 lies. Left alone it decays quietly until the documents are actively misleading,
 which is worse than having none.
 
-## 5. Independent verification
+### The reviewer
+
+An AI reads the change and says what looks wrong. Not running anything - reading
+it, the way a colleague would.
+
+This is the only part that finds what nobody thought to look for. Every other
+check here answers a question someone wrote down first: a test asserts what its
+author imagined, the outcome list covers what was claimed, lint enforces rules
+already agreed. A problem in a path nobody made a claim about is invisible to all
+of them.
+
+Three real ones from a single day of Fabrica's own development, none of which
+failed any test:
+
+- A task could disappear from the record entirely. If the final save failed -
+  disk full, a stale lock - the worker's workspace was destroyed anyway and
+  nothing was written. The record showed a task that started and then nothing.
+- Reopening a task for a fix could attach to a tag that happened to share the
+  branch's name, silently orphaning that round's work.
+- A repository hook could destroy a worker's uncommitted changes, because the
+  instruction to skip hooks did not cover all of them.
+
+**The honest cost is attention, not money.** A reviewer that stops to ask about
+every opinion turns into an interrupt generator, and the Client starts waving
+things through to make it stop - which is precisely when it becomes decoration.
+That is what section 5 exists to prevent.
+
+## 5. The loop
+
+**inspector never stops to ask. It reports.**
+
+It runs everything to the end, fixes what it may fix without asking, and turns
+whatever is left into a red with the reasons attached. It does not pause, does
+not queue a question, does not wait. A finding it may not act on is not a
+question - it is part of the result.
+
+**The Client's verdict is the one and only decision point.**
+
+    fabrica builds it, hands over
+
+    inspector runs everything - checks, lint, review, docs, outcome tests
+      fixes what it may fix, silently
+      pushes, opens the pull request
+      three findings left that it may not touch
+
+    the pull request is RED, with those three reasons in it
+
+    the Client reads all three at once and rules:
+      "fix - do the first two, the third is fine as it is"
+
+    fabrica's warm worker does exactly that
+    inspector runs again -> green -> blesses the commit -> the Client merges
+
+**Fixes route to Fabrica, not back into inspector.** By the same test as
+everywhere else: if it needed knowing what was asked for, inspector could not
+have done it in the first place. Sending it back to inspector would make
+inspector both the author and the judge of the same change.
+
+**Why one decision point rather than two.** A version where inspector asks
+questions and the Client later gives a verdict has him doing the same act twice
+under two names. It also mirrors the failure mode of the tool this replaces:
+no-mistakes blocks mid-run, so getting one pull request finished cost the Client
+roughly fifteen separate interruptions across a single afternoon. One red
+carrying every finding costs him one.
+
+The honest trade: when inspector finishes, the pull request is **not** ready -
+it is red with a list. That is the price of not being interrupted, and it is
+worth paying.
+
+### How many times the Client may say fix
+
+**Unlimited, and counted.**
+
+Fabrica has an attempt budget - the number of times it may try on its own before
+giving up. That limit exists to stop a machine looping unattended, burning money
+with nobody watching. It is right for what it governs.
+
+**A fix the Client asked for is not that.** Nothing happens until he says so, so
+he *is* the stop condition and there is no runaway to prevent. Drawing his fixes
+from the machine's budget caps him instead of it - and bites hardest in exactly
+the case this document describes, where inspector surfaces findings over more
+than one round.
+
+So the two are separate. The attempt budget bounds what Fabrica does on its own.
+Fix verdicts are bounded by the Client alone, with the round number shown to him
+each time - "this is fix round four" is information he can act on, not a wall he
+hits. Tracked for Fabrica at github.com/inactdev/fabrica/issues/65.
+
+## 6. Independent verification
 
 The builder must not write the exam. The Client's ruling, 2026-08-07:
 
@@ -202,7 +294,7 @@ with no Fabrica, a human hand-writes the same list.
 Interpretation needs the AI, so this lives entirely in the local half. Nothing
 about the cloud gate changes.
 
-## 6. How the gate knows
+## 7. How the gate knows
 
 inspector records its result as a **commit status** - a small record attached to
 one exact commit, posted through the API with a token. Not a comment, not a
@@ -227,9 +319,9 @@ tests could post its own pass. This is the same trust any CI system has, and for
 one person it is acceptable.
 
 **So the gate does not take inspector's word for the part that matters.** See
-section 7.
+section 8.
 
-## 7. Protected files
+## 8. Protected files
 
 Certain files decide whether work passes. Editing them is how a worker fakes a
 green result, and it is the most ordinary thing an agent under pressure does -
@@ -261,7 +353,7 @@ compares names. Adding a checkout would make it unsafe.
 the definition comes from the base branch: the list doing the judging is then one
 the pull request cannot rewrite.
 
-## 8. Separate from Fabrica
+## 9. Separate from Fabrica
 
 inspector is its own repository and its own roadmap. It is a tool, not the
 product - the same reason firstmate and no-mistakes are not inside Fabrica
@@ -280,14 +372,14 @@ either.
 inspector checking a new version of itself is fine; it is what every test suite
 does.
 
-## 9. Never merges
+## 10. Never merges
 
 Green means ready for a verdict, not merged. Merging is the Client's act.
 
 Auto-merge stays off deliberately. It fires the instant checks pass, which would
 let a green check close a task before the Client has ruled on it.
 
-## 10. Deprioritized
+## 11. Deprioritized
 
 **An API-driven fixer.** v1 uses the signed-in CLI, which costs throttling rather
 than money when it runs away. A direct API adapter bills a card per token, so it
@@ -297,7 +389,7 @@ gap.
 **Anything that makes protected-file changes smoother.** They should be rare. If
 they stop being rare, revisit.
 
-## 11. Settled
+## 12. Settled
 
 All three of the spec's original open questions were ruled on 2026-08-07.
 
@@ -306,7 +398,7 @@ workers on the same machine cannot read it. That was the wrong shape: a commit
 status only proves which *account* posted it, never which *program*, so hiding
 the token better never makes inspector's green distinguishable from a worker's.
 v1 accepts that - it posts with the Client's own token, and the honest limit in
-section 6 stands. The real fix is inspector holding its own identity as a GitHub
+section 7 stands. The real fix is inspector holding its own identity as a GitHub
 App, so the gate can require green *posted by inspector* rather than merely
 green; that is issue #9, deliberately deferred.
 
