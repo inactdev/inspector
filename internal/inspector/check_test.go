@@ -9,6 +9,13 @@ import (
 	"testing"
 )
 
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
 func TestRunCheck_Success(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
@@ -56,6 +63,9 @@ func TestRunCheck_CapturesInterleavedStreams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if result.ExitCode != 0 {
+		t.Fatalf("check command itself failed: ExitCode = %d, output = %q", result.ExitCode, result.Output)
+	}
 	if got := strings.Count(result.Output, "out"); got != lines {
 		t.Fatalf("captured %d stdout lines, want %d", got, lines)
 	}
@@ -81,6 +91,9 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if result.ExitCode != 0 {
+		t.Fatalf("check command itself failed: ExitCode = %d, output = %q", result.ExitCode, truncate(result.Output, 200))
+	}
 	if len(result.Output) != size {
 		t.Fatalf("captured %d bytes, want %d - output was truncated", len(result.Output), size)
 	}
@@ -93,6 +106,9 @@ func TestRunCheck_RunsFromRepoRoot(t *testing.T) {
 	result, err := RunCheck(dir, "pwd -P", &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("check command itself failed: ExitCode = %d, output = %q", result.ExitCode, result.Output)
 	}
 	wantDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
