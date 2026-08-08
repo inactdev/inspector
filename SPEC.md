@@ -313,7 +313,11 @@ result? No result at all is red, the same as a failing one. That is what makes
 running inspector non-optional rather than a habit.
 
 The status context is `inspector` - the exact, stable string `inspector-gate`
-keys on to find this result among any other statuses on the same commit.
+keys on to find this result among any other statuses on the same commit. Both
+halves must agree on this name, since inspector-gate reads it by exact match,
+and it is recorded here rather than in either half's code because it is the one
+thing both halves need to agree on independently.
+
 inspector reads its token from the `GITHUB_TOKEN` environment variable and
 posts only for a real green or red; a refusal posts nothing, which already
 reads as a failure by the rule above. Posting is not optional either: a

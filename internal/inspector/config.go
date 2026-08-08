@@ -56,6 +56,15 @@ type Config struct {
 	// kills it and refuses rather than hanging forever. Zero (unset)
 	// uses DefaultTimeout.
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+	// ProtectedPaths lists project-specific paths inspector-gate (issue
+	// #4) treats as protected, in addition to its own fixed floor
+	// (.inspector.json itself and .github/**). One glob pattern per
+	// entry, matched the same way inspector-gate.sh matches them: `*`
+	// matches any characters, `/` included. inspector itself never reads
+	// this field - it exists only for inspector-gate, which reads it from
+	// the BASE branch's copy of this file via the GitHub API, never the
+	// pull request's own copy.
+	ProtectedPaths []string `json:"protectedPaths,omitempty"`
 }
 
 // Timeout returns the configured timeout, or DefaultTimeout if unset.

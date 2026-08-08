@@ -21,3 +21,6 @@ go build ./...
 
 echo "==> go test"
 go test -race ./...
+
+echo "==> inspector-gate tests"
+.github/scripts/inspector-gate_test.sh

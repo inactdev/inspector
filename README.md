@@ -204,6 +204,36 @@ What a reader should conclude:
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.
 
+## inspector-gate
+
+`.github/workflows/inspector-gate.yml` is the cloud half (SPEC.md sections 2, 4,
+5, 7, 8). It asks exactly two questions about a pull request, and answers both
+with no AI and no checkout: does the head commit carry a green `inspector` commit
+status (no status at all is red, same as a failing one), and did the pull request
+touch a protected path (any touch is red - there is no declared-changes path that
+passes; see `.github/scripts/inspector-gate.sh` for the full reasoning inline).
+
+Protected paths are `.inspector.json` and everything under `.github/` always,
+plus whatever a project lists under `protectedPaths` in its own `.inspector.json`:
+
+```json
+{
+  "check": "npm test && npm run lint",
+  "image": "node:20",
+  "protectedPaths": ["check.sh"]
+}
+```
+
+**Copying this workflow into a repo does not, by itself, block a merge.** GitHub
+only enforces a check once it is a *required* status check:
+
+> Settings -> Branches -> add (or edit) a branch protection rule for the default
+> branch -> enable "Require status checks to pass before merging" -> add **gate**
+> (the job's name) to the list.
+
+That is a one-click repository setting this workflow cannot turn on for itself -
+there is no API call or workflow step that does it from here.
+
 ## Status
 
 The check (issue #1) is built: locally, `inspector` runs a project's own check
@@ -212,5 +242,6 @@ red, refusing loudly when no check command or image is configured, or no
 usable container runtime is found. Recording the result (issue #3) is also
 built: a green or red run posts a commit status to GitHub, and a missing token
 or a rejected post fails loudly rather than exiting as if it had succeeded.
-Still to come: the fixer, the gate workflow, and the installer - see
-[SPEC.md](SPEC.md) and the repo's issues.
+The gate workflow (issue #4, above) is built too, reading that commit status
+under the context `inspector`. Still to come: the fixer and the installer -
+see [SPEC.md](SPEC.md) and the repo's issues.

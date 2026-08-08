@@ -1,4 +1,5 @@
 {
   "check": "script/check",
-  "image": "golang:1.22"
+  "image": "golang:1.22",
+  "protectedPaths": ["script/check"]
 }

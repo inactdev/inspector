@@ -1,0 +1,66 @@
+# inspector-gate (SPEC.md sections 2, 4, 5, 7, 8; issue #4). The cloud
+# half. Small and dumb on purpose: two questions, no AI, no judgment calls.
+#
+# This runs on `pull_request_target`, not `pull_request`, so GitHub reads
+# THIS FILE's own definition from the base branch, never from the pull
+# request under test - a pull request cannot rewrite the check that judges
+# it. `.github/**` is itself in the protected-path floor that
+# inspector-gate.sh enforces (ALWAYS_PROTECTED), so an attempted edit to
+# this file, or to inspector-gate.sh, fails question 2 of its own run,
+# every time. See inspector-gate.sh's header for the full safety notes,
+# including why this workflow must never add `actions/checkout`.
+#
+# The job below deliberately has no job-level `if`. A job an `if` skips
+# reports a "skipped" conclusion, and whether GitHub treats "skipped" as
+# passing for a *required* status check is a known trap, not a documented
+# guarantee - so the job always runs on every pull request, and question 2
+# is answered inside the one step instead. Every run reports a real pass
+# or fail, never a skip.
+#
+# A failing (or missing) check here does not, by itself, block a merge:
+# GitHub only enforces that once this job is marked a required status
+# check in the repository's branch protection settings - Settings ->
+# Branches -> branch protection rule for the base branch -> "Require
+# status checks to pass before merging" -> add "gate". That is a manual
+# repository setting this workflow cannot turn on for itself; see the
+# "inspector-gate" section of README.md for the same note in context.
+name: inspector-gate
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check inspector status and protected files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # The pull request's own count of changed files, straight from
+          # the event payload - not from a live API call, and not subject
+          # to the listing cap inspector-gate.sh checks it against.
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          # Must match exactly what inspector (the local half, issue #3)
+          # posts as its commit status context - see SPEC.md section 7.
+          STATUS_CONTEXT: inspector
+        # No `actions/checkout` (see the header notes above), so nothing is
+        # on disk to run a script file from. Instead this fetches
+        # inspector-gate.sh's own content from the BASE branch via the same
+        # Contents API call the script itself uses for .inspector.json, and
+        # sources it - never the pull request's copy. That file is itself
+        # covered by ALWAYS_PROTECTED (.github/**), so a pull request cannot
+        # change what gets fetched and run here.
+        run: |
+          set -euo pipefail
+          script=$(gh api "repos/$REPO/contents/.github/scripts/inspector-gate.sh?ref=$BASE_SHA" --jq '.content' | tr -d '\n' | base64 -d)
+          source <(printf '%s' "$script")
+          main
