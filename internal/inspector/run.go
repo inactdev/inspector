@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/inactdev/inspector/internal/container"
 )
 
 // Outcome is the result of one inspector run.
@@ -104,13 +106,40 @@ func Run(opts Options) (Result, error) {
 			),
 		}, nil
 	}
+	if errors.Is(err, ErrNoImage) {
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"no container image configured for this repo.\n\n"+
+					"the check command runs inside a container, not on this machine - inspector\n"+
+					"needs to know which image has this project's own toolchain in it. Add an\n"+
+					"\"image\" field to %s naming one:\n\n"+
+					"  {\n    \"check\": \"...\",\n    \"image\": \"golang:1.22\"\n  }\n",
+				ConfigFileName,
+			),
+		}, nil
+	}
 	if err != nil {
 		return Result{Outcome: Refused, Commit: commit, Message: err.Error()}, nil
 	}
 
+	if err := container.EnsureAvailable(); err != nil {
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"no usable container runtime: %v\n\n"+
+					"inspector runs every check command inside a container instead of on this\n"+
+					"machine directly, and refuses rather than silently running unsandboxed.",
+				err,
+			),
+		}, nil
+	}
+
 	timeout := cfg.Timeout()
 	started := time.Now()
-	checkResult, err := RunCheck(repoRoot, cfg.Check, timeout, opts.Stdout, opts.Stderr)
+	checkResult, err := RunCheck(repoRoot, cfg.Check, cfg.Image, cfg.Network, timeout, opts.Stdout, opts.Stderr)
 	if err != nil {
 		return Result{}, fmt.Errorf("running check command: %w", err)
 	}

@@ -22,6 +22,12 @@ const ConfigFileName = ".inspector.json"
 // protected.
 var ErrNoCheckCommand = errors.New("no check command configured")
 
+// ErrNoImage means the repo has no container image configured. The
+// check command runs inside a container built from it - inspector never
+// guesses one, the same way it never guesses the check command itself:
+// the project's own toolchain has to be in the image or nothing runs.
+var ErrNoImage = errors.New("no container image configured")
+
 // DefaultTimeout bounds how long a check command may run when the
 // project doesn't set timeoutSeconds. SPEC.md has Fabrica invoking
 // inspector unattended, where a stuck check must produce a refusal
@@ -32,10 +38,20 @@ const DefaultTimeout = 15 * time.Minute
 
 // Config is the project's inspector configuration.
 type Config struct {
-	// Check is the project's own check command, run with `sh -c` from the
-	// repo root. It is the project's definition of green, not inspector's -
-	// inspector never guesses at a test runner or build tool.
+	// Check is the project's own check command, run with `sh -c` inside
+	// the container. It is the project's definition of green, not
+	// inspector's - inspector never guesses at a test runner or build
+	// tool.
 	Check string `json:"check"`
+	// Image is the container image Check runs in - the project's own
+	// toolchain, declared the same way Check itself is. inspector builds
+	// nothing and ships nothing; see README.md.
+	Image string `json:"image"`
+	// Network, when true, gives the container network access. Default
+	// false: the check command can reach the bind-mounted repo and
+	// nothing else. See README.md for why that's the default rather
+	// than an opt-out.
+	Network bool `json:"network,omitempty"`
 	// TimeoutSeconds bounds how long Check may run before inspector
 	// kills it and refuses rather than hanging forever. Zero (unset)
 	// uses DefaultTimeout.
@@ -51,7 +67,8 @@ func (c *Config) Timeout() time.Duration {
 }
 
 // LoadConfig reads ConfigFileName from repoRoot. It returns
-// ErrNoCheckCommand if the file is absent or names an empty check command.
+// ErrNoCheckCommand if the file is absent or names an empty check command,
+// and ErrNoImage if it names an empty (or absent) image.
 func LoadConfig(repoRoot string) (*Config, error) {
 	path := filepath.Join(repoRoot, ConfigFileName)
 	data, err := os.ReadFile(path)
@@ -68,6 +85,9 @@ func LoadConfig(repoRoot string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.Check) == "" {
 		return nil, ErrNoCheckCommand
+	}
+	if strings.TrimSpace(cfg.Image) == "" {
+		return nil, ErrNoImage
 	}
 	return &cfg, nil
 }

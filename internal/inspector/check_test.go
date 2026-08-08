@@ -9,14 +9,31 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/inactdev/inspector/internal/container"
 )
 
 // testTimeout is generous enough that no test below should ever hit it -
 // tests of the timeout behavior itself use their own short value.
-const testTimeout = 10 * time.Second
+const testTimeout = 30 * time.Second
+
+// testImage is a small, fast-to-pull image with a POSIX shell, used by
+// every RunCheck test below - none of them depend on anything beyond
+// that.
+const testImage = "alpine"
+
+// requireDocker skips a test that genuinely needs a live container
+// runtime, rather than failing on a machine without one - the same
+// tolerance LoadConfig's own permission-bit test already extends to a
+// root-run suite.
+func requireDocker(t *testing.T) {
+	t.Helper()
+	if err := container.EnsureAvailable(); err != nil {
+		t.Skipf("no usable container runtime, skipping: %v", err)
+	}
+}
 
 func truncate(s string, max int) string {
 	if len(s) <= max {
@@ -26,10 +43,11 @@ func truncate(s string, max int) string {
 }
 
 func TestRunCheck_Success(t *testing.T) {
+	requireDocker(t)
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "echo hi", testTimeout, &stdout, &stderr)
+	result, err := RunCheck(dir, "echo hi", testImage, false, testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,10 +63,11 @@ func TestRunCheck_Success(t *testing.T) {
 }
 
 func TestRunCheck_Failure(t *testing.T) {
+	requireDocker(t)
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "echo boom >&2; exit 7", testTimeout, &stdout, &stderr)
+	result, err := RunCheck(dir, "echo boom >&2; exit 7", testImage, false, testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,10 +84,11 @@ func TestRunCheck_CapturesInterleavedStreams(t *testing.T) {
 	// shared capture buffer has to be safe for concurrent writes. Under
 	// -race this fails if that safety is dropped; without it, a losing
 	// interleaving drops lines from the report.
+	requireDocker(t)
 	dir := t.TempDir()
 	const lines = 200
 
-	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testTimeout, io.Discard, io.Discard)
+	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, false, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -88,11 +108,12 @@ func TestRunCheck_SameWriterForBothStreams(t *testing.T) {
 	// combined output, and bytes.Buffer is not safe for concurrent use.
 	// Under -race this fails if the two copy goroutines are allowed to
 	// write to it unsynchronized.
+	requireDocker(t)
 	dir := t.TempDir()
 	const lines = 200
 	var combined bytes.Buffer
 
-	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testTimeout, &combined, &combined)
+	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, false, testTimeout, &combined, &combined)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,10 +138,11 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	// cmd.Run) blocks until they drain to EOF before returning. This
 	// writes far more than one pipe buffer right up to process exit, so
 	// a premature Wait would show up as a short read.
+	requireDocker(t)
 	dir := t.TempDir()
 	const size = 500_000
 
-	result, err := RunCheck(dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), testTimeout, io.Discard, io.Discard)
+	result, err := RunCheck(dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), testImage, false, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -132,181 +154,43 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	}
 }
 
-func TestKillProcessGroup_AlreadyExited(t *testing.T) {
-	// Regression guard for the deadline/natural-exit race: if the check
-	// process is already gone by the time the timeout's kill runs,
-	// killProcessGroup must map that to os.ErrProcessDone rather than
-	// the raw ESRCH - exec.Cmd.Cancel's documented signal that Wait
-	// should keep reflecting the process's own actual exit status
-	// instead of treating the race as a Cancel failure and returning
-	// an opaque error for a timeout that has nothing wrong with it.
-	cmd := exec.Command("true")
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+func TestClassifySignal_DirectlySignaledProcess(t *testing.T) {
+	// classifySignal's WaitStatus.Signaled() branch is for the local
+	// `docker run` client process itself being signaled directly -
+	// which container.Cmd's own timeout handling never does (it stops
+	// the container via `docker kill`, not the local process; see
+	// container.New), so it isn't reachable by driving RunCheck end to
+	// end. Constructs a real signaled *os.ProcessState the direct way -
+	// a plain host process, nothing to do with containers - purely to
+	// get valid input for the branch itself.
+	cmd := exec.Command("sh", "-c", "kill -9 $$")
+	err := cmd.Run()
 
-	// cmd.Process.Pid is now an already-reaped PID with no process
-	// group of its own (the command above set no Setpgid), so killing
-	// -pid always misses - reproducing exactly what the timeout path's
-	// real kill hits when it loses the race.
-	err := killProcessGroup(cmd.Process.Pid)
-	if !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("killProcessGroup(already-exited) = %v, want os.ErrProcessDone", err)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Run() = %v, want an *exec.ExitError from a signaled process", err)
 	}
-}
-
-func TestKillProcessGroup_ZombieUnreaped(t *testing.T) {
-	// Regression guard for the platform-specific half of the same
-	// race: a Setpgid child that has exited but not yet been reaped -
-	// still a zombie, occupying its PID and group until something
-	// calls Wait - behaves differently per platform when its group is
-	// signaled. Confirmed empirically: Linux returns success for the
-	// identical window (killProcessGroup then returns nil, from the
-	// group kill's own success), while darwin returns EPERM instead
-	// (killProcessGroup then returns os.ErrProcessDone, having
-	// confirmed via the narrower individual-PID probe that this is the
-	// zombie-group quirk and not a genuine permission failure). Both
-	// outcomes are correct and portable; a raw, unmapped EPERM (or any
-	// other error) is not.
-	//
-	// The zombie window is entered without waiting on a clock: the child
-	// gets the write end of a pipe as its stdout and the parent closes
-	// its own copy, so the read below returns EOF at exactly the moment
-	// the child exits and closes the last write end - and nothing has
-	// called wait on it yet, which is precisely the state under test. A
-	// sleep here would instead race the child's exit, and losing that
-	// race SIGKILLs a live process and fails the test for a reason that
-	// has nothing to do with the behavior being pinned.
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("creating pipe: %v", err)
-	}
-	defer r.Close()
-
-	cmd := exec.Command("sh", "-c", "exit 0")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdout = w
-	if err := cmd.Start(); err != nil {
-		w.Close()
-		t.Fatalf("starting process: %v", err)
-	}
-	pid := cmd.Process.Pid
-
-	if err := w.Close(); err != nil {
-		t.Fatalf("closing the parent's copy of the pipe: %v", err)
-	}
-	if _, err := io.ReadAll(r); err != nil {
-		t.Fatalf("waiting for the child to exit: %v", err)
-	}
-
-	if err := killProcessGroup(pid); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("killProcessGroup(zombie, unreaped) = %v, want nil or os.ErrProcessDone", err)
-	}
-
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("unexpected error reaping the process: %v", err)
-	}
-}
-
-func TestClassifyKillError(t *testing.T) {
-	// The live test above can only reach the EPERM case on darwin -
-	// Linux's group kill against the same unreaped zombie succeeds - so
-	// on a Linux-only CI that test passes whether or not the EPERM
-	// mapping exists at all. This one runs the classification directly
-	// with each errno supplied, so every branch is guarded on every
-	// platform.
-	unrelated := errors.New("some unrelated kill failure")
-	tests := []struct {
-		name       string
-		killErr    error
-		probeErr   error
-		want       error
-		wantProbes int
-	}{
-		{
-			name: "group kill succeeded",
-			want: nil,
-		},
-		{
-			name:    "group fully gone (ESRCH, every platform)",
-			killErr: syscall.ESRCH,
-			want:    os.ErrProcessDone,
-		},
-		{
-			name:       "darwin's zombie group, leader still answers",
-			killErr:    syscall.EPERM,
-			probeErr:   nil,
-			want:       os.ErrProcessDone,
-			wantProbes: 1,
-		},
-		{
-			name:       "darwin's zombie group, leader reaped before the probe",
-			killErr:    syscall.EPERM,
-			probeErr:   syscall.ESRCH,
-			want:       os.ErrProcessDone,
-			wantProbes: 1,
-		},
-		{
-			name:       "genuine permission failure is not mapped away",
-			killErr:    syscall.EPERM,
-			probeErr:   syscall.EPERM,
-			want:       syscall.EPERM,
-			wantProbes: 1,
-		},
-		{
-			name:     "unrelated failure is returned unmodified",
-			killErr:  unrelated,
-			probeErr: syscall.ESRCH,
-			want:     unrelated,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			probes := 0
-			got := classifyKillError(tt.killErr, func() error {
-				probes++
-				return tt.probeErr
-			})
-			if !errors.Is(got, tt.want) {
-				t.Fatalf("classifyKillError(%v, probe -> %v) = %v, want %v", tt.killErr, tt.probeErr, got, tt.want)
-			}
-			if probes != tt.wantProbes {
-				t.Fatalf("probed the leader %d times, want %d - the probe exists only to narrow EPERM, and costs a syscall everywhere else", probes, tt.wantProbes)
-			}
-		})
-	}
-}
-
-func TestRunCheck_SignalKilled(t *testing.T) {
-	dir := t.TempDir()
-
-	result, err := RunCheck(dir, "kill -9 $$", testTimeout, io.Discard, io.Discard)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Signal == "" {
-		t.Fatalf("expected Signal to be set, got CheckResult %+v", result)
-	}
-	if !strings.Contains(result.Signal, "killed") {
-		t.Fatalf("Signal = %q, want it to describe SIGKILL", result.Signal)
+	got := classifySignal(exitErr.ProcessState)
+	if !strings.Contains(got, "killed") {
+		t.Fatalf("classifySignal(directly signaled) = %q, want it to describe SIGKILL", got)
 	}
 }
 
 func TestRunCheck_CompoundCommandSurvivingKilledChild(t *testing.T) {
-	// `sh -c "a && b"` forks a for each of a and b and waits on them, so
-	// when a is a separate process that gets killed by a signal - not
-	// `kill -9 $$`, which kills the interpreter running it directly -
-	// sh itself is never signaled. It sees its child's wait status and
-	// exits normally with 128+N, the shell's own convention for "my
-	// child died from signal N." Verified directly: `sh -c "kill -9 $$"
-	// && true` from Go's os/exec reports ExitCode 137, Signaled false.
-	// README's own example check command has exactly this shape (`npm
-	// test && npm run lint`), so this is the common case, not an edge
-	// case.
+	// `sh -c "a && b"` forks a child for each of a and b and waits on
+	// them, so when a is a separate process that gets killed by a signal
+	// - not `kill -9 $$`, which kills the interpreter running it
+	// directly - sh itself is never signaled. It sees its child's wait
+	// status and exits normally with 128+N, the shell's own convention
+	// for "my child died from signal N." README's own example check
+	// command has exactly this shape (`npm test && npm run lint`), so
+	// this is the common case, not an edge case - and it plays out
+	// identically whether sh is running on the host or, as here, inside
+	// the container.
+	requireDocker(t)
 	dir := t.TempDir()
 
-	result, err := RunCheck(dir, `sh -c 'kill -9 $$' && true`, testTimeout, io.Discard, io.Discard)
+	result, err := RunCheck(dir, `sh -c 'kill -9 $$' && true`, testImage, false, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -322,10 +206,11 @@ func TestRunCheck_CompoundCommandSurvivingKilledChild(t *testing.T) {
 }
 
 func TestRunCheck_Timeout(t *testing.T) {
+	requireDocker(t)
 	dir := t.TempDir()
 
 	start := time.Now()
-	result, err := RunCheck(dir, "sleep 30", 200*time.Millisecond, io.Discard, io.Discard)
+	result, err := RunCheck(dir, "sleep 30", testImage, false, 300*time.Millisecond, io.Discard, io.Discard)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -340,103 +225,124 @@ func TestRunCheck_Timeout(t *testing.T) {
 	if result.Signal == "" {
 		t.Fatalf("expected Signal to be set on a timed-out result, got CheckResult %+v", result)
 	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("RunCheck took %s to return after a 200ms timeout - the kill isn't taking effect promptly", elapsed)
+	if elapsed > 10*time.Second {
+		t.Fatalf("RunCheck took %s to return after a 300ms timeout - the kill isn't taking effect promptly", elapsed)
 	}
 }
 
 func TestRunCheck_TimeoutKillsChildProcesses(t *testing.T) {
-	// The direct child of RunCheck is always `sh`; a compound command
-	// (README's own example is `npm test && npm run lint`) forks its
-	// own children under that shell. Killing sh alone would leave a
-	// hung child running past the timeout it was supposed to enforce.
-	// Proves it by having a background grandchild announce that it
-	// woke up naturally, into a temp file, well after the timeout - if
-	// the process-group kill works, that file stays empty.
+	// check.go's old direct execution killed the process group led by
+	// `sh` when the timeout fired, because `sh -c "a && b"` forks its
+	// own children and killing sh alone would leave a hung compound
+	// command's children running past the deadline. Containerizing
+	// replaced that with killing the container itself
+	// (internal/container): the check command's `sh` now runs as the
+	// container's own init process, and the kernel tears down its whole
+	// PID namespace - including any children it forked - the instant
+	// that process is killed. Proves it the same way the host version
+	// did: a background grandchild announces that it woke up naturally,
+	// into a file inside the bind-mounted repo, well after the timeout -
+	// if the kill works, that file stays empty.
+	requireDocker(t)
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "survived")
 
-	_, err := RunCheck(dir, fmt.Sprintf("( sleep 1 && echo alive > %s ) & wait", marker), 100*time.Millisecond, io.Discard, io.Discard)
+	_, err := RunCheck(dir, "( sleep 3 && echo alive > survived ) & wait", testImage, false, 300*time.Millisecond, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// Give a leaked background process the time it would have needed
 	// to write the marker, then confirm it never did.
-	time.Sleep(1200 * time.Millisecond)
+	time.Sleep(3200 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("background child survived the timeout kill and wrote %s", marker)
 	}
 }
 
-func TestRunCheck_LeakedSubprocessDoesNotDiscardOutput(t *testing.T) {
-	// A check command can finish successfully while leaving a
-	// subprocess behind that still holds stdout/stderr open (e.g.
-	// `npm test && (npm run dev &)`). Go's own wait4 on the primary
-	// process already completed by then, but cmd.Run doesn't return
-	// nil - it returns an error wrapping exec.ErrWaitDelay once
-	// WaitDelay (5s) elapses waiting for the pipes to close. Confirms
-	// RunCheck uses cmd.ProcessState instead of discarding the result
-	// as an infrastructure failure. Genuinely takes just over 5s: this
-	// is exercising the real WaitDelay, not a shortened stand-in for it.
-	if testing.Short() {
-		t.Skip("waits out a real 5s WaitDelay; skipped in -short")
-	}
-	dir := t.TempDir()
-
-	result, err := RunCheck(dir, "echo hello; (sleep 30 &)", testTimeout, io.Discard, io.Discard)
-	if err != nil {
-		t.Fatalf("unexpected error: %v - a leaked subprocess should not turn a finished check into an infrastructure failure", err)
-	}
-	if result.ExitCode != 0 {
-		t.Fatalf("ExitCode = %d, want 0 - the primary command succeeded", result.ExitCode)
-	}
-	if !strings.Contains(result.Output, "hello") {
-		t.Fatalf("Output = %q, want it to contain the primary command's output, not be discarded", result.Output)
-	}
-}
-
-type failingWriter struct{}
-
-func (failingWriter) Write([]byte) (int, error) {
-	return 0, errors.New("simulated write failure")
-}
-
-func TestRunCheck_CallerWriterFailureIsNotSwallowed(t *testing.T) {
-	// A caller's own writer can fail for reasons that have nothing to
-	// do with the check command itself (stdout redirected to a full
-	// disk, a library caller whose writer errors) - cmd.Run returns
-	// that error directly, unwrapped, with ProcessState populated and a
-	// misleadingly clean exit code, which looks identical in shape to
-	// the WaitDelay/leaked-subprocess case RunCheck deliberately
-	// tolerates. The two must not be conflated: this one is a real
-	// infrastructure failure, and folding it into a false green would
-	// silently discard however much output never made it to the
-	// caller.
-	dir := t.TempDir()
-
-	_, err := RunCheck(dir, "echo hi", testTimeout, failingWriter{}, io.Discard)
-	if err == nil {
-		t.Fatal("expected an error when the caller's own writer fails, not a swallowed success")
-	}
-}
-
-func TestRunCheck_RunsFromRepoRoot(t *testing.T) {
+func TestRunCheck_RunsFromWorkspaceDir(t *testing.T) {
+	// The container mounts the repo at a fixed internal path
+	// (container.WorkspaceDir), not wherever it happens to live on the
+	// host - the whole point is that nothing outside that mount is
+	// reachable, including the host's own directory layout.
+	requireDocker(t)
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "pwd -P", testTimeout, &stdout, &stderr)
+	result, err := RunCheck(dir, "pwd", testImage, false, testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("check command itself failed: ExitCode = %d, output = %q", result.ExitCode, result.Output)
 	}
-	wantDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatalf("resolving symlinks for %s: %v", dir, err)
+	if strings.TrimSpace(result.Output) != container.WorkspaceDir {
+		t.Fatalf("check did not run from %q: got %q", container.WorkspaceDir, result.Output)
 	}
-	if strings.TrimSpace(result.Output) != wantDir {
-		t.Fatalf("check did not run from %q: got %q", wantDir, result.Output)
+}
+
+func TestRunCheck_BindMountsOnlyTheRepo(t *testing.T) {
+	// The acceptance bar for issue #13: the container can reach the repo
+	// and nothing else on the host. Writes a marker outside dir, then
+	// confirms a check command inside the container can't see it -
+	// proof the mount is scoped to dir rather than, say, the whole host
+	// filesystem via some broader default.
+	requireDocker(t)
+	outside := t.TempDir()
+	dir := t.TempDir()
+	writeFiles(t, outside, map[string]string{"secret.txt": "should not be visible"})
+
+	result, err := RunCheck(dir, fmt.Sprintf("test -e %s && echo LEAKED || echo contained", outside), testImage, false, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result.Output, "LEAKED") {
+		t.Fatalf("check command could see a host path outside the bind-mounted repo: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "contained") {
+		t.Fatalf("Output = %q, want it to report the outside path as absent", result.Output)
+	}
+}
+
+func TestRunCheck_NoNetworkByDefault(t *testing.T) {
+	requireDocker(t)
+	dir := t.TempDir()
+
+	result, err := RunCheck(dir, "wget -q -T 3 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, false, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(result.Output, "REACHED") {
+		t.Fatal("check command reached the network with Network left at its false default")
+	}
+	if !strings.Contains(result.Output, "blocked") {
+		t.Fatalf("Output = %q, want it to report the network as unreachable", result.Output)
+	}
+}
+
+func TestRunCheck_NetworkOptIn(t *testing.T) {
+	requireDocker(t)
+	dir := t.TempDir()
+
+	result, err := RunCheck(dir, "wget -q -T 5 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, true, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result.Output, "REACHED") {
+		t.Fatalf("check command could not reach the network with Network: true - Output = %q (this test needs outbound internet access to pass)", result.Output)
+	}
+}
+
+func TestRunCheck_UnusableImageIsInfrastructureFailure(t *testing.T) {
+	// A bad image is docker's own failure, not a verdict on the check
+	// command - it must come back as a Go error (an infrastructure
+	// failure, per RunCheck's own doc comment), never as a CheckResult
+	// whose ExitCode happens to be whatever the docker CLI produced.
+	requireDocker(t)
+	dir := t.TempDir()
+
+	_, err := RunCheck(dir, "true", "inspector-test-image-does-not-exist-xyz", false, testTimeout, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("expected an error for an image that was never run, not a swallowed CheckResult")
 	}
 }

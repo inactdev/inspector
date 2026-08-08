@@ -1,3 +1,4 @@
 {
-  "check": "script/check"
+  "check": "script/check",
+  "image": "golang:1.22"
 }
