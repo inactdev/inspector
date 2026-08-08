@@ -23,6 +23,123 @@ half-written work repairs code that was mid-change.
 
 It never merges. Green means ready for a verdict, not merged.
 
+## Install
+
+Requires [Go](https://go.dev) 1.22+.
+
+```
+go install github.com/inactdev/inspector/cmd/inspector@latest
+```
+
+Or build from a checkout:
+
+```
+git clone https://github.com/inactdev/inspector.git
+cd inspector
+go build -o inspector ./cmd/inspector
+```
+
+`script/check`, which runs inspector's own tests, additionally needs a C
+compiler: it runs the suite under Go's race detector, which requires cgo. The
+race detector is itself unsupported on some platforms, including 32-bit x86,
+linux/arm, and freebsd/arm - on those, run `CGO_ENABLED=0 go test ./...`
+instead, which runs the same suite without the race detector and so needs no C
+compiler.
+
+## Use
+
+In the repo you want inspected, add `.inspector.json` at the root, naming that
+project's own check command - inspector never guesses at one:
+
+```json
+{
+  "check": "npm test && npm run lint"
+}
+```
+
+The check command has 15 minutes to finish before inspector kills it -
+including anything it started, like a compound command's children - and
+refuses rather than hanging forever, since SPEC.md has Fabrica invoking
+inspector unattended. If this project's checks legitimately need longer, set
+your own:
+
+```json
+{
+  "check": "npm test && npm run lint",
+  "timeoutSeconds": 1800
+}
+```
+
+Then, with your work committed (inspector refuses to run against an uncommitted
+working tree - it can only be honest about a commit that actually matches what's
+on disk):
+
+```
+inspector
+```
+
+This runs the configured check command against the repo's current HEAD and
+prints green or red, always naming the exact commit it inspected - that's how
+a caller compares what inspector blessed against what it expects.
+
+Exit codes reserve `0`, `1`, and `2` for verdicts only:
+
+- `0` green
+- `1` red
+- `2` refused - inspector tried to reach a verdict and couldn't: no check
+  command configured, a dirty working tree, a check command that ran past its
+  timeout or was killed by a signal before it could finish on its own (the OOM
+  killer, an external kill, inspector's own deadline - it never judged the
+  code, so its exit status is not a verdict either way), or an infrastructure
+  failure. Never treat `2` as red.
+
+  A signal kill is detected two ways, because a compound check command like
+  `npm test && npm run lint` doesn't show it the same way a plain one does:
+  `sh -c "a && b"` forks a child for each command and waits on it, so if `a`
+  is killed by a signal, `sh` itself is never signaled - it sees its child's
+  wait status and exits normally with `128 + <signal number>`, the shell's own
+  convention for reporting exactly that. inspector treats *either* shape (the
+  shell itself signaled, or an exit code of 128 or above) as refused, not red.
+  A program could in principle choose an exit code in that range for its own
+  reasons and get called refused when it actually failed - but that direction
+  is safe, since refused still blocks the merge, while the alternative sends
+  someone hunting a bug that was never there when the check simply ran out of
+  memory.
+- `64` usage - not a verdict attempt at all: `--help`, an unrecognized flag, or
+  bad usage. Distinct from `0`/`1`/`2` so a caller can never mistake a help
+  request for a result; `64` follows the BSD
+  [sysexits.h](https://man.freebsd.org/cgi/man.cgi?query=sysexits) convention
+  for a command-line usage error.
+
+Flags:
+
+- `--repo <path>` - inspect a repo other than the current directory
+
+Anything after the flags is a free-text claim, recorded for context and not acted
+on:
+
+```
+inspector implemented the login flow
+```
+
+Each run writes a small JSON report to `.inspector/runs/`, and copies it to
+`.inspector/latest.json`, so a red result is actionable without re-running: the
+command that ran, its exit code (or the signal that killed it), and its full
+output. These are notes for a
+human, never authority. On its first run inspector
+writes `.inspector/.gitignore` containing `*`, so reports stay out of git without
+you editing anything; an existing `.inspector/.gitignore` is left alone.
+
+Because the report is notes and not authority, a report that can't be saved
+never changes an answer inspector already has. When the check command reached a
+real green or red and only the save failed, inspector prints a loud warning to
+stderr naming where the save failed, and still exits `0` or `1` with that
+verdict - it does not become a refusal.
+
 ## Status
 
-Specification only. Nothing is built yet.
+The check (issue #1) is built: locally, `inspector` runs a project's own check
+command against HEAD and reports green or red, refusing loudly when no check
+command is configured. Still to come: the fixer, posting the result as a GitHub
+commit status, the gate workflow, and the installer - see [SPEC.md](SPEC.md) and
+the repo's issues.
