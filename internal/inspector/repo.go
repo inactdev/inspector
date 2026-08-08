@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -25,6 +26,27 @@ func HeadCommit(repoRoot string) (string, error) {
 		return "", fmt.Errorf("resolving HEAD: %w", err)
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// githubRemoteRE matches the URL shapes `git remote get-url` returns for
+// a github.com remote: HTTPS (with or without a credential prefix or a
+// trailing .git), the git@ scp-like form, and the ssh:// form.
+var githubRemoteRE = regexp.MustCompile(`^(?:https?://(?:[^@/]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])([^/]+)/(.+?)(?:\.git)?/?$`)
+
+// RemoteOwnerRepo returns the GitHub owner and repository name parsed
+// from the repo's "origin" remote, for posting a commit status against
+// the right github.com/owner/repo.
+func RemoteOwnerRepo(repoRoot string) (owner, repo string, err error) {
+	out, err := runGit(repoRoot, "remote", "get-url", "origin")
+	if err != nil {
+		return "", "", fmt.Errorf("resolving the 'origin' remote: %w", err)
+	}
+	url := strings.TrimSpace(out)
+	m := githubRemoteRE.FindStringSubmatch(url)
+	if m == nil {
+		return "", "", fmt.Errorf("origin remote %q is not a github.com URL inspector recognizes", url)
+	}
+	return m[1], m[2], nil
 }
 
 // WorkingTreeStatus returns the raw `git status --porcelain` output,

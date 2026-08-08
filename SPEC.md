@@ -312,6 +312,14 @@ Because it is bound to a commit:
 result? No result at all is red, the same as a failing one. That is what makes
 running inspector non-optional rather than a habit.
 
+The status context is `inspector` - the exact, stable string `inspector-gate`
+keys on to find this result among any other statuses on the same commit.
+inspector reads its token from the `GITHUB_TOKEN` environment variable and
+posts only for a real green or red; a refusal posts nothing, which already
+reads as a failure by the rule above. Posting is not optional either: a
+missing token or an API refusal fails loudly rather than letting a real local
+green pass silently unrecorded.
+
 **Honest limit: the token is not an identity boundary.** It cannot tell the
 Client from inspector from a worker. All it buys is that a green result cannot be
 *typed*. Anything holding the token can post one having checked nothing - and

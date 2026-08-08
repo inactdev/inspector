@@ -93,6 +93,49 @@ func TestWorkingTreeStatus_ModifiedFile(t *testing.T) {
 	}
 }
 
+func TestRemoteOwnerRepo(t *testing.T) {
+	cases := []struct {
+		name, url, wantOwner, wantRepo string
+	}{
+		{"https", "https://github.com/inactdev/inspector.git", "inactdev", "inspector"},
+		{"https no dot git", "https://github.com/inactdev/inspector", "inactdev", "inspector"},
+		{"https with credential", "https://x-access-token:abc123@github.com/inactdev/inspector.git", "inactdev", "inspector"},
+		{"scp-like ssh", "git@github.com:inactdev/inspector.git", "inactdev", "inspector"},
+		{"ssh url", "ssh://git@github.com/inactdev/inspector.git", "inactdev", "inspector"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newTestRepo(t, nil)
+			runGitT(t, dir, "remote", "add", "origin", tc.url)
+
+			owner, repo, err := RemoteOwnerRepo(dir)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if owner != tc.wantOwner || repo != tc.wantRepo {
+				t.Fatalf("RemoteOwnerRepo(%q) = (%q, %q), want (%q, %q)", tc.url, owner, repo, tc.wantOwner, tc.wantRepo)
+			}
+		})
+	}
+}
+
+func TestRemoteOwnerRepo_NoOrigin(t *testing.T) {
+	dir := newTestRepo(t, nil)
+
+	if _, _, err := RemoteOwnerRepo(dir); err == nil {
+		t.Fatal("expected an error with no origin remote configured")
+	}
+}
+
+func TestRemoteOwnerRepo_NotGitHub(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	runGitT(t, dir, "remote", "add", "origin", "https://gitlab.com/inactdev/inspector.git")
+
+	if _, _, err := RemoteOwnerRepo(dir); err == nil {
+		t.Fatal("expected an error for a non-github.com remote")
+	}
+}
+
 // resolveSymlinks lets the root comparison tolerate macOS's /tmp ->
 // /private/tmp symlink, which `git rev-parse --show-toplevel` resolves.
 func resolveSymlinks(t *testing.T, path string) string {

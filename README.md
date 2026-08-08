@@ -90,8 +90,10 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
   command configured, a dirty working tree, a check command that ran past its
   timeout or was killed by a signal before it could finish on its own (the OOM
   killer, an external kill, inspector's own deadline - it never judged the
-  code, so its exit status is not a verdict either way), or an infrastructure
-  failure. Never treat `2` as red.
+  code, so its exit status is not a verdict either way), an infrastructure
+  failure, or a real local green/red that could not be posted as a commit
+  status (see "Recording the result" below) - an unrecorded result proves
+  nothing to the gate, so it isn't a verdict either. Never treat `2` as red.
 
   A signal kill is detected two ways, because a compound check command like
   `npm test && npm run lint` doesn't show it the same way a plain one does:
@@ -136,10 +138,42 @@ real green or red and only the save failed, inspector prints a loud warning to
 stderr naming where the save failed, and still exits `0` or `1` with that
 verdict - it does not become a refusal.
 
+### Recording the result
+
+A real green or red also gets posted to GitHub as a **commit status** on the
+exact commit inspected, under the status context `inspector` - a small
+record attached to that commit, not a comment or a checklist, because text
+can be typed by anyone and a status cannot. It carries pass or fail and a
+short description pointing at `.inspector/latest.json`; the report holds the
+detail, the status just says whether to trust it.
+
+This needs a token: set `GITHUB_TOKEN` to one with commit-status write access
+on the repo, and the repo's `origin` remote must point at GitHub. Posting is
+not optional - a missing token, an unresolvable remote, or GitHub refusing
+the request all fail loudly and exit `2`, the same as a refusal, even when
+the check itself passed. A real local green that never made it onto the
+commit is worth nothing to a reader who can only see GitHub, so it must never
+look like success.
+
+What a reader should conclude:
+
+- **Green status** - inspector ran this exact commit's checks and they passed.
+- **Red status** - inspector ran this exact commit's checks and they failed,
+  or inspector reached a verdict locally but could not record it (same
+  status either way; the local run's stderr is where that distinction lives).
+- **No status at all** - this commit has not been inspected. Read the same as
+  red: push whenever you like, nothing runs on its own, and a status from an
+  earlier commit does not carry forward.
+
+The token is not an identity boundary - see SPEC.md section 7 for the honest
+limit on what a green status does and doesn't prove.
+
 ## Status
 
 The check (issue #1) is built: locally, `inspector` runs a project's own check
 command against HEAD and reports green or red, refusing loudly when no check
-command is configured. Still to come: the fixer, posting the result as a GitHub
-commit status, the gate workflow, and the installer - see [SPEC.md](SPEC.md) and
+command is configured. Recording the result (issue #3) is also built: a green
+or red run posts a commit status to GitHub, and a missing token or a rejected
+post fails loudly rather than exiting as if it had succeeded. Still to come:
+the fixer, the gate workflow, and the installer - see [SPEC.md](SPEC.md) and
 the repo's issues.
