@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Unit tests for inspector-gate.sh's pure decision functions
-# (status_verdict, find_protected_match, listing_count_check). These take
+# (status_verdict, find_protected_match, listing_count_check,
+# protected_paths_from_response, pull_request_for_status). These take
 # plain strings in and print plain strings out - no network, no GitHub API,
 # no environment variables - so they can run anywhere, including here.
+# The last two take a raw API response as a string, so the decisions made
+# on top of a response are tested here even though fetching one is not.
 #
-# What this deliberately does NOT cover: main()'s GitHub API orchestration
-# (the gh api calls, pagination, and the base64/jq decoding of
-# .inspector.json). That is real coverage this project doesn't have, not
-# faked - it can only be exercised by an actual pull request going through
-# Actions, since it depends on GitHub's API responses and the
-# pull_request_target trust boundary (reading the base branch's copy of
-# this script and of .inspector.json). Testing it here would mean mocking
-# `gh api` well enough that the mock, not GitHub's behavior, is what the
-# test actually proves.
+# What this deliberately does NOT cover: the GitHub API orchestration in
+# main() and main_status_event() - making the gh api calls, paginating
+# them, and re-sourcing this script from a pull request's base ref. That
+# is real coverage this project doesn't have, not faked - it can only be
+# exercised by an actual pull request going through Actions, since it
+# depends on GitHub's API responses and the pull_request_target trust
+# boundary. Testing it here would mean mocking `gh api` well enough that
+# the mock, not GitHub's behavior, is what the test actually proves.
 #
 # Run directly: .github/scripts/inspector-gate_test.sh
 set -euo pipefail
@@ -92,6 +94,145 @@ assert_eq "any other mismatch is a mid-run push race" \
   "race" "$(listing_count_check 5 6)"
 assert_eq "a mismatch below 3000 is a race, not a cap, even at the boundary" \
   "race" "$(listing_count_check 2999 3000)"
+
+# --- protected_paths_from_response ---
+#
+# Fixtures are shaped like a real `gh api --include` response: status
+# line, headers, blank line, then the Contents API's JSON body with the
+# file base64'd into .content.
+
+contents_response() {
+  local status="$1" body="$2"
+  printf 'HTTP/2.0 %s\r\nContent-Type: application/json; charset=utf-8\r\n\r\n%s\n' "$status" "$body"
+}
+
+inspector_json_response() {
+  local file_content="$1"
+  contents_response "200 OK" \
+    "$(jq -nc --arg c "$(printf '%s' "$file_content" | base64 | tr -d '\n')" '{content: $c, encoding: "base64"}')"
+}
+
+assert_fails_closed() {
+  local desc="$1" raw="$2" expected_substring="$3"
+  local out rc=0
+  out=$(protected_paths_from_response "$raw") || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "FAIL: $desc - returned success instead of failing closed (patterns: \"$out\")"
+    failures=$((failures + 1))
+    return
+  fi
+  case "$out" in
+  *"$expected_substring"*) echo "ok: $desc" ;;
+  *)
+    echo "FAIL: $desc - failed closed, but the reason did not mention \"$expected_substring\""
+    echo "  actual: $out"
+    failures=$((failures + 1))
+    ;;
+  esac
+}
+
+assert_patterns() {
+  local desc="$1" raw="$2" expected="$3"
+  local out rc=0
+  out=$(protected_paths_from_response "$raw") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: $desc - failed closed instead of succeeding: $out"
+    failures=$((failures + 1))
+    return
+  fi
+  assert_eq "$desc" "$expected" "$out"
+}
+
+assert_patterns "a 404 is the one safe absence: no project paths, no error" \
+  "$(contents_response "404 Not Found" '{"message":"Not Found"}')" \
+  ""
+
+assert_fails_closed "a rate limit fails closed rather than reading as absent" \
+  "$(contents_response "403 Forbidden" '{"message":"API rate limit exceeded"}')" \
+  "HTTP 403"
+
+assert_fails_closed "a server error fails closed rather than reading as absent" \
+  "$(contents_response "502 Bad Gateway" '{"message":"Server Error"}')" \
+  "HTTP 502"
+
+assert_fails_closed "no response at all (a network failure) fails closed" \
+  "" \
+  "no HTTP response at all"
+
+assert_fails_closed "a reply that is not an HTTP response fails closed" \
+  "gh: could not resolve host" \
+  "did not come back as an HTTP response"
+
+assert_fails_closed "empty content (the API's 1MB inline limit) fails closed" \
+  "$(contents_response "200 OK" '{"content":"","encoding":"none"}')" \
+  "empty content"
+
+assert_fails_closed "content that is not valid JSON fails closed" \
+  "$(inspector_json_response 'check: script/check')" \
+  "not valid JSON"
+
+assert_fails_closed "protectedPaths present but not an array fails closed" \
+  "$(inspector_json_response '{"protectedPaths": "script/check"}')" \
+  "not an array"
+
+assert_fails_closed "a protectedPaths entry that is not a string fails closed" \
+  "$(inspector_json_response '{"protectedPaths": ["ok.sh", 7]}')" \
+  "not a string"
+
+assert_fails_closed "a check that is not a string fails closed" \
+  "$(inspector_json_response '{"check": ["script/check"]}')" \
+  "not a string"
+
+assert_patterns "a config with neither check nor protectedPaths adds nothing" \
+  "$(inspector_json_response '{"timeoutSeconds": 600}')" \
+  ""
+
+assert_patterns "the check command is protected without being listed" \
+  "$(inspector_json_response '{"check": "script/check"}')" \
+  "script/check"
+
+assert_patterns "check command and protectedPaths are both returned" \
+  "$(inspector_json_response '{"check": "script/check", "protectedPaths": ["deploy.sh", "ci/**"]}')" \
+  "$(printf 'script/check\ndeploy.sh\nci/**')"
+
+# --- pull_request_for_status ---
+
+assert_no_pull_request() {
+  local desc="$1" json="$2"
+  local out rc=0
+  out=$(pull_request_for_status "$json" "headsha") || rc=$?
+  case "$rc" in
+  0)
+    echo "FAIL: $desc - claimed a pull request to gate (\"$out\")"
+    failures=$((failures + 1))
+    ;;
+  1) echo "ok: $desc" ;;
+  *)
+    echo "FAIL: $desc - returned $rc (uncertainty), expected 1 (nothing to gate)"
+    failures=$((failures + 1))
+    ;;
+  esac
+}
+
+assert_no_pull_request "a commit with no associated pull requests has nothing to gate" '[]'
+
+assert_no_pull_request "a commit whose only associated pull request is closed has nothing to gate" \
+  '[{"number":7,"state":"closed","head":{"sha":"headsha"},"base":{"sha":"basesha"}}]'
+
+assert_no_pull_request "an open pull request whose head has moved on has nothing to gate" \
+  '[{"number":8,"state":"open","head":{"sha":"someothersha"},"base":{"sha":"basesha"}}]'
+
+assert_eq "the open pull request this commit heads is found, changed_files left for the caller" \
+  "$(printf '9\theadsha\tbasesha\t')" \
+  "$(pull_request_for_status '[{"number":8,"state":"closed","head":{"sha":"headsha"},"base":{"sha":"old"}},{"number":9,"state":"open","head":{"sha":"headsha"},"base":{"sha":"basesha"}}]' "headsha")"
+
+assert_eq "a changed_files count is used when the response carries one" \
+  "$(printf '9\theadsha\tbasesha\t12')" \
+  "$(pull_request_for_status '[{"number":9,"state":"open","head":{"sha":"headsha"},"base":{"sha":"basesha"},"changed_files":12}]' "headsha")"
+
+rc=0
+out=$(pull_request_for_status '{"message":"Not Found"}' "headsha") || rc=$?
+assert_eq "a response that is not even a list is uncertainty, not absence" "2" "$rc"
 
 echo
 if [ "$failures" -ne 0 ]; then

@@ -213,16 +213,41 @@ status (no status at all is red, same as a failing one), and did the pull reques
 touch a protected path (any touch is red - there is no declared-changes path that
 passes; see `.github/scripts/inspector-gate.sh` for the full reasoning inline).
 
-Protected paths are `.inspector.json` and everything under `.github/` always,
-plus whatever a project lists under `protectedPaths` in its own `.inspector.json`:
+Protected paths are `.inspector.json`, everything under `.github/`, and the
+project's own check command always, plus whatever it lists under `protectedPaths`
+in its `.inspector.json`:
 
 ```json
 {
-  "check": "npm test && npm run lint",
+  "check": "check.sh",
   "image": "node:20",
-  "protectedPaths": ["check.sh"]
+  "protectedPaths": ["deploy/**"]
 }
 ```
+
+The check command is protected without being listed, on purpose: it is exactly
+what a worker under pressure edits to make a failing check stop failing, so a
+repo copying this gate does not have to remember to name it twice.
+
+That list is read from the *base* branch's `.inspector.json`, never the pull
+request's. If it cannot be read with certainty - a rate limit, a server error, a
+file too large for the API to inline, invalid JSON, a `protectedPaths` that is
+not a list of strings - the gate fails closed and says which of those it hit,
+rather than quietly judging against a shorter list. Only a genuinely absent
+`.inspector.json` (HTTP 404) is a safe absence; that project still gets the
+always-protected floor.
+
+The workflow also runs on GitHub's `status` event, not just on the pull request
+itself. A commit status can only be posted to a commit that is already pushed,
+so inspector's green status lands *after* the push that made the gate say "no
+status posted at all" - without the second trigger, that first honest red would
+stand until someone re-ran the check by hand. The `status` run looks up which
+open pull request the commit heads through one read-only API call and re-asks
+both questions; a commit heading no open pull request is an honest pass, since
+there is nothing to gate. Note that GitHub associates a status-triggered run
+with the default branch's last commit, so it does not overwrite the `gate` check
+already recorded on the pull request's head commit - the workflow header records
+that limit and why fixing it would need write permission this job does not take.
 
 **Copying this workflow into a repo does not, by itself, block a merge.** GitHub
 only enforces a check once it is a *required* status check:
