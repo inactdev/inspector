@@ -46,7 +46,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, `usage: inspector [flags] [claim text...]
 
 Runs the project's own check command against the repo's current HEAD
-commit and reports green or red. See README.md for setup.
+commit and reports green or red. A green or red run also records that
+result as a GitHub commit status, so it needs GITHUB_TOKEN set to a
+token with commit-status write access, a GitHub 'origin' remote, and
+HEAD already pushed there. See README.md for setup.
 
 flags:
 `)

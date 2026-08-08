@@ -175,6 +175,62 @@ func TestPostCommitStatus_Non201SuccessIsNotSuccess(t *testing.T) {
 	}
 }
 
+// A commit that was never pushed does not exist on GitHub, so there is
+// nothing for a status to attach to. GitHub answers 422 "No commit found
+// for SHA", which says what happened but not what to do about it - the
+// error must name the missing push.
+func TestPostCommitStatus_UnpushedCommitNamesTheMissingPush(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"message":"No commit found for SHA: deadbeef"}`))
+	}))
+	defer server.Close()
+
+	err := PostCommitStatus(PostStatusOptions{
+		Owner:      "inactdev",
+		Repo:       "inspector",
+		Commit:     "deadbeef",
+		State:      StatusSuccess,
+		Token:      "test-token",
+		APIBaseURL: server.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error for a commit GitHub does not have")
+	}
+	if !strings.Contains(err.Error(), "push this commit") {
+		t.Fatalf("error = %q, want it to name the missing push", err.Error())
+	}
+	if !strings.Contains(err.Error(), "deadbeef") {
+		t.Fatalf("error = %q, want it to name the commit", err.Error())
+	}
+}
+
+// A 404 is repo-not-found or no-access, not an unpushed commit. It must
+// keep the generic wording rather than sending someone off to push a
+// commit that is already there.
+func TestPostCommitStatus_NotFoundIsNotReportedAsUnpushed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer server.Close()
+
+	err := PostCommitStatus(PostStatusOptions{
+		Owner:      "inactdev",
+		Repo:       "inspector",
+		Commit:     "deadbeef",
+		State:      StatusSuccess,
+		Token:      "test-token",
+		APIBaseURL: server.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error for a 404 response")
+	}
+	if strings.Contains(err.Error(), "push this commit") {
+		t.Fatalf("error = %q, should not blame an unpushed commit for a 404", err.Error())
+	}
+}
+
 func TestPostCommitStatus_NoOwnerRepo(t *testing.T) {
 	err := PostCommitStatus(PostStatusOptions{
 		Commit: "deadbeef",

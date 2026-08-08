@@ -134,10 +134,29 @@ func PostCommitStatus(opts PostStatusOptions) error {
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		detail := strings.TrimSpace(string(respBody))
+		if commitUnknownToGitHub(resp.StatusCode, detail) {
+			return fmt.Errorf("GitHub has no commit %s in %s/%s (%s): push this commit to 'origin' before inspecting it - a commit status can only attach to a commit GitHub already has: %s",
+				opts.Commit, opts.Owner, opts.Repo, resp.Status, detail)
+		}
 		if loc := resp.Header.Get("Location"); loc != "" {
 			detail = strings.TrimSpace(fmt.Sprintf("redirected to %s (the repository may have been renamed or transferred; update the 'origin' remote) %s", loc, detail))
 		}
 		return fmt.Errorf("GitHub did not record the commit status (%s): %s", resp.Status, detail)
 	}
 	return nil
+}
+
+// commitUnknownToGitHub reports whether a rejection means GitHub has
+// never seen this commit, which it answers with "No commit found for
+// SHA: ..." (422 for a well-formed SHA it does not have). By far the
+// most common cause is a commit that only exists locally: inspector
+// inspects HEAD, and HEAD reaches GitHub only when it is pushed. That
+// body is accurate but names no cause, so the error is rewritten to name
+// the missing push - the same rule as every other failure here, that a
+// caller must be told the concrete thing to fix.
+func commitUnknownToGitHub(statusCode int, body string) bool {
+	if statusCode != http.StatusUnprocessableEntity && statusCode != http.StatusNotFound {
+		return false
+	}
+	return strings.Contains(strings.ToLower(body), "no commit found")
 }

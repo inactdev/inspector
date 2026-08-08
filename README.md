@@ -70,9 +70,11 @@ your own:
 }
 ```
 
-Then, with your work committed (inspector refuses to run against an uncommitted
-working tree - it can only be honest about a commit that actually matches what's
-on disk):
+The order is commit, push, then inspect. inspector refuses to run against an
+uncommitted working tree - it can only be honest about a commit that actually
+matches what's on disk - and the result it records is a commit status on that
+exact commit (see "Recording the result" below), which GitHub can only attach to
+a commit it already has. Inspecting a commit that exists only locally fails.
 
 ```
 inspector
