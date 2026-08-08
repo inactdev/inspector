@@ -116,6 +116,65 @@ func TestPostCommitStatus_APIRefusal(t *testing.T) {
 	}
 }
 
+// GitHub answers 301 for a renamed or transferred repository, and a
+// followed redirect turns the POST into a GET of the "list commit
+// statuses" endpoint, which answers 200 having recorded nothing. That
+// must be an error, not a silently successful post.
+func TestPostCommitStatus_RedirectIsNotSuccess(t *testing.T) {
+	posted := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posted = true
+			w.Header().Set("Location", "https://api.github.com/repositories/1/statuses/deadbeef")
+			w.WriteHeader(http.StatusMovedPermanently)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	err := PostCommitStatus(PostStatusOptions{
+		Owner:      "inactdev",
+		Repo:       "old-name",
+		Commit:     "deadbeef",
+		State:      StatusSuccess,
+		Token:      "test-token",
+		APIBaseURL: server.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error for a redirected post - nothing was recorded")
+	}
+	if !posted {
+		t.Fatal("expected the POST itself to have been attempted")
+	}
+	if !strings.Contains(err.Error(), "301") {
+		t.Fatalf("error = %q, want it to name the redirect status", err.Error())
+	}
+}
+
+// Only 201 Created means GitHub recorded the status; any other 2xx is a
+// different endpoint answering, not a recorded result.
+func TestPostCommitStatus_Non201SuccessIsNotSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	err := PostCommitStatus(PostStatusOptions{
+		Owner:      "inactdev",
+		Repo:       "inspector",
+		Commit:     "deadbeef",
+		State:      StatusSuccess,
+		Token:      "test-token",
+		APIBaseURL: server.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error for a 200 response - only 201 Created records a status")
+	}
+}
+
 func TestPostCommitStatus_NoOwnerRepo(t *testing.T) {
 	err := PostCommitStatus(PostStatusOptions{
 		Commit: "deadbeef",

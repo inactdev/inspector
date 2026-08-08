@@ -136,6 +136,25 @@ func TestRemoteOwnerRepo_NotGitHub(t *testing.T) {
 	}
 }
 
+// The unrecognized-remote error goes to stderr, which for this tool ends
+// up in CI and pipeline logs, so a credential embedded in the URL must
+// not travel with it.
+func TestRemoteOwnerRepo_NotGitHubRedactsCredentials(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	runGitT(t, dir, "remote", "add", "origin", "https://x-access-token:supersecret@gitlab.com/inactdev/inspector.git")
+
+	_, _, err := RemoteOwnerRepo(dir)
+	if err == nil {
+		t.Fatal("expected an error for a non-github.com remote")
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Fatalf("error = %q, want the embedded credential redacted", err.Error())
+	}
+	if !strings.Contains(err.Error(), "gitlab.com") {
+		t.Fatalf("error = %q, want it to still name the remote host", err.Error())
+	}
+}
+
 // resolveSymlinks lets the root comparison tolerate macOS's /tmp ->
 // /private/tmp symlink, which `git rev-parse --show-toplevel` resolves.
 func resolveSymlinks(t *testing.T, path string) string {

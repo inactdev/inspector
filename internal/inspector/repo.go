@@ -44,9 +44,21 @@ func RemoteOwnerRepo(repoRoot string) (owner, repo string, err error) {
 	url := strings.TrimSpace(out)
 	m := githubRemoteRE.FindStringSubmatch(url)
 	if m == nil {
-		return "", "", fmt.Errorf("origin remote %q is not a github.com URL inspector recognizes", url)
+		return "", "", fmt.Errorf("origin remote %q is not a github.com URL inspector recognizes", redactURLCredentials(url))
 	}
 	return m[1], m[2], nil
+}
+
+// urlCredentialRE matches the userinfo part of a URL - everything between
+// the scheme and the host.
+var urlCredentialRE = regexp.MustCompile(`^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@]+@`)
+
+// redactURLCredentials strips any embedded credentials from a remote URL
+// before it goes into an error message. inspector's errors land in CI and
+// pipeline logs, and a remote like https://user:token@example.com/o/r.git
+// would otherwise write that token there.
+func redactURLCredentials(url string) string {
+	return urlCredentialRE.ReplaceAllString(url, "${1}[redacted]@")
 }
 
 // WorkingTreeStatus returns the raw `git status --porcelain` output,

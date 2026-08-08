@@ -116,7 +116,7 @@ func postCommitStatus(repoPath string, result inspector.Result, state inspector.
 
 	description := fmt.Sprintf("inspector: %s", result.Outcome)
 	if result.ReportPath != "" {
-		description = fmt.Sprintf("inspector: %s - see %s locally", result.Outcome, inspector.RunsDirName)
+		description = fmt.Sprintf("inspector: %s - see %s/%s locally", result.Outcome, inspector.RunsDirName, inspector.LatestReportName)
 	}
 
 	return inspector.PostCommitStatus(inspector.PostStatusOptions{

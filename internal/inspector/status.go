@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // StatusContext is the stable name GitHub shows for the commit status
@@ -26,6 +27,25 @@ const GitHubTokenEnvVar = "GITHUB_TOKEN"
 
 // defaultStatusAPIBaseURL is GitHub's REST API.
 const defaultStatusAPIBaseURL = "https://api.github.com"
+
+// statusPostTimeout bounds the whole post. inspector runs unattended
+// (SPEC.md section 3), so a blackholed api.github.com must become a loud
+// failure rather than a hang that outlives the check timeout the verdict
+// was already produced under.
+const statusPostTimeout = 30 * time.Second
+
+// statusHTTPClient refuses to follow redirects. Go turns a redirected
+// POST into a GET, and GitHub answers 301 for a renamed or transferred
+// repository - the redirected GET on the same path is the valid "list
+// commit statuses" call, which answers 200 having recorded nothing. Left
+// followed, that reads as a successful post and an unrecorded result
+// looks like success, which SPEC.md section 7 forbids.
+var statusHTTPClient = &http.Client{
+	Timeout: statusPostTimeout,
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // StatusState is the state GitHub records for a commit status. Only
 // success and failure are used - a Refused outcome posts no status at
@@ -58,7 +78,8 @@ type PostStatusOptions struct {
 
 // PostCommitStatus posts a commit status to GitHub's REST API
 // (https://docs.github.com/en/rest/commits/statuses). Every failure -
-// a missing token, an unreachable API, a non-2xx response - comes back
+// a missing token, an unreachable API, anything but the documented 201
+// Created (a redirect included) - comes back
 // as a descriptive error naming the concrete problem, so a caller can
 // never mistake a failed post for a successful one and silently treat
 // an unrecorded result as a recorded one.
@@ -101,15 +122,22 @@ func PostCommitStatus(opts PostStatusOptions) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "inspector")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := statusHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("posting commit status to %s: %w", base, err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	// Only the documented 201 Created means GitHub actually recorded the
+	// status. Anything else - including a redirect this client stopped at
+	// - is a failure to record, and must be reported as one.
+	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("GitHub rejected the commit status (%s): %s", resp.Status, strings.TrimSpace(string(respBody)))
+		detail := strings.TrimSpace(string(respBody))
+		if loc := resp.Header.Get("Location"); loc != "" {
+			detail = strings.TrimSpace(fmt.Sprintf("redirected to %s (the repository may have been renamed or transferred; update the 'origin' remote) %s", loc, detail))
+		}
+		return fmt.Errorf("GitHub did not record the commit status (%s): %s", resp.Status, detail)
 	}
 	return nil
 }

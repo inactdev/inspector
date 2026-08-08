@@ -158,12 +158,13 @@ look like success.
 What a reader should conclude:
 
 - **Green status** - inspector ran this exact commit's checks and they passed.
-- **Red status** - inspector ran this exact commit's checks and they failed,
-  or inspector reached a verdict locally but could not record it (same
-  status either way; the local run's stderr is where that distinction lives).
-- **No status at all** - this commit has not been inspected. Read the same as
-  red: push whenever you like, nothing runs on its own, and a status from an
-  earlier commit does not carry forward.
+- **Red status** - inspector ran this exact commit's checks and they failed.
+- **No status at all** - this commit has not been inspected, or inspector
+  reached a verdict locally and could not record it (a failed post writes
+  nothing, so it leaves no status either; the local run's stderr is where
+  that distinction lives). Read the same as red: push whenever you like,
+  nothing runs on its own, and a status from an earlier commit does not
+  carry forward.
 
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.
