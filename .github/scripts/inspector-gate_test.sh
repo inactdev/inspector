@@ -274,6 +274,15 @@ assert_patterns "protectedPaths entries come back regardless of what check conta
 # This cannot, and does not try to, cover main()'s live GitHub API
 # orchestration - consistent with this file's header, that code path is
 # only exercised inside Actions, never by anything script/check runs.
+#
+# It also cannot cover its OWN scaffolding: mktemp, ln, sed and rm below
+# run in the outer, unrestricted-PATH copy of this file, and only the
+# inner re-execution has PATH restricted, so no failure of theirs can ever
+# reach the restricted run. They are named in REQUIRED_TOOLS directly
+# instead. Proving them would need a second, different mechanism checking
+# the checker, which is not worth building for four coreutils that are
+# safe to just require outright - script/check cannot finish without them
+# either way, and the point of the preflight is that it says so by name.
 if [ -z "${INSPECTOR_GATE_DRIFT_CHECK:-}" ]; then
   # shellcheck source=required-tools.sh
   source ./required-tools.sh

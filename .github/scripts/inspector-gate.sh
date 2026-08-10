@@ -245,6 +245,35 @@ protected_paths_from_response() {
   jq -r '(.protectedPaths // [])[]' <<< "$content"
 }
 
+# gh_api_call runs one `gh api` call the way all three of main()'s calls
+# need it run: gh's stderr captured to a file rather than left to reach the
+# log raw, and turned into one annotation-safe line by
+# gh_api_failure_reason. It puts the response in GH_API_OUT (still set on
+# failure - the Contents API's 404 body is a real answer, not noise) and
+# the reason in GH_API_ERROR, then returns gh's own exit status, so each
+# call site keeps its own wording and its own exit-or-continue decision.
+#
+# Part of main()'s orchestration, and untested for the same reason the
+# rest of it is: it only does anything when there is a real `gh` and a real
+# GitHub behind it. See this file's header.
+GH_API_OUT=""
+GH_API_ERROR=""
+gh_api_call() {
+  local stderr_file rc=0
+  GH_API_OUT=""
+  GH_API_ERROR=""
+  stderr_file=$(mktemp) || {
+    GH_API_ERROR="a temporary file to capture gh's stderr could not be created"
+    return 1
+  }
+  GH_API_OUT=$(gh api "$@" 2>"$stderr_file") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    GH_API_ERROR=$(gh_api_failure_reason "$(cat "$stderr_file")" "$rc")
+  fi
+  rm -f "$stderr_file"
+  return "$rc"
+}
+
 # main does the real GitHub API work: fetch the head commit's status,
 # fetch the pull request's changed-file list, fetch the base branch tip's
 # .inspector.json for project-specific protected paths, then apply the
@@ -277,19 +306,13 @@ main() {
   # log but gh's raw stderr, so a rate limit or a token-scope problem reads
   # exactly like a real red - and question 2 never runs to say otherwise.
   # Fail closed either way, but say which of the two calls failed and why.
-  local states state stderr_file rc
-  stderr_file=$(mktemp)
-  rc=0
-  states=$(STATUS_CONTEXT="$STATUS_CONTEXT" gh api "repos/$REPO/statuses/$HEAD_SHA?per_page=100" --paginate \
-    --jq '.[] | select(.context == env.STATUS_CONTEXT) | .state' 2>"$stderr_file") || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    local status_error
-    status_error=$(gh_api_failure_reason "$(cat "$stderr_file")" "$rc")
-    rm -f "$stderr_file"
-    echo "::error::Could not read this commit's commit statuses from the GitHub API, so whether a green \"$STATUS_CONTEXT\" status exists is unknown: $status_error. Failing closed rather than guessing - this is a problem reaching GitHub, not a verdict on the code; re-run this check."
+  local states state
+  if ! STATUS_CONTEXT="$STATUS_CONTEXT" gh_api_call "repos/$REPO/statuses/$HEAD_SHA?per_page=100" --paginate \
+    --jq '.[] | select(.context == env.STATUS_CONTEXT) | .state'; then
+    echo "::error::Could not read this commit's commit statuses from the GitHub API, so whether a green \"$STATUS_CONTEXT\" status exists is unknown: $GH_API_ERROR. Failing closed rather than guessing - this is a problem reaching GitHub, not a verdict on the code; re-run this check."
     exit 1
   fi
-  rm -f "$stderr_file"
+  states="$GH_API_OUT"
   state="${states%%$'\n'*}"
   local verdict reason
   IFS=$'\t' read -r verdict reason <<< "$(status_verdict "$state" "$STATUS_CONTEXT")"
@@ -310,18 +333,12 @@ main() {
   # exactly the number of files GitHub listed, which listing_count_check
   # compares against the pull request's own changed_files count.
   local touched listed
-  stderr_file=$(mktemp)
-  rc=0
-  touched=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" --paginate \
-    --jq '.[] | [.filename, (.previous_filename // empty)] | @tsv' 2>"$stderr_file") || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    local files_error
-    files_error=$(gh_api_failure_reason "$(cat "$stderr_file")" "$rc")
-    rm -f "$stderr_file"
-    echo "::error::Could not read this pull request's changed-file list from the GitHub API, so it cannot be checked against the protected-path list at all: $files_error. Failing closed rather than passing unchecked - re-run this check."
+  if ! gh_api_call "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" --paginate \
+    --jq '.[] | [.filename, (.previous_filename // empty)] | @tsv'; then
+    echo "::error::Could not read this pull request's changed-file list from the GitHub API, so it cannot be checked against the protected-path list at all: $GH_API_ERROR. Failing closed rather than passing unchecked - re-run this check."
     exit 1
   fi
-  rm -f "$stderr_file"
+  touched="$GH_API_OUT"
   if [ -z "$touched" ]; then
     listed=0
   else
@@ -378,14 +395,9 @@ main() {
   # calls rather than discarded: when there is no response at all, it is
   # the only thing that can say which failure it was.
   local config_response project_paths config_error
-  stderr_file=$(mktemp)
-  rc=0
-  config_response=$(gh api -X GET --include "repos/$REPO/contents/.inspector.json" -f ref="$BASE_REF" 2>"$stderr_file") || rc=$?
-  config_error=""
-  if [ "$rc" -ne 0 ]; then
-    config_error=$(gh_api_failure_reason "$(cat "$stderr_file")" "$rc")
-  fi
-  rm -f "$stderr_file"
+  gh_api_call -X GET --include "repos/$REPO/contents/.inspector.json" -f ref="$BASE_REF" || true
+  config_response="$GH_API_OUT"
+  config_error="$GH_API_ERROR"
   if ! project_paths=$(protected_paths_from_response "$config_response" "$config_error"); then
     echo "::error::Could not read the base branch's .inspector.json, so this pull request cannot be checked against the protected paths this project actually declares: $project_paths. Failing closed rather than checking against a shorter list - re-run this check, or have the Client review it and deliberately override it."
     exit 1
