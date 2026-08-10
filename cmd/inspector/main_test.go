@@ -11,7 +11,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/inactdev/inspector/internal/container"
 )
+
+// requireDocker skips a test that genuinely needs a live container
+// runtime, rather than failing on a machine without one.
+func requireDocker(t *testing.T) {
+	t.Helper()
+	if err := container.EnsureAvailable(); err != nil {
+		t.Skipf("no usable container runtime, skipping: %v", err)
+	}
+}
 
 func newTestRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
@@ -101,7 +112,8 @@ func runCLI(t *testing.T, dir string, args ...string) (exitCode int, stdout, std
 }
 
 func TestCLI_Green(t *testing.T) {
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	got := stubGitHubStatusAPI(t, dir, http.StatusCreated, "")
 
 	code, stdout, _ := runCLI(t, dir)
@@ -123,7 +135,8 @@ func TestCLI_Green(t *testing.T) {
 }
 
 func TestCLI_Red(t *testing.T) {
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false"}`})
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false", "image": "alpine"}`})
 	got := stubGitHubStatusAPI(t, dir, http.StatusCreated, "")
 
 	code, stdout, _ := runCLI(t, dir)
@@ -175,7 +188,13 @@ func TestCLI_UnknownFlagExitsWithUsageCode(t *testing.T) {
 }
 
 func TestCLI_SignalKilledCheckExitsRefused(t *testing.T) {
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "kill -9 $$"}`})
+	requireDocker(t)
+	// A container's own init process is immune to a signal sent to it
+	// from within its own PID namespace, even SIGKILL - a real Linux
+	// pid-namespace behavior, not a bug - so the check command has to
+	// kill a forked child rather than itself for this to reproduce; see
+	// AGENTS.md.
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "sh -c 'kill -9 $$' && true", "image": "alpine"}`})
 
 	code, _, stderr := runCLI(t, dir)
 	if code != exitRefused {
@@ -187,7 +206,8 @@ func TestCLI_SignalKilledCheckExitsRefused(t *testing.T) {
 }
 
 func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	if err := os.WriteFile(filepath.Join(dir, ".inspector"), []byte("occupied"), 0o644); err != nil {
 		t.Fatalf("occupying .inspector: %v", err)
 	}
@@ -209,7 +229,8 @@ func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
 }
 
 func TestCLI_ClaimTextIsAccepted(t *testing.T) {
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	stubGitHubStatusAPI(t, dir, http.StatusCreated, "")
 
 	code, _, _ := runCLI(t, dir, "the", "login", "flow", "is", "done")
@@ -225,7 +246,8 @@ func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 // request. Each must fail loudly and never exit as if it had succeeded.
 
 func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	runGitT(t, dir, "remote", "add", "origin", "https://github.com/inactdev/inspector.git")
 	t.Setenv("GITHUB_TOKEN", "")
 
@@ -245,7 +267,8 @@ func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 }
 
 func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
 	code, _, stderr := runCLI(t, dir)
@@ -258,7 +281,8 @@ func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
 }
 
 func TestCLI_StatusAPIRefusalFailsLoudly(t *testing.T) {
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	stubGitHubStatusAPI(t, dir, http.StatusUnauthorized, `{"message":"Bad credentials"}`)
 
 	code, stdout, stderr := runCLI(t, dir)

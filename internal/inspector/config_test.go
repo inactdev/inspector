@@ -19,7 +19,7 @@ func TestLoadConfig_Missing(t *testing.T) {
 
 func TestLoadConfig_EmptyCheck(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "   "}`})
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "   ", "image": "alpine"}`})
 
 	_, err := LoadConfig(dir)
 	if !errors.Is(err, ErrNoCheckCommand) {
@@ -29,7 +29,7 @@ func TestLoadConfig_EmptyCheck(t *testing.T) {
 
 func TestLoadConfig_Valid(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check"}`})
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "golang:1.22"}`})
 
 	cfg, err := LoadConfig(dir)
 	if err != nil {
@@ -37,6 +37,55 @@ func TestLoadConfig_Valid(t *testing.T) {
 	}
 	if cfg.Check != "make check" {
 		t.Fatalf("check = %q, want %q", cfg.Check, "make check")
+	}
+	if cfg.Image != "golang:1.22" {
+		t.Fatalf("image = %q, want %q", cfg.Image, "golang:1.22")
+	}
+}
+
+func TestLoadConfig_NoImage(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check"}`})
+
+	_, err := LoadConfig(dir)
+	if !errors.Is(err, ErrNoImage) {
+		t.Fatalf("expected ErrNoImage, got %v", err)
+	}
+}
+
+func TestLoadConfig_EmptyImage(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "   "}`})
+
+	_, err := LoadConfig(dir)
+	if !errors.Is(err, ErrNoImage) {
+		t.Fatalf("expected ErrNoImage, got %v", err)
+	}
+}
+
+func TestLoadConfig_ReadsNetwork(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "network": true}`})
+
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.Network {
+		t.Fatal("Network = false, want true")
+	}
+}
+
+func TestLoadConfig_NetworkDefaultsFalse(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine"}`})
+
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Network {
+		t.Fatal("Network = true, want false (the check command must opt in)")
 	}
 }
 
@@ -66,7 +115,7 @@ func TestConfig_Timeout_Configured(t *testing.T) {
 
 func TestLoadConfig_ReadsTimeoutSeconds(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "timeoutSeconds": 120}`})
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "timeoutSeconds": 120}`})
 
 	cfg, err := LoadConfig(dir)
 	if err != nil {

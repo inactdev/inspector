@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/inactdev/inspector/internal/container"
 )
 
 // Outcome is the result of one inspector run.
@@ -19,9 +21,10 @@ const (
 	// Red means the project's check command failed.
 	Red Outcome = "red"
 	// Refused means inspector never reached a verdict on the code - no
-	// check command configured, a dirty working tree, a check command
-	// killed by a signal before it could finish on its own, or a check
-	// command that ran past its timeout and was killed for it. Those
+	// check command or image configured, no usable container runtime, a
+	// dirty working tree, a check command killed by a signal before it
+	// could finish on its own, or a check command that ran past its
+	// timeout and was killed for it. Those
 	// last two did run, unlike the others: something (the OOM killer,
 	// an external kill, inspector's own deadline) killed it before it
 	// judged the code at all, so its exit status is not a verdict on
@@ -99,7 +102,22 @@ func Run(opts Options) (Result, error) {
 					"inspector refuses to run rather than silently doing nothing - a repo that runs\n"+
 					"unprotected must never look identical to one that runs protected.\n\n"+
 					"Configure it by creating %s in the repo root:\n\n"+
-					"  {\n    \"check\": \"<your project's own test/lint/build command>\"\n  }\n",
+					"  {\n    \"check\": \"<your project's own test/lint/build command>\",\n"+
+					"    \"image\": \"<a container image with your project's toolchain>\"\n  }\n",
+				ConfigFileName,
+			),
+		}, nil
+	}
+	if errors.Is(err, ErrNoImage) {
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"no container image configured for this repo.\n\n"+
+					"the check command runs inside a container, not on this machine - inspector\n"+
+					"needs to know which image has this project's own toolchain in it. Add an\n"+
+					"\"image\" field to %s naming one:\n\n"+
+					"  {\n    \"check\": \"...\",\n    \"image\": \"golang:1.22\"\n  }\n",
 				ConfigFileName,
 			),
 		}, nil
@@ -108,9 +126,22 @@ func Run(opts Options) (Result, error) {
 		return Result{Outcome: Refused, Commit: commit, Message: err.Error()}, nil
 	}
 
+	if err := container.EnsureAvailable(); err != nil {
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"no usable container runtime: %v\n\n"+
+					"inspector runs every check command inside a container instead of on this\n"+
+					"machine directly, and refuses rather than silently running unsandboxed.",
+				err,
+			),
+		}, nil
+	}
+
 	timeout := cfg.Timeout()
 	started := time.Now()
-	checkResult, err := RunCheck(repoRoot, cfg.Check, timeout, opts.Stdout, opts.Stderr)
+	checkResult, err := RunCheck(repoRoot, cfg.Check, cfg.Image, cfg.Network, timeout, opts.Stdout, opts.Stderr)
 	if err != nil {
 		return Result{}, fmt.Errorf("running check command: %w", err)
 	}
@@ -143,6 +174,16 @@ func Run(opts Options) (Result, error) {
 	reportPath, writeErr := WriteReport(repoRoot, report)
 
 	switch {
+	case checkResult.TimedOut && checkResult.KillFailed:
+		result.Message = fmt.Sprintf(
+			"the check command did not finish within its %s timeout, and docker refused to stop its container - inspector cannot confirm it was stopped, so it may still be running against this repo (check `docker ps`; its own output above says what docker reported). inspector never reached a verdict, so this cannot be a verdict. Set timeoutSeconds in %s if this project's checks legitimately need longer.",
+			timeout, ConfigFileName,
+		)
+		if writeErr != nil {
+			result.Message += fmt.Sprintf(" Its local report also failed to save: %v", writeErr)
+		} else {
+			result.ReportPath = reportPath
+		}
 	case checkResult.TimedOut:
 		result.Message = fmt.Sprintf(
 			"the check command did not finish within its %s timeout and was killed, along with anything it started - inspector never reached a verdict, so this cannot be a verdict. Set timeoutSeconds in %s if this project's checks legitimately need longer.",

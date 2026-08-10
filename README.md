@@ -46,26 +46,58 @@ linux/arm, and freebsd/arm - on those, run `CGO_ENABLED=0 go test ./...`
 instead, which runs the same suite without the race detector and so needs no C
 compiler.
 
+Also requires [Docker](https://docs.docker.com/get-docker/) - the check
+command runs inside a container, not on your machine directly. Without a
+usable Docker (installed and its daemon reachable), inspector refuses rather
+than falling back to running the check unsandboxed; see below.
+
 ## Use
 
 In the repo you want inspected, add `.inspector.json` at the root, naming that
-project's own check command - inspector never guesses at one:
+project's own check command and the container image it runs in - inspector
+never guesses at either:
 
 ```json
 {
-  "check": "npm test && npm run lint"
+  "check": "npm test && npm run lint",
+  "image": "node:20"
 }
 ```
 
-The check command has 15 minutes to finish before inspector kills it -
-including anything it started, like a compound command's children - and
-refuses rather than hanging forever, since SPEC.md has Fabrica invoking
+`image` has to have the project's own toolchain in it, the same way `check`
+has to be the project's own command - inspector ships no images and builds
+none for you. The check command runs with that image, bind-mounted to the
+repo (and nothing else on the host) at `/workspace`, its own working
+directory. If the image is missing or unusable, inspector refuses the same way
+it refuses a missing check command, rather than quietly doing nothing.
+
+The container gets no network access by default. A check command that needs
+it - installing dependencies is the common case - has to opt in:
+
+```json
+{
+  "check": "npm install && npm test && npm run lint",
+  "image": "node:20",
+  "network": true
+}
+```
+
+That default is deliberate, not incidental: the same container that keeps a
+hostile or broken check command from reaching the rest of your machine is also
+the thing standing between it and the network, which is how it would exfiltrate
+anything it found. Turning `network` on trusts the check command with outbound
+access; leave it off for anything you haven't read.
+
+The check command has 15 minutes to finish before inspector kills the
+container - including anything it started, like a compound command's children
+- and refuses rather than hanging forever, since SPEC.md has Fabrica invoking
 inspector unattended. If this project's checks legitimately need longer, set
 your own:
 
 ```json
 {
   "check": "npm test && npm run lint",
+  "image": "node:20",
   "timeoutSeconds": 1800
 }
 ```
@@ -89,13 +121,14 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
 - `0` green
 - `1` red
 - `2` refused - inspector tried to reach a verdict and couldn't: no check
-  command configured, a dirty working tree, a check command that ran past its
-  timeout or was killed by a signal before it could finish on its own (the OOM
-  killer, an external kill, inspector's own deadline - it never judged the
-  code, so its exit status is not a verdict either way), an infrastructure
-  failure, or a real local green/red that could not be posted as a commit
-  status (see "Recording the result" below) - an unrecorded result proves
-  nothing to the gate, so it isn't a verdict either. Never treat `2` as red.
+  command or image configured, no usable container runtime, a dirty working
+  tree, a check command that ran past its timeout or was killed by a signal
+  before it could finish on its own (the OOM killer, an external kill,
+  inspector's own deadline - it never judged the code, so its exit status is
+  not a verdict either way), an infrastructure failure, or a real local
+  green/red that could not be posted as a commit status (see "Recording the
+  result" below) - an unrecorded result proves nothing to the gate, so it
+  isn't a verdict either. Never treat `2` as red.
 
   A signal kill is detected two ways, because a compound check command like
   `npm test && npm run lint` doesn't show it the same way a plain one does:
@@ -174,9 +207,10 @@ limit on what a green status does and doesn't prove.
 ## Status
 
 The check (issue #1) is built: locally, `inspector` runs a project's own check
-command against HEAD and reports green or red, refusing loudly when no check
-command is configured. Recording the result (issue #3) is also built: a green
-or red run posts a commit status to GitHub, and a missing token or a rejected
-post fails loudly rather than exiting as if it had succeeded. Still to come:
-the fixer, the gate workflow, and the installer - see [SPEC.md](SPEC.md) and
-the repo's issues.
+command against HEAD, inside a container (issue #13), and reports green or
+red, refusing loudly when no check command or image is configured, or no
+usable container runtime is found. Recording the result (issue #3) is also
+built: a green or red run posts a commit status to GitHub, and a missing token
+or a rejected post fails loudly rather than exiting as if it had succeeded.
+Still to come: the fixer, the gate workflow, and the installer - see
+[SPEC.md](SPEC.md) and the repo's issues.
