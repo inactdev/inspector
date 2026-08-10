@@ -63,7 +63,12 @@ type Config struct {
 	// automatically, however it's written - a project must list the
 	// file(s) behind its own check command here explicitly. One glob
 	// pattern per entry, matched the same way inspector-gate.sh matches
-	// them: `*` matches any characters, `/` included. inspector itself
+	// them: `*` matches any characters, `/` included, so `deploy/*`
+	// already covers everything at any depth under `deploy/`. There is
+	// no separate recursive `**` - it is just two `*` in a row, so a
+	// leading `**/` still requires a literal `/` and `**/*.tf` does NOT
+	// match a `main.tf` at the repository root. Write `*.tf` for that.
+	// inspector itself
 	// never reads this field - it exists only for inspector-gate, which
 	// reads it from the BASE branch's copy of this file via the GitHub
 	// API, never the pull request's own copy.

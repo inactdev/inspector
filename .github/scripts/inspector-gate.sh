@@ -162,15 +162,23 @@ gh_api_failure_reason() {
 # The single safe absence is HTTP 404 - the file genuinely is not there,
 # and a project that has not adopted .inspector.json still gets the floor.
 #
-# The argument is the complete `gh api --include` response (status line,
-# headers, blank line, body), or "" when the call produced no response at
-# all.
+# The first argument is the complete `gh api --include` response (status
+# line, headers, blank line, body), or "" when the call produced no
+# response at all. The second is optional: gh's own one-line explanation
+# for that call, already run through gh_api_failure_reason. It is the only
+# thing that can say WHY there was no response - DNS, an unreachable
+# GitHub, a gh crash all look identical from an empty string - so when the
+# caller has it, that reason is named instead of guessing between them.
 protected_paths_from_response() {
-  local raw="$1"
+  local raw="$1" gh_error="${2:-}"
   local proto http_status rest body encoded content kind
 
   if [ -z "$raw" ]; then
-    echo "the request for it produced no HTTP response at all (a network failure, or gh could not reach GitHub)"
+    if [ -n "$gh_error" ]; then
+      echo "the request for it produced no HTTP response at all: $gh_error"
+    else
+      echo "the request for it produced no HTTP response at all (a network failure, or gh could not reach GitHub)"
+    fi
     return 1
   fi
   read -r proto http_status rest <<< "$raw" || true
@@ -363,9 +371,22 @@ main() {
   # means "this project simply has no .inspector.json", and every other way
   # this read can go wrong fails closed rather than shrinking the protected
   # list to the floor without saying so. See protected_paths_from_response.
-  local config_response project_paths
-  config_response=$(gh api -X GET --include "repos/$REPO/contents/.inspector.json" -f ref="$BASE_REF" 2>/dev/null) || true
-  if ! project_paths=$(protected_paths_from_response "$config_response"); then
+  #
+  # gh exits non-zero on any non-2xx, including the 404 that is the one
+  # safe absence here, so the exit status alone decides nothing - the
+  # response body does. But gh's stderr is captured like the other two
+  # calls rather than discarded: when there is no response at all, it is
+  # the only thing that can say which failure it was.
+  local config_response project_paths config_error
+  stderr_file=$(mktemp)
+  rc=0
+  config_response=$(gh api -X GET --include "repos/$REPO/contents/.inspector.json" -f ref="$BASE_REF" 2>"$stderr_file") || rc=$?
+  config_error=""
+  if [ "$rc" -ne 0 ]; then
+    config_error=$(gh_api_failure_reason "$(cat "$stderr_file")" "$rc")
+  fi
+  rm -f "$stderr_file"
+  if ! project_paths=$(protected_paths_from_response "$config_response" "$config_error"); then
     echo "::error::Could not read the base branch's .inspector.json, so this pull request cannot be checked against the protected paths this project actually declares: $project_paths. Failing closed rather than checking against a shorter list - re-run this check, or have the Client review it and deliberately override it."
     exit 1
   fi

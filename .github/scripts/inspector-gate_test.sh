@@ -136,9 +136,9 @@ inspector_json_response() {
 }
 
 assert_fails_closed() {
-  local desc="$1" raw="$2" expected_substring="$3"
+  local desc="$1" raw="$2" expected_substring="$3" gh_error="${4:-}"
   local out rc=0
-  out=$(protected_paths_from_response "$raw") || rc=$?
+  out=$(protected_paths_from_response "$raw" "$gh_error") || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "FAIL: $desc - returned success instead of failing closed (patterns: \"$out\")"
     failures=$((failures + 1))
@@ -181,6 +181,18 @@ assert_fails_closed "a server error fails closed rather than reading as absent" 
 assert_fails_closed "no response at all (a network failure) fails closed" \
   "" \
   "no HTTP response at all"
+
+# When the caller has gh's own stderr, the reason is gh's words rather
+# than a guess between the several ways "no response" can happen.
+assert_fails_closed "no response at all names gh's own reason when the caller has it" \
+  "" \
+  "no HTTP response at all: dial tcp: lookup api.github.com: no such host" \
+  "dial tcp: lookup api.github.com: no such host"
+
+assert_fails_closed "an empty gh reason falls back to naming the possibilities" \
+  "" \
+  "a network failure, or gh could not reach GitHub" \
+  ""
 
 assert_fails_closed "a reply that is not an HTTP response fails closed" \
   "gh: could not resolve host" \

@@ -221,9 +221,15 @@ plus whatever a project lists under `protectedPaths` in its `.inspector.json`:
 {
   "check": "check.sh",
   "image": "node:20",
-  "protectedPaths": ["check.sh", "deploy/**"]
+  "protectedPaths": ["check.sh", "deploy/*", "*.tf"]
 }
 ```
+
+One glob pattern per entry. A `*` matches any characters, `/` included, so
+`deploy/*` already covers everything at any depth under `deploy/`. There is no
+separate recursive `**` wildcard - it is just two `*` in a row, so a leading
+`**/` still requires a literal `/` and `**/*.tf` will *not* match a `main.tf`
+at the repository root. Write `*.tf` when you mean every `.tf` file.
 
 **Your own check command is not protected automatically - list it under
 `protectedPaths` yourself.** This was tried the other way: deriving a pattern
