@@ -12,8 +12,9 @@ import (
 
 // ConfigFileName is the project-level config inspector reads to learn the
 // project's own definition of green. It is committed to the repo, not
-// gitignored, so it is visible for review and eligible for protected-file
-// treatment once inspector-gate (issue #4) exists.
+// gitignored, so it is visible for review - and inspector-gate protects
+// it unconditionally (it is in that script's ALWAYS_PROTECTED floor), so
+// a pull request cannot edit its own protectedPaths list away.
 const ConfigFileName = ".inspector.json"
 
 // ErrNoCheckCommand means the repo has no usable check command configured.

@@ -94,6 +94,10 @@ find_protected_match() {
       [ -n "$file" ] || continue
       for candidate in "$file" "$previous_file"; do
         [ -n "$candidate" ] || continue
+        # $pattern is deliberately unquoted: it is a glob, and quoting it
+        # would turn every protected pattern into an exact string match,
+        # so ".github/**" would stop protecting anything under .github/.
+        # shellcheck disable=SC2053
         if [[ "$candidate" == $pattern ]]; then
           printf '%s\n' "$candidate"
           return 0
