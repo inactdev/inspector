@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Unit tests for inspector-gate.sh's pure decision functions
 # (status_verdict, find_protected_match, listing_count_check,
-# protected_paths_from_response). These take plain strings in and print
+# gh_api_failure_reason, protected_paths_from_response). These take plain
+# strings in and print
 # plain strings out - no network, no GitHub API, no environment variables -
 # so they can run anywhere, including here. The last one takes a raw API
 # response as a string, so the decisions made on top of a response are
@@ -95,6 +96,28 @@ assert_eq "any other mismatch is a mid-run push race" \
 assert_eq "a mismatch below 3000 is a race, not a cap, even at the boundary" \
   "race" "$(listing_count_check 2999 3000)"
 
+# --- gh_api_failure_reason ---
+#
+# An ::error:: annotation is one line, so a multi-line gh error has to be
+# joined rather than truncated at the first newline, and an empty capture
+# still has to say something.
+
+assert_eq "a single-line gh error comes through as-is" \
+  "gh: HTTP 403: API rate limit exceeded" \
+  "$(gh_api_failure_reason "gh: HTTP 403: API rate limit exceeded" 1)"
+
+assert_eq "a multi-line gh error is joined onto one line" \
+  "gh: HTTP 403; API rate limit exceeded; try again later" \
+  "$(gh_api_failure_reason "$(printf 'gh: HTTP 403\nAPI rate limit exceeded\ntry again later')" 1)"
+
+assert_eq "blank lines and surrounding whitespace are dropped from the join" \
+  "gh: HTTP 502; Bad Gateway" \
+  "$(gh_api_failure_reason "$(printf '  gh: HTTP 502  \n\n\tBad Gateway\n\n')" 1)"
+
+assert_eq "a silent failure still names the exit status instead of trailing off" \
+  "gh exited 7 without printing a reason" \
+  "$(gh_api_failure_reason "" 7)"
+
 # --- protected_paths_from_response ---
 #
 # Fixtures are shaped like a real `gh api --include` response: status
@@ -166,6 +189,23 @@ assert_fails_closed "a reply that is not an HTTP response fails closed" \
 assert_fails_closed "empty content (the API's 1MB inline limit) fails closed" \
   "$(contents_response "200 OK" '{"content":"","encoding":"none"}')" \
   "empty content"
+
+# The three ways a 200's content can be unreadable are distinct reasons,
+# not all "empty content" blamed on the 1MB inline limit.
+
+assert_fails_closed "a 200 whose body is not JSON says so, rather than blaming the 1MB limit" \
+  "$(contents_response "200 OK" '{"content": truncated mid-resp')" \
+  "not readable JSON"
+
+assert_fails_closed "content that is not valid base64 says so, rather than blaming the 1MB limit" \
+  "$(contents_response "200 OK" '{"content":"!!! not base64 !!!","encoding":"base64"}')" \
+  "not valid base64"
+
+# "Cg==" is a single newline: real base64, decodes fine, but there is no
+# file there to read paths out of.
+assert_fails_closed "content that decodes to an empty file says so, rather than blaming the 1MB limit" \
+  "$(contents_response "200 OK" '{"content":"Cg==","encoding":"base64"}')" \
+  "decoded to an empty file"
 
 assert_fails_closed "content that is not valid JSON fails closed" \
   "$(inspector_json_response 'check: script/check')" \

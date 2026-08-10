@@ -35,7 +35,8 @@
 #     functions below directly, with fixture data, never touching the
 #     network
 # Only the pure functions (status_verdict, find_protected_match,
-# listing_count_check, protected_paths_from_response) are unit tested. The
+# listing_count_check, gh_api_failure_reason,
+# protected_paths_from_response) are unit tested. The
 # API orchestration in main() can only be exercised inside Actions - see
 # inspector-gate_test.sh's header for why that is an honest limitation
 # rather than a gap.
@@ -125,6 +126,24 @@ listing_count_check() {
   echo "race"
 }
 
+# gh_api_failure_reason turns a failed `gh api` call's captured stderr into
+# the one-line reason an ::error:: annotation can carry. Annotations are
+# single-line - a raw newline ends the annotation and drops everything
+# after it - so gh's lines are joined with "; " instead. An empty capture
+# still names the exit status, so the message never trails off after a
+# colon with nothing behind it.
+gh_api_failure_reason() {
+  local stderr_text="$1" exit_status="$2"
+  local joined
+  joined=$(printf '%s\n' "$stderr_text" | tr -d '\r' |
+    awk 'NF { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); out = (out == "" ? $0 : out "; " $0) } END { print out }')
+  if [ -z "$joined" ]; then
+    printf 'gh exited %s without printing a reason\n' "$exit_status"
+    return
+  fi
+  printf '%s\n' "$joined"
+}
+
 # protected_paths_from_response turns the GitHub Contents API's raw
 # response for the BASE branch tip's .inspector.json into that project's own
 # protectedPaths entries, one per line. It does NOT derive anything from
@@ -144,7 +163,7 @@ listing_count_check() {
 # all.
 protected_paths_from_response() {
   local raw="$1"
-  local proto http_status rest body content kind
+  local proto http_status rest body encoded content kind
 
   if [ -z "$raw" ]; then
     echo "the request for it produced no HTTP response at all (a network failure, or gh could not reach GitHub)"
@@ -169,9 +188,27 @@ protected_paths_from_response() {
   esac
 
   body=$(awk 'in_body { print } /^\r?$/ { in_body = 1 }' <<< "$raw")
-  content=$(jq -r '.content // ""' <<< "$body" 2>/dev/null | tr -d '\n' | base64 -d 2>/dev/null) || content=""
-  if [ -z "$content" ]; then
+
+  # Each step names its own failure. Reading the body, un-base64ing it, and
+  # the file genuinely being empty are three different things that used to
+  # collapse into one message blaming the API's 1MB inline-content limit -
+  # which was a guess, and wrong for two of the three. This function's whole
+  # contract is naming the reason it refused, so it has to name the real one.
+  if ! encoded=$(jq -r '.content // ""' <<< "$body" 2>/dev/null); then
+    echo "its response body was not readable JSON, so the file's content could not be found in it"
+    return 1
+  fi
+  encoded=$(tr -d '\n' <<< "$encoded")
+  if [ -z "$encoded" ]; then
     echo "it came back with empty content (the Contents API only inlines files up to 1MB, so a larger one reads as empty here)"
+    return 1
+  fi
+  if ! content=$(base64 -d <<< "$encoded" 2>/dev/null); then
+    echo "its content was not valid base64, so the file could not be decoded"
+    return 1
+  fi
+  if [ -z "$content" ]; then
+    echo "it decoded to an empty file, so the paths it protects cannot be read"
     return 1
   fi
   if ! jq empty >/dev/null 2>&1 <<< "$content"; then
@@ -222,9 +259,25 @@ main() {
   # own $ENV lookup instead of shell interpolation - it comes from this
   # workflow's own env block, not the pull request, so it's trusted, but
   # this avoids relying on that being true forever.
-  local states state
+  #
+  # gh's own failure is caught and worded here rather than left to `set -e`.
+  # An unguarded assignment aborts main() on the spot with nothing in the
+  # log but gh's raw stderr, so a rate limit or a token-scope problem reads
+  # exactly like a real red - and question 2 never runs to say otherwise.
+  # Fail closed either way, but say which of the two calls failed and why.
+  local states state stderr_file rc
+  stderr_file=$(mktemp)
+  rc=0
   states=$(STATUS_CONTEXT="$STATUS_CONTEXT" gh api "repos/$REPO/statuses/$HEAD_SHA?per_page=100" --paginate \
-    --jq '.[] | select(.context == env.STATUS_CONTEXT) | .state')
+    --jq '.[] | select(.context == env.STATUS_CONTEXT) | .state' 2>"$stderr_file") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    local status_error
+    status_error=$(gh_api_failure_reason "$(cat "$stderr_file")" "$rc")
+    rm -f "$stderr_file"
+    echo "::error::Could not read this commit's commit statuses from the GitHub API, so whether a green \"$STATUS_CONTEXT\" status exists is unknown: $status_error. Failing closed rather than guessing - this is a problem reaching GitHub, not a verdict on the code; re-run this check."
+    exit 1
+  fi
+  rm -f "$stderr_file"
   state="${states%%$'\n'*}"
   local verdict reason
   IFS=$'\t' read -r verdict reason <<< "$(status_verdict "$state" "$STATUS_CONTEXT")"
@@ -245,8 +298,18 @@ main() {
   # exactly the number of files GitHub listed, which listing_count_check
   # compares against the pull request's own changed_files count.
   local touched listed
+  stderr_file=$(mktemp)
+  rc=0
   touched=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" --paginate \
-    --jq '.[] | [.filename, (.previous_filename // empty)] | @tsv')
+    --jq '.[] | [.filename, (.previous_filename // empty)] | @tsv' 2>"$stderr_file") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    local files_error
+    files_error=$(gh_api_failure_reason "$(cat "$stderr_file")" "$rc")
+    rm -f "$stderr_file"
+    echo "::error::Could not read this pull request's changed-file list from the GitHub API, so it cannot be checked against the protected-path list at all: $files_error. Failing closed rather than passing unchecked - re-run this check."
+    exit 1
+  fi
+  rm -f "$stderr_file"
   if [ -z "$touched" ]; then
     listed=0
   else
