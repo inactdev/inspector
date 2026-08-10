@@ -81,8 +81,15 @@ jobs:
         # never the pull request's copy. That file is itself covered by
         # ALWAYS_PROTECTED (.github/**), so a pull request cannot change
         # what gets fetched and run here.
+        #
+        # BASE_REF is a branch name, and git allows "&", "#", "%" and "+"
+        # in one, so it goes in as a parameter gh percent-encodes (-X GET
+        # -f ref=), never interpolated into the query string, where a name
+        # like "release&hotfix" would silently fetch a different branch's
+        # copy of this script. Same reasoning as the .inspector.json read
+        # inside it.
         run: |
           set -euo pipefail
-          script=$(gh api "repos/$REPO/contents/.github/scripts/inspector-gate.sh?ref=$BASE_REF" --jq '.content' | tr -d '\n' | base64 -d)
+          script=$(gh api -X GET "repos/$REPO/contents/.github/scripts/inspector-gate.sh" -f ref="$BASE_REF" --jq '.content' | tr -d '\n' | base64 -d)
           source <(printf '%s' "$script")
           main

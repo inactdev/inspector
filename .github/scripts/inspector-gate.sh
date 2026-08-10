@@ -267,7 +267,7 @@ main() {
   esac
 
   # Project-specific protected paths come from the BASE BRANCH TIP's copy
-  # of .inspector.json (ref=$BASE_REF, the branch name, so the API resolves
+  # of .inspector.json (ref=BASE_REF, the branch name, so the API resolves
   # it live), never the pull request's - reading it any other way would let
   # a pull request add or remove its own protected-path entries.
   #
@@ -283,12 +283,21 @@ main() {
   # branch's .inspector.json can flip an already-open, untouched pull
   # request from pass to fail. That is the safe direction.
   #
+  # BASE_REF is a branch NAME, so it is passed as a parameter (-X GET -f)
+  # and never pasted into the query string. git allows "&", "#", "%" and
+  # "+" in a ref name; interpolated raw, "release&hotfix" would send
+  # ref=release and read a DIFFERENT branch's protected-path list, which is
+  # a quiet fail-open in the one read this gate must get right. gh
+  # percent-encodes a -f value, so no ref name can break out of it. Like
+  # the rest of main(), that only runs against the real API - there is no
+  # pure function here to unit test, see this file's header.
+  #
   # --include so the HTTP status line comes back with the body: only a 404
   # means "this project simply has no .inspector.json", and every other way
   # this read can go wrong fails closed rather than shrinking the protected
   # list to the floor without saying so. See protected_paths_from_response.
   local config_response project_paths
-  config_response=$(gh api --include "repos/$REPO/contents/.inspector.json?ref=$BASE_REF" 2>/dev/null) || true
+  config_response=$(gh api -X GET --include "repos/$REPO/contents/.inspector.json" -f ref="$BASE_REF" 2>/dev/null) || true
   if ! project_paths=$(protected_paths_from_response "$config_response"); then
     echo "::error::Could not read the base branch's .inspector.json, so this pull request cannot be checked against the protected paths this project actually declares: $project_paths. Failing closed rather than checking against a shorter list - re-run this check, or have the Client review it and deliberately override it."
     exit 1
