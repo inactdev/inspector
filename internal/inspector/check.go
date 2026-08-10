@@ -72,6 +72,7 @@ func RunCheck(repoRoot, command, image string, network bool, timeout time.Durati
 		Image:    image,
 		Network:  network,
 	})
+	defer run.Cleanup()
 	run.Stdout = capture.tee(stdout)
 	run.Stderr = capture.tee(stderr)
 

@@ -86,9 +86,15 @@ func TestCmd_Started(t *testing.T) {
 	if !cmd.Started() {
 		t.Fatal("Started() = false with a populated cidfile, want true")
 	}
-	if _, err := os.Stat(cmd.cidFile); !os.IsNotExist(err) {
-		t.Fatal("Started() should remove the cidfile once read")
+	if _, err := os.Stat(cmd.cidFile); err != nil {
+		t.Fatalf("Started() must not remove the cidfile it reads: %v", err)
 	}
+
+	cmd.Cleanup()
+	if _, err := os.Stat(cmd.cidFile); !os.IsNotExist(err) {
+		t.Fatal("Cleanup() should remove the cidfile")
+	}
+	cmd.Cleanup()
 }
 
 func TestKillContainer_AlreadyGone(t *testing.T) {
@@ -100,6 +106,28 @@ func TestKillContainer_AlreadyGone(t *testing.T) {
 	}
 }
 
+func TestKillContainer_NotRunningIsARealError(t *testing.T) {
+	// A container docker refuses to kill for any reason other than "it
+	// isn't there" must not be reported as handled: os.ErrProcessDone
+	// tells Wait the cancellation succeeded, which is only safe when
+	// nothing can still be running.
+	requireDocker(t)
+
+	name := "inspector-container-test-" + randomHex(8)
+	if out, err := exec.Command("docker", "create", "--name", name, "alpine", "true").CombinedOutput(); err != nil {
+		t.Skipf("could not create a container to test against: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+
+	err := killContainer(name)
+	if err == nil || errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("killContainer(created-but-never-started) = %v, want a real error", err)
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Fatalf("killContainer error = %q, want it to name the container and carry docker's own message", err)
+	}
+}
+
 func TestNew_RunsAndReportsExitCode(t *testing.T) {
 	requireDocker(t)
 	dir := t.TempDir()
@@ -108,6 +136,7 @@ func TestNew_RunsAndReportsExitCode(t *testing.T) {
 	defer cancel()
 
 	cmd := New(ctx, Run{RepoRoot: dir, Command: "echo hi > out.txt; exit 7", Image: "alpine"})
+	defer cmd.Cleanup()
 	err := cmd.Run()
 
 	var exitErr *exec.ExitError
@@ -128,6 +157,7 @@ func TestNew_BadImageIsNotStarted(t *testing.T) {
 	dir := t.TempDir()
 
 	cmd := New(context.Background(), Run{RepoRoot: dir, Command: "true", Image: "inspector-test-image-does-not-exist-xyz"})
+	defer cmd.Cleanup()
 	err := cmd.Run()
 
 	if err == nil {
@@ -155,6 +185,7 @@ func TestNew_TimeoutKillsContainerAndDescendants(t *testing.T) {
 		Command:  "( sleep 3 && echo alive > survived ) & wait",
 		Image:    "alpine",
 	})
+	defer cmd.Cleanup()
 	start := time.Now()
 	_ = cmd.Run()
 	elapsed := time.Since(start)

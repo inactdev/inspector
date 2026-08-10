@@ -1,8 +1,7 @@
 // Package container runs a project's check command inside Docker rather
 // than on the host, so the file system and network it can reach are
 // declared up front instead of inherited from whoever invoked inspector.
-// See SPEC.md and README.md for why, and issue #13 for the decisions
-// recorded here.
+// See README.md for why, and issue #13 for the decisions recorded here.
 package container
 
 import (
@@ -127,8 +126,17 @@ func New(ctx context.Context, r Run) *Cmd {
 // absence means creation itself never happened.
 func (c *Cmd) Started() bool {
 	data, err := os.ReadFile(c.cidFile)
-	os.Remove(c.cidFile)
 	return err == nil && strings.TrimSpace(string(data)) != ""
+}
+
+// Cleanup removes the cidfile New asked Docker to write. The docker CLI
+// deletes it only when container creation failed, so every run that got
+// as far as creating one leaves the file behind otherwise. Callers
+// should defer this right after New - it is idempotent, but it removes
+// what Started reads, so it must not run before Started has been
+// consulted.
+func (c *Cmd) Cleanup() {
+	os.Remove(c.cidFile)
 }
 
 func randomHex(n int) string {
@@ -147,19 +155,27 @@ func randomHex(n int) string {
 
 // killContainer force-stops the named container. Mirrors the contract
 // exec.Cmd.Cancel documents: nil means the container is being stopped,
-// os.ErrProcessDone means there was nothing to do (it already exited on
-// its own, right as the deadline fired - the same race check.go's old
-// killProcessGroup had to account for, but simpler here since `docker
-// kill` against a gone container reliably reports failure through its
-// own exit code rather than a platform-specific errno).
+// os.ErrProcessDone means there was nothing to do.
+//
+// Only one docker failure means that: "No such container", which with
+// --rm is what a container that already exited on its own right as the
+// deadline fired looks like - the same race check.go's old
+// killProcessGroup had to account for, and narrowed just as carefully
+// there (ESRCH and a verified EPERM, not any errno). Every other
+// nonzero exit - "is not running", a daemon that stopped answering, a
+// permissions problem - is reported as a real error with docker's own
+// message attached, because os.ErrProcessDone would tell Wait the
+// cancellation succeeded and leave a container that may still be
+// running against the bind-mounted repo past its deadline, with the
+// failed kill recorded nowhere.
 func killContainer(name string) error {
-	err := exec.Command("docker", "kill", name).Run()
+	out, err := exec.Command("docker", "kill", name).CombinedOutput()
 	if err == nil {
 		return nil
 	}
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if errors.As(err, &exitErr) && strings.Contains(strings.ToLower(string(out)), "no such container") {
 		return os.ErrProcessDone
 	}
-	return fmt.Errorf("docker kill %s: %w", name, err)
+	return fmt.Errorf("docker kill %s: %w: %s", name, err, strings.TrimSpace(string(out)))
 }

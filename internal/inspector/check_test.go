@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +34,19 @@ func requireDocker(t *testing.T) {
 	if err := container.EnsureAvailable(); err != nil {
 		t.Skipf("no usable container runtime, skipping: %v", err)
 	}
+}
+
+// requireInternet skips a test that needs to actually reach the outside
+// world, the same way requireDocker skips one that needs a runtime: a
+// machine with Docker but no outbound access, or an example.com blip,
+// shouldn't fail the suite.
+func requireInternet(t *testing.T) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", "example.com:80", 5*time.Second)
+	if err != nil {
+		t.Skipf("no outbound internet access, skipping: %v", err)
+	}
+	conn.Close()
 }
 
 func truncate(s string, max int) string {
@@ -322,6 +336,7 @@ func TestRunCheck_NoNetworkByDefault(t *testing.T) {
 
 func TestRunCheck_NetworkOptIn(t *testing.T) {
 	requireDocker(t)
+	requireInternet(t)
 	dir := t.TempDir()
 
 	result, err := RunCheck(dir, "wget -q -T 5 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, true, testTimeout, io.Discard, io.Discard)
