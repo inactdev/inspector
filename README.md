@@ -103,6 +103,9 @@ your own:
 }
 ```
 
+A third field, `protectedPaths`, is read only by inspector-gate, never by
+inspector itself - see the "inspector-gate" section below.
+
 The order is commit, push, then inspect. inspector refuses to run against an
 uncommitted working tree - it can only be honest about a commit that actually
 matches what's on disk - and the result it records is a commit status on that

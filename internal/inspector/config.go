@@ -57,21 +57,14 @@ type Config struct {
 	// kills it and refuses rather than hanging forever. Zero (unset)
 	// uses DefaultTimeout.
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
-	// ProtectedPaths lists project-specific paths inspector-gate (issue
-	// #4) treats as protected, in addition to its own fixed floor
-	// (.inspector.json itself and .github/**). Check is NOT protected
-	// automatically, however it's written - a project must list the
-	// file(s) behind its own check command here explicitly. One glob
-	// pattern per entry, matched the same way inspector-gate.sh matches
-	// them: `*` matches any characters, `/` included, so `deploy/*`
-	// already covers everything at any depth under `deploy/`. There is
-	// no separate recursive `**` - it is just two `*` in a row, so a
-	// leading `**/` still requires a literal `/` and `**/*.tf` does NOT
-	// match a `main.tf` at the repository root. Write `*.tf` for that.
-	// inspector itself
-	// never reads this field - it exists only for inspector-gate, which
-	// reads it from the BASE branch's copy of this file via the GitHub
-	// API, never the pull request's own copy.
+	// ProtectedPaths lists project-specific paths inspector-gate treats
+	// as protected, in addition to its own fixed floor (.inspector.json
+	// itself and .github/**). inspector itself never reads this field -
+	// it exists only for inspector-gate, which reads it from the BASE
+	// branch's copy of this file via the GitHub API, never the pull
+	// request's own copy. One glob pattern per entry; what those
+	// patterns match, and why Check is deliberately not protected
+	// automatically, are owned by README.md's "inspector-gate" section.
 	ProtectedPaths []string `json:"protectedPaths,omitempty"`
 }
 
