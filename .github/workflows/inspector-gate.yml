@@ -43,7 +43,16 @@
 name: inspector-gate
 
 on:
+  # GitHub's default types for pull_request_target are opened, synchronize,
+  # and reopened - not edited. Retargeting a pull request to a different
+  # base branch is an edited event, and the base is exactly what selects
+  # which .inspector.json (and therefore which protected-path list) this
+  # gate reads - without `edited` here, retargeting a PR would leave its
+  # last verdict standing against the WRONG base until some other event
+  # happened to fire. Listing all four explicitly, rather than omitting
+  # the block and taking the default silently, keeps that choice visible.
   pull_request_target:
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
