@@ -13,8 +13,10 @@ import (
 // StatusContext is the stable name GitHub shows for the commit status
 // inspector posts, and the exact string inspector-gate (issue #4) must
 // key on to find inspector's result among any other statuses on the same
-// commit. Documented in SPEC.md section 7 and README.md - do not rename
-// it without updating both.
+// commit. Documented in SPEC.md section 7 and README.md, and spelled out
+// a third time as the gate workflow's own STATUS_CONTEXT env value in
+// .github/workflows/inspector-gate.yml - do not rename it without
+// updating all three, or the gate stops finding this result.
 const StatusContext = "inspector"
 
 // GitHubTokenEnvVar is the environment variable inspector reads its

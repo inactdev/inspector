@@ -12,8 +12,9 @@ import (
 
 // ConfigFileName is the project-level config inspector reads to learn the
 // project's own definition of green. It is committed to the repo, not
-// gitignored, so it is visible for review and eligible for protected-file
-// treatment once inspector-gate (issue #4) exists.
+// gitignored, so it is visible for review - and inspector-gate protects
+// it unconditionally (it is in that script's ALWAYS_PROTECTED floor), so
+// a pull request cannot edit its own protectedPaths list away.
 const ConfigFileName = ".inspector.json"
 
 // ErrNoCheckCommand means the repo has no usable check command configured.
@@ -56,6 +57,15 @@ type Config struct {
 	// kills it and refuses rather than hanging forever. Zero (unset)
 	// uses DefaultTimeout.
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+	// ProtectedPaths lists project-specific paths inspector-gate treats
+	// as protected, in addition to its own fixed floor (.inspector.json
+	// itself and .github/**). inspector itself never reads this field -
+	// it exists only for inspector-gate, which reads it from the BASE
+	// branch's copy of this file via the GitHub API, never the pull
+	// request's own copy. One glob pattern per entry; what those
+	// patterns match, and why Check is deliberately not protected
+	// automatically, are owned by README.md's "inspector-gate" section.
+	ProtectedPaths []string `json:"protectedPaths,omitempty"`
 }
 
 // Timeout returns the configured timeout, or DefaultTimeout if unset.

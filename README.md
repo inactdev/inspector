@@ -44,7 +44,16 @@ compiler: it runs the suite under Go's race detector, which requires cgo. The
 race detector is itself unsupported on some platforms, including 32-bit x86,
 linux/arm, and freebsd/arm - on those, run `CGO_ENABLED=0 go test ./...`
 instead, which runs the same suite without the race detector and so needs no C
-compiler.
+compiler. `script/check` also runs inspector-gate's own shell tests, which need
+a handful of shell tools on PATH; the list itself lives in
+`.github/scripts/required-tools.sh` and is not repeated here, because a second
+copy only goes stale. `jq` is on it as a dependency of the shipped gate script
+rather than only of its tests - it is what inspector-gate.sh parses GitHub's API
+responses with. `script/check` checks for every tool on that list before it runs
+anything and names whichever one is missing. That is also why inspector's own
+`.inspector.json` declares `"image": "cimg/go:1.22"` rather than `golang:1.22`:
+it carries all of them together, and the check container has no network to
+install anything with.
 
 Also requires [Docker](https://docs.docker.com/get-docker/) - the check
 command runs inside a container, not on your machine directly. Without a
@@ -101,6 +110,9 @@ your own:
   "timeoutSeconds": 1800
 }
 ```
+
+A third field, `protectedPaths`, is read only by inspector-gate, never by
+inspector itself - see the "inspector-gate" section below.
 
 The order is commit, push, then inspect. inspector refuses to run against an
 uncommitted working tree - it can only be honest about a commit that actually
@@ -204,6 +216,85 @@ What a reader should conclude:
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.
 
+## inspector-gate
+
+`.github/workflows/inspector-gate.yml` is the cloud half (SPEC.md sections 2, 4,
+5, 7, 8). It asks exactly two questions about a pull request, and answers both
+with no AI and no checkout: does the head commit carry a green `inspector` commit
+status (no status at all is red, same as a failing one), and did the pull request
+touch a protected path (any touch is red - there is no declared-changes path that
+passes; see `.github/scripts/inspector-gate.sh` for the full reasoning inline).
+
+Adopting it means copying **both** files. The workflow never checks the
+repository out, so it reads `.github/scripts/inspector-gate.sh` from the base
+branch through the GitHub API and runs that; with the workflow alone in place,
+every run fails closed saying it could not load its own definition.
+
+Protected paths are `.inspector.json` and everything under `.github/` always,
+plus whatever a project lists under `protectedPaths` in its `.inspector.json`:
+
+```json
+{
+  "check": "check.sh",
+  "image": "node:20",
+  "protectedPaths": ["check.sh", "deploy/*", "*.tf"]
+}
+```
+
+One glob pattern per entry. A `*` matches any characters, `/` included, so
+`deploy/*` already covers everything at any depth under `deploy/`. There is no
+separate recursive `**` wildcard - it is just two `*` in a row, so a leading
+`**/` still requires a literal `/` and `**/*.tf` will *not* match a `main.tf`
+at the repository root. Write `*.tf` when you mean every `.tf` file.
+
+**Your own check command is not protected automatically - list it under
+`protectedPaths` yourself.** This was tried the other way: deriving a pattern
+from `check`'s own value, on the reasoning that it is exactly what a worker
+under pressure edits to make a failing check stop failing. It doesn't hold up -
+telling a path from a command line by looking at the string alone doesn't work.
+`"script/check"` is a path, `"pytest"` is not, and `"check.sh"` could be either;
+every heuristic that tries to split them keeps producing wrong answers on one
+side or the other. So the gate no longer guesses: a bare-path check command and
+a multi-word one are both left for the project to declare, explicitly, the same
+way. Making that hard to forget belongs to the installer (inspector#5), which
+knows the concrete value at install time and can write it where a human sees
+and confirms it - guessing at runtime is the wrong layer for that guarantee.
+
+That list is read from the *base* branch's current tip, never the pull request's
+copy - the same place GitHub loads the workflow file itself from. Adding an
+entry to `protectedPaths` therefore applies immediately to pull requests that
+are already open, which also means a pull request's verdict can change without
+the pull request changing. That is the intended direction for a protection list.
+If the list cannot be read with certainty - a rate limit, a server error, a file
+too large for the API to inline, invalid JSON, a top level that is not a JSON
+object, or a `protectedPaths` that is not a list of strings - the gate fails
+closed and says which of those it hit, rather than quietly judging against a
+shorter list. Only a genuinely absent `.inspector.json` (HTTP 404) is a safe
+absence; that project still gets the always-protected floor.
+
+**Known limit: the check can go stale-red.** A commit status can only be posted
+to a commit that is already pushed, so inspector's green status lands *after*
+the push whose gate run correctly reported "no status posted at all". Nothing
+re-runs the gate when the status arrives, so that red stands until someone
+re-runs the workflow by hand. An `on: status` trigger was built for this and
+removed again: GitHub attaches a status-triggered run to the default branch's
+last commit rather than to the commit the status was posted to, so it never
+flipped the pull request's own check, and a status event cannot be filtered by
+context, so every unrelated third party's status re-ran the gate and landed
+failures on the default branch's tip. The real fix is inspector#18 - inspector
+owns the push, so a green status exists before a pull request is ever opened -
+not a retry bolted onto the gate.
+
+**Copying this workflow into a repo does not, by itself, block a merge.** GitHub
+only enforces a check once it is a *required* status check:
+
+> Settings -> Branches -> add (or edit) a branch protection rule for the default
+> branch -> enable "Require status checks to pass before merging" -> add **gate**
+> (the job's name) to the list.
+
+That is a one-click repository setting this workflow cannot turn on for itself -
+there is no API call or workflow step that does it from here.
+
 ## Status
 
 The check (issue #1) is built: locally, `inspector` runs a project's own check
@@ -212,5 +303,6 @@ red, refusing loudly when no check command or image is configured, or no
 usable container runtime is found. Recording the result (issue #3) is also
 built: a green or red run posts a commit status to GitHub, and a missing token
 or a rejected post fails loudly rather than exiting as if it had succeeded.
-Still to come: the fixer, the gate workflow, and the installer - see
-[SPEC.md](SPEC.md) and the repo's issues.
+The gate workflow (issue #4, above) is built too, reading that commit status
+under the context `inspector`. Still to come: the fixer and the installer -
+see [SPEC.md](SPEC.md) and the repo's issues.

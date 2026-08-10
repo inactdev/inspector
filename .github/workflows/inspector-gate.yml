@@ -1,0 +1,126 @@
+# inspector-gate (SPEC.md sections 2, 4, 5, 7, 8; issue #4). The cloud
+# half. Small and dumb on purpose: two questions, no AI, no judgment calls.
+#
+# This runs on `pull_request_target`, not `pull_request`, so GitHub reads
+# THIS FILE's own definition from the base branch, never from the pull
+# request under test - a pull request cannot rewrite the check that judges
+# it. `.github/**` is itself in the protected-path floor that
+# inspector-gate.sh enforces (ALWAYS_PROTECTED), so an attempted edit to
+# this file, or to inspector-gate.sh, fails question 2 of its own run,
+# every time. See inspector-gate.sh's header for the full safety notes,
+# including why this workflow must never add `actions/checkout`.
+#
+# The job below deliberately has no job-level `if`. A job an `if` skips
+# reports a "skipped" conclusion, and whether GitHub treats "skipped" as
+# passing for a *required* status check is a known trap, not a documented
+# guarantee - so the job always runs on every pull request, and question 2
+# is answered inside the one step instead. Every run reports a real pass
+# or fail, never a skip.
+#
+# A failing (or missing) check here does not, by itself, block a merge:
+# GitHub only enforces that once this job is marked a required status
+# check in the repository's branch protection settings - Settings ->
+# Branches -> branch protection rule for the base branch -> "Require
+# status checks to pass before merging" -> add "gate". That is a manual
+# repository setting this workflow cannot turn on for itself; see the
+# "inspector-gate" section of README.md for the same note in context.
+# Honest limit, recorded rather than papered over: a commit status can
+# only be posted to a commit that is already on the remote, so inspector's
+# green status lands seconds AFTER the push whose `synchronize` run has
+# already, correctly, reported "no status posted at all". Nothing re-runs
+# this check when the status finally arrives, so that first honest red
+# stands until a human re-runs the workflow by hand.
+#
+# An `on: status` trigger was built to close that gap and has been removed
+# again: GitHub associates a status-triggered run with the DEFAULT
+# branch's last commit, not with the commit the status was posted to, so
+# it never flipped the pull request's own check - and since a status event
+# cannot be filtered by context, every unrelated third party's status
+# re-ran the whole gate and landed its failures on the default branch's
+# tip. The real fix is inspector#18 (inspector itself owns the push, so a
+# green status exists before a pull request is ever opened), not a retry
+# or re-trigger mechanism bolted onto this gate.
+name: inspector-gate
+
+on:
+  # GitHub's default types for pull_request_target are opened, synchronize,
+  # and reopened - not edited. Retargeting a pull request to a different
+  # base branch is an edited event, and the base is exactly what selects
+  # which .inspector.json (and therefore which protected-path list) this
+  # gate reads - without `edited` here, retargeting a PR would leave its
+  # last verdict standing against the WRONG base until some other event
+  # happened to fire. Listing all four explicitly, rather than omitting
+  # the block and taking the default silently, keeps that choice visible.
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check inspector status and protected files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # The pull request under test, straight from the event payload.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # The base BRANCH NAME, not the payload's base.sha: both this
+          # script and the protected-path list are read from that branch's
+          # live tip, the same place GitHub loads this workflow file from.
+          # See inspector-gate.sh's .inspector.json fetch for the full
+          # reasoning and the cost that choice accepts.
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # The pull request's own count of changed files, straight from
+          # the event payload - not from a live API call, and not subject
+          # to the listing cap inspector-gate.sh checks it against.
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          # Must match exactly what inspector (the local half, issue #3)
+          # posts as its commit status context - see SPEC.md section 7.
+          STATUS_CONTEXT: inspector
+        # No `actions/checkout` (see the header notes above), so nothing is
+        # on disk to run a script file from. Instead this fetches
+        # inspector-gate.sh's own content via the same Contents API call
+        # the script itself uses for .inspector.json, and sources it -
+        # never the pull request's copy. That file is itself covered by
+        # ALWAYS_PROTECTED (.github/**), so a pull request cannot change
+        # what gets fetched and run here.
+        #
+        # BASE_REF is a branch name, and git allows "&", "#", "%" and "+"
+        # in one, so it goes in as a parameter gh percent-encodes (-X GET
+        # -f ref=), never interpolated into the query string, where a name
+        # like "release&hotfix" would silently fetch a different branch's
+        # copy of this script. Same reasoning as the .inspector.json read
+        # inside it.
+        #
+        # This is the one API read that cannot use inspector-gate.sh's own
+        # gh_api_failure_reason helper: it is the call that fetches the file
+        # that defines it. So the same one-line wording is inlined here,
+        # rather than letting a rate limit or a 5xx abort the step with only
+        # gh's raw stderr and nothing saying the gate could not read its own
+        # definition. Fails closed either way; this only makes it legible.
+        run: |
+          set -euo pipefail
+          stderr_file=$(mktemp)
+          rc=0
+          encoded=$(gh api -X GET "repos/$REPO/contents/.github/scripts/inspector-gate.sh" -f ref="$BASE_REF" --jq '.content' 2>"$stderr_file") || rc=$?
+          reason=$(tr -d '\r' < "$stderr_file" |
+            awk 'NF { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); out = (out == "" ? $0 : out "; " $0) } END { print out }')
+          rm -f "$stderr_file"
+          if [ "$rc" -ne 0 ]; then
+            [ -n "$reason" ] || reason="gh exited $rc without printing a reason"
+            echo "::error::Could not read inspector-gate.sh from the base branch (\"$BASE_REF\") via the GitHub Contents API, so this gate could not load its own definition and neither of its two questions was asked: $reason. Failing closed rather than passing unchecked - this is a problem reaching GitHub, not a verdict on the code; re-run this check."
+            exit 1
+          fi
+          script=$(printf '%s' "$encoded" | tr -d '\n' | base64 -d)
+          if [ -z "$script" ]; then
+            echo "::error::inspector-gate.sh came back empty from the base branch (\"$BASE_REF\"), so this gate has no definition to run and neither of its two questions was asked. Failing closed rather than passing unchecked - check that .github/scripts/inspector-gate.sh exists on that branch, then re-run this check."
+            exit 1
+          fi
+          source <(printf '%s' "$script")
+          main

@@ -5,6 +5,25 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# REQUIRED_TOOLS is defined once in .github/scripts/required-tools.sh and
+# sourced here and by the drift test in inspector-gate_test.sh - a
+# hand-maintained list duplicated in two places is exactly how "tr" went
+# missing the first time. Named up front, so a container image that drops
+# one of these fails with the tool's name rather than a bare "command not
+# found" halfway through.
+echo "==> required tools"
+source .github/scripts/required-tools.sh
+missing=""
+for tool in $REQUIRED_TOOLS; do
+  command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+done
+if [ -n "$missing" ]; then
+  echo "missing required command(s):$missing"
+  echo "this check needs all of: $REQUIRED_TOOLS"
+  echo "run it somewhere that has them, or point .inspector.json's \"image\" at one that does"
+  exit 1
+fi
+
 echo "==> gofmt"
 unformatted=$(gofmt -l .)
 if [ -n "$unformatted" ]; then
@@ -21,3 +40,6 @@ go build ./...
 
 echo "==> go test"
 go test -race ./...
+
+echo "==> inspector-gate tests"
+.github/scripts/inspector-gate_test.sh
