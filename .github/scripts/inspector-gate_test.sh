@@ -255,6 +255,57 @@ assert_patterns "protectedPaths entries come back regardless of what check conta
   "$(inspector_json_response '{"check": "script/check", "protectedPaths": ["script/check", "ci/**"]}')" \
   "$(printf 'script/check\nci/**')"
 
+# --- required-tools drift ---
+#
+# script/check's preflight (.github/scripts/required-tools.sh) is a
+# hand-maintained list, and a hand-maintained list drifts from what the
+# code it guards actually calls - that already happened once ("tr" was a
+# real dependency this file and inspector-gate.sh both use, and it wasn't
+# on the list). Rather than re-parse this file's bash for external
+# command names - a naive scanner also matches function calls, keywords,
+# and variable expansions, which makes "simple and reliable" the wrong
+# combination to promise - this proves the claim mechanically: it
+# re-executes this whole test file, unmodified, with PATH restricted to
+# EXACTLY REQUIRED_TOOLS's tools, and fails loudly, naming what broke, if
+# any assertion above needs something that isn't on the list. A recursion
+# guard (INSPECTOR_GATE_DRIFT_CHECK) stops the re-executed copy from
+# spawning a third layer.
+#
+# This cannot, and does not try to, cover main()'s live GitHub API
+# orchestration - consistent with this file's header, that code path is
+# only exercised inside Actions, never by anything script/check runs.
+if [ -z "${INSPECTOR_GATE_DRIFT_CHECK:-}" ]; then
+  # shellcheck source=required-tools.sh
+  source ./required-tools.sh
+
+  drift_bin=$(mktemp -d)
+  trap 'rm -rf "$drift_bin"' EXIT
+  drift_missing=""
+  for tool in $REQUIRED_TOOLS; do
+    tool_path=$(command -v "$tool") || { drift_missing="$drift_missing $tool"; continue; }
+    ln -s "$tool_path" "$drift_bin/$tool"
+  done
+
+  if [ -n "$drift_missing" ]; then
+    echo "FAIL: required-tools drift check could not even locate:$drift_missing (present in REQUIRED_TOOLS but not on this machine's own PATH)"
+    failures=$((failures + 1))
+  else
+    real_bash=$(command -v bash)
+    drift_log=$(mktemp)
+    # Not "$0": this script already cd'd to its own directory at the top,
+    # so $0 (whatever relative or absolute form it was invoked with) may
+    # no longer resolve from here. It always IS this file, right here.
+    if PATH="$drift_bin" INSPECTOR_GATE_DRIFT_CHECK=1 "$real_bash" ./inspector-gate_test.sh > "$drift_log" 2>&1; then
+      echo "ok: every tool this file's own tests actually use is covered by REQUIRED_TOOLS"
+    else
+      echo "FAIL: this test file fails when PATH is restricted to exactly REQUIRED_TOOLS - something it (or inspector-gate.sh) calls is missing from .github/scripts/required-tools.sh:"
+      sed 's/^/  /' "$drift_log"
+      failures=$((failures + 1))
+    fi
+    rm -f "$drift_log"
+  fi
+fi
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "$failures assertion(s) failed."
