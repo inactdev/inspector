@@ -102,7 +102,8 @@ func Run(opts Options) (Result, error) {
 					"inspector refuses to run rather than silently doing nothing - a repo that runs\n"+
 					"unprotected must never look identical to one that runs protected.\n\n"+
 					"Configure it by creating %s in the repo root:\n\n"+
-					"  {\n    \"check\": \"<your project's own test/lint/build command>\"\n  }\n",
+					"  {\n    \"check\": \"<your project's own test/lint/build command>\",\n"+
+					"    \"image\": \"<a container image with your project's toolchain>\"\n  }\n",
 				ConfigFileName,
 			),
 		}, nil
