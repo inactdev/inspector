@@ -24,37 +24,26 @@
 # status checks to pass before merging" -> add "gate". That is a manual
 # repository setting this workflow cannot turn on for itself; see the
 # "inspector-gate" section of README.md for the same note in context.
-# The second trigger, `status`, exists for an ordering reason: a commit
-# status can only be posted to a commit that is already on the remote, so
-# inspector's green status lands seconds AFTER the push whose
-# `synchronize` run has already, correctly, reported "no status posted at
-# all". Nothing re-ran the check when the status arrived, so the red
-# stood until a human re-ran it by hand. `status` fires when the status
-# lands, and the gate answers both questions again.
+# Honest limit, recorded rather than papered over: a commit status can
+# only be posted to a commit that is already on the remote, so inspector's
+# green status lands seconds AFTER the push whose `synchronize` run has
+# already, correctly, reported "no status posted at all". Nothing re-runs
+# this check when the status finally arrives, so that first honest red
+# stands until a human re-runs the workflow by hand.
 #
-# That trigger changes nothing about the trust boundary. A status event
-# carries no pull request context - only a commit sha and no ref of its
-# own - so this job bootstraps the script below from the repository's
-# DEFAULT branch, a fixed root no pull request can write to, uses it to
-# make one read-only API call asking which open pull request that commit
-# heads, and then re-fetches and runs the script from that pull request's
-# real BASE ref before anything decides the outcome. Still no checkout,
-# still nothing from the pull request branch ever executed, still only
-# API reads compared as strings.
-#
-# Honest limit, recorded rather than papered over: GitHub associates a
-# status-triggered run with the default branch's last commit (that is its
-# documented GITHUB_SHA for this event), not with the commit the status
-# was posted to. So this re-check reports a real pass or fail of its own,
-# but it does not overwrite the earlier `gate` check already recorded on
-# the pull request's head commit. Landing it there instead would mean
-# this job posting a commit status of its own, which needs a write
-# permission it deliberately does not have.
+# An `on: status` trigger was built to close that gap and has been removed
+# again: GitHub associates a status-triggered run with the DEFAULT
+# branch's last commit, not with the commit the status was posted to, so
+# it never flipped the pull request's own check - and since a status event
+# cannot be filtered by context, every unrelated third party's status
+# re-ran the whole gate and landed its failures on the default branch's
+# tip. The real fix is inspector#18 (inspector itself owns the push, so a
+# green status exists before a pull request is ever opened), not a retry
+# or re-trigger mechanism bolted onto this gate.
 name: inspector-gate
 
 on:
   pull_request_target:
-  status:
 
 permissions:
   contents: read
@@ -69,25 +58,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          EVENT_NAME: ${{ github.event_name }}
-          # On pull_request_target, the pull request under test, straight
-          # from the event payload. Empty on a status event, which knows
-          # none of it - main_status_event looks it all up instead.
+          # The pull request under test, straight from the event payload.
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # The base BRANCH NAME, not the payload's base.sha: both this
+          # script and the protected-path list are read from that branch's
+          # live tip, the same place GitHub loads this workflow file from.
+          # See inspector-gate.sh's .inspector.json fetch for the full
+          # reasoning and the cost that choice accepts.
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           # The pull request's own count of changed files, straight from
           # the event payload - not from a live API call, and not subject
           # to the listing cap inspector-gate.sh checks it against.
           CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
-          # On a status event, the one thing it carries: the commit a
-          # status was just posted to.
-          STATUS_SHA: ${{ github.event.sha }}
-          # Which ref to fetch this gate's own script from. A status event
-          # has no ref of its own to trust, so it bootstraps from the
-          # default branch and re-fetches from the pull request's base ref
-          # once that is known; pull_request_target already has the base.
-          BOOTSTRAP_REF: ${{ github.event_name == 'status' && github.event.repository.default_branch || github.event.pull_request.base.sha }}
           # Must match exactly what inspector (the local half, issue #3)
           # posts as its commit status context - see SPEC.md section 7.
           STATUS_CONTEXT: inspector
@@ -100,10 +83,6 @@ jobs:
         # what gets fetched and run here.
         run: |
           set -euo pipefail
-          script=$(gh api "repos/$REPO/contents/.github/scripts/inspector-gate.sh?ref=$BOOTSTRAP_REF" --jq '.content' | tr -d '\n' | base64 -d)
+          script=$(gh api "repos/$REPO/contents/.github/scripts/inspector-gate.sh?ref=$BASE_REF" --jq '.content' | tr -d '\n' | base64 -d)
           source <(printf '%s' "$script")
-          if [ "$EVENT_NAME" = "status" ]; then
-            main_status_event
-          else
-            main
-          fi
+          main

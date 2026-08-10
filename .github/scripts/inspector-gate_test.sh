@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Unit tests for inspector-gate.sh's pure decision functions
 # (status_verdict, find_protected_match, listing_count_check,
-# protected_paths_from_response, pull_request_for_status). These take
-# plain strings in and print plain strings out - no network, no GitHub API,
-# no environment variables - so they can run anywhere, including here.
-# The last two take a raw API response as a string, so the decisions made
-# on top of a response are tested here even though fetching one is not.
+# protected_paths_from_response). These take plain strings in and print
+# plain strings out - no network, no GitHub API, no environment variables -
+# so they can run anywhere, including here. The last one takes a raw API
+# response as a string, so the decisions made on top of a response are
+# tested here even though fetching one is not.
 #
 # What this deliberately does NOT cover: the GitHub API orchestration in
-# main() and main_status_event() - making the gh api calls, paginating
-# them, and re-sourcing this script from a pull request's base ref. That
-# is real coverage this project doesn't have, not faked - it can only be
-# exercised by an actual pull request going through Actions, since it
-# depends on GitHub's API responses and the pull_request_target trust
-# boundary. Testing it here would mean mocking `gh api` well enough that
-# the mock, not GitHub's behavior, is what the test actually proves.
+# main() - making the gh api calls, paginating them, and which ref each
+# one is read at. That is real coverage this project doesn't have, not
+# faked - it can only be exercised by an actual pull request going through
+# Actions, since it depends on GitHub's API responses and the
+# pull_request_target trust boundary. Testing it here would mean mocking
+# `gh api` well enough that the mock, not GitHub's behavior, is what the
+# test actually proves.
 #
 # Run directly: .github/scripts/inspector-gate_test.sh
 set -euo pipefail
@@ -202,45 +202,6 @@ assert_patterns "check is never read even when it is not a string - only protect
 assert_patterns "protectedPaths entries come back regardless of what check contains" \
   "$(inspector_json_response '{"check": "script/check", "protectedPaths": ["script/check", "ci/**"]}')" \
   "$(printf 'script/check\nci/**')"
-
-# --- pull_request_for_status ---
-
-assert_no_pull_request() {
-  local desc="$1" json="$2"
-  local out rc=0
-  out=$(pull_request_for_status "$json" "headsha") || rc=$?
-  case "$rc" in
-  0)
-    echo "FAIL: $desc - claimed a pull request to gate (\"$out\")"
-    failures=$((failures + 1))
-    ;;
-  1) echo "ok: $desc" ;;
-  *)
-    echo "FAIL: $desc - returned $rc (uncertainty), expected 1 (nothing to gate)"
-    failures=$((failures + 1))
-    ;;
-  esac
-}
-
-assert_no_pull_request "a commit with no associated pull requests has nothing to gate" '[]'
-
-assert_no_pull_request "a commit whose only associated pull request is closed has nothing to gate" \
-  '[{"number":7,"state":"closed","head":{"sha":"headsha"},"base":{"sha":"basesha"}}]'
-
-assert_no_pull_request "an open pull request whose head has moved on has nothing to gate" \
-  '[{"number":8,"state":"open","head":{"sha":"someothersha"},"base":{"sha":"basesha"}}]'
-
-assert_eq "the open pull request this commit heads is found, changed_files left for the caller" \
-  "$(printf '9\theadsha\tbasesha\t')" \
-  "$(pull_request_for_status '[{"number":8,"state":"closed","head":{"sha":"headsha"},"base":{"sha":"old"}},{"number":9,"state":"open","head":{"sha":"headsha"},"base":{"sha":"basesha"}}]' "headsha")"
-
-assert_eq "a changed_files count is used when the response carries one" \
-  "$(printf '9\theadsha\tbasesha\t12')" \
-  "$(pull_request_for_status '[{"number":9,"state":"open","head":{"sha":"headsha"},"base":{"sha":"basesha"},"changed_files":12}]' "headsha")"
-
-rc=0
-out=$(pull_request_for_status '{"message":"Not Found"}' "headsha") || rc=$?
-assert_eq "a response that is not even a list is uncertainty, not absence" "2" "$rc"
 
 echo
 if [ "$failures" -ne 0 ]; then

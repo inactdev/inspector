@@ -29,24 +29,14 @@
 # known for (elevated permissions plus untrusted code), and SPEC.md section
 # 8 rules it out explicitly.
 #
-# The workflow runs on two events, and both answer the same two questions
-# about the same pull request:
-#   - pull_request_target, which carries the pull request itself
-#   - status, which carries only a commit sha, and which exists so the
-#     gate re-answers question 1 the moment inspector's green status
-#     lands - see main_status_event() for how it stays inside the same
-#     trust boundary
-#
 # This file is sourced by two callers:
-#   - the workflow step, which calls main() or main_status_event() to do
-#     the real GitHub API work
+#   - the workflow step, which calls main() to do the real GitHub API work
 #   - inspector-gate_test.sh, which sources this file and calls the pure
 #     functions below directly, with fixture data, never touching the
 #     network
 # Only the pure functions (status_verdict, find_protected_match,
-# listing_count_check, protected_paths_from_response,
-# pull_request_for_status) are unit tested. The API orchestration in
-# main()/main_status_event() can only be exercised inside Actions - see
+# listing_count_check, protected_paths_from_response) are unit tested. The
+# API orchestration in main() can only be exercised inside Actions - see
 # inspector-gate_test.sh's header for why that is an honest limitation
 # rather than a gap.
 set -euo pipefail
@@ -136,7 +126,7 @@ listing_count_check() {
 }
 
 # protected_paths_from_response turns the GitHub Contents API's raw
-# response for the BASE branch's .inspector.json into that project's own
+# response for the BASE branch tip's .inspector.json into that project's own
 # protectedPaths entries, one per line. It does NOT derive anything from
 # the "check" field - see ALWAYS_PROTECTED's comment for why that was
 # tried and reverted; a project must list its own check command's file(s)
@@ -206,48 +196,13 @@ protected_paths_from_response() {
   jq -r '(.protectedPaths // [])[]' <<< "$content"
 }
 
-# pull_request_for_status picks the pull request a `status` event concerns
-# out of GitHub's "list pull requests associated with a commit" response.
-# A status event carries no pull request context at all - just the commit
-# a status was posted to - so the gate has to look this up before it can
-# ask its two questions about anything.
-#
-# It prints "number<TAB>head_sha<TAB>base_sha<TAB>changed_files" for the
-# first OPEN pull request whose head commit is exactly this sha, and
-# returns 0. No associated pull requests, only closed ones, or an open one
-# whose head has since moved elsewhere all return 1 and print nothing:
-# that commit heads no open pull request, so there is genuinely nothing to
-# gate. A response that is not even a list returns 2 - that is uncertainty,
-# not absence, and the caller fails closed on it.
-#
-# changed_files normally comes back empty, because this endpoint returns
-# the short form of a pull request, which omits it; main_status_event
-# fetches the full object when it does.
-pull_request_for_status() {
-  local json="$1" sha="$2"
-  local match
-  jq -e 'type == "array"' >/dev/null 2>&1 <<< "$json" || return 2
-  match=$(SHA="$sha" jq -r '
-    [ .[]
-      | select(.state == "open")
-      | select(.head.sha == env.SHA)
-    ]
-    | first
-    | if . == null then empty
-      else [(.number | tostring), .head.sha, .base.sha, (.changed_files // "" | tostring)] | @tsv
-      end
-  ' <<< "$json" 2>/dev/null) || return 2
-  [ -n "$match" ] || return 1
-  printf '%s\n' "$match"
-}
-
 # main does the real GitHub API work: fetch the head commit's status,
-# fetch the pull request's changed-file list, fetch the base branch's
+# fetch the pull request's changed-file list, fetch the base branch tip's
 # .inspector.json for project-specific protected paths, then apply the
 # pure functions above. Only exercisable inside Actions - see this file's
 # header.
 main() {
-  : "${GH_TOKEN:?}" "${REPO:?}" "${PR_NUMBER:?}" "${HEAD_SHA:?}" "${BASE_SHA:?}" "${CHANGED_FILES:?}" "${STATUS_CONTEXT:?}"
+  : "${GH_TOKEN:?}" "${REPO:?}" "${PR_NUMBER:?}" "${HEAD_SHA:?}" "${BASE_REF:?}" "${CHANGED_FILES:?}" "${STATUS_CONTEXT:?}"
 
   local failed=0
 
@@ -311,16 +266,29 @@ main() {
     ;;
   esac
 
-  # Project-specific protected paths come from the BASE branch's copy of
-  # .inspector.json (ref=$BASE_SHA), never the pull request's - reading it
-  # any other way would let a pull request add or remove its own
-  # protected-path entries. --include so the HTTP status line comes back
-  # with the body: only a 404 means "this project simply has no
-  # .inspector.json", and every other way this read can go wrong fails
-  # closed rather than shrinking the protected list to the floor without
-  # saying so. See protected_paths_from_response.
+  # Project-specific protected paths come from the BASE BRANCH TIP's copy
+  # of .inspector.json (ref=$BASE_REF, the branch name, so the API resolves
+  # it live), never the pull request's - reading it any other way would let
+  # a pull request add or remove its own protected-path entries.
+  #
+  # The tip, deliberately, and not the pull request payload's base.sha: the
+  # sha is a snapshot from when the pull request was opened or last pushed,
+  # so adding an entry to protectedPaths on the base branch would not apply
+  # to any pull request already open - tightening protection would silently
+  # leave existing pull requests judged under the looser old list, which is
+  # backwards for what a protection list is for. It also matches where
+  # GitHub loads this workflow's own definition from, which is always the
+  # base branch tip. The accepted cost is that a pull request's verdict can
+  # change without the pull request changing: a new commit to the base
+  # branch's .inspector.json can flip an already-open, untouched pull
+  # request from pass to fail. That is the safe direction.
+  #
+  # --include so the HTTP status line comes back with the body: only a 404
+  # means "this project simply has no .inspector.json", and every other way
+  # this read can go wrong fails closed rather than shrinking the protected
+  # list to the floor without saying so. See protected_paths_from_response.
   local config_response project_paths
-  config_response=$(gh api --include "repos/$REPO/contents/.inspector.json?ref=$BASE_SHA" 2>/dev/null) || true
+  config_response=$(gh api --include "repos/$REPO/contents/.inspector.json?ref=$BASE_REF" 2>/dev/null) || true
   if ! project_paths=$(protected_paths_from_response "$config_response"); then
     echo "::error::Could not read the base branch's .inspector.json, so this pull request cannot be checked against the protected paths this project actually declares: $project_paths. Failing closed rather than checking against a shorter list - re-run this check, or have the Client review it and deliberately override it."
     exit 1
@@ -353,59 +321,6 @@ $project_paths"
     exit 1
   fi
   echo "inspector-gate: green."
-}
-
-# main_status_event is the entry point for GitHub's `status` event. It
-# exists because of an ordering fact: a commit status can only be posted
-# to a commit that already exists on the remote, so inspector's green
-# status necessarily lands seconds AFTER the push whose `synchronize` run
-# already answered question 1 with "no status has been posted at all".
-# Without a re-run on the status arriving, that first honest red would
-# stand until a human re-ran the workflow by hand.
-#
-# A status event carries no pull request context, only a commit sha, so
-# this looks up which open pull request (if any) that commit heads - one
-# read-only API call, the same trust model as the changed-file list and
-# .inspector.json. It still checks out nothing and executes nothing from
-# the pull request.
-#
-# Trust root: a status event has no ref of its own worth trusting, so the
-# workflow bootstraps this file from the repository's DEFAULT branch, a
-# fixed root no pull request controls. Once the pull request is known,
-# this re-fetches this same file from that pull request's real BASE ref
-# and re-sources it, so the copy that decides the outcome is the one
-# pull_request_target would have used - and that happens before any
-# decision is made.
-#
-# A commit that heads no open pull request is a real, honest success:
-# there is nothing to gate. Never a skip.
-main_status_event() {
-  : "${GH_TOKEN:?}" "${REPO:?}" "${STATUS_SHA:?}" "${STATUS_CONTEXT:?}"
-
-  local pulls fields="" rc=0
-  pulls=$(gh api "repos/$REPO/commits/$STATUS_SHA/pulls?per_page=100" --paginate)
-  fields=$(pull_request_for_status "$pulls" "$STATUS_SHA") || rc=$?
-  if [ "$rc" -eq 2 ]; then
-    echo "::error::GitHub's list of pull requests associated with commit $STATUS_SHA came back in a shape this gate could not read. Failing closed rather than assuming that commit heads no pull request."
-    exit 1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    echo "no open pull request has $STATUS_SHA as its head commit - there is nothing here to gate."
-    return 0
-  fi
-
-  local number head_sha base_sha changed_files
-  IFS=$'\t' read -r number head_sha base_sha changed_files <<< "$fields"
-  if [ -z "$changed_files" ]; then
-    changed_files=$(gh api "repos/$REPO/pulls/$number" --jq '.changed_files')
-  fi
-  echo "commit $STATUS_SHA is the head of pull request #$number - re-checking it."
-
-  local base_script
-  base_script=$(gh api "repos/$REPO/contents/.github/scripts/inspector-gate.sh?ref=$base_sha" --jq '.content' | tr -d '\n' | base64 -d)
-  source <(printf '%s' "$base_script")
-
-  PR_NUMBER="$number" HEAD_SHA="$head_sha" BASE_SHA="$base_sha" CHANGED_FILES="$changed_files" main
 }
 
 # Allow sourcing (for tests) without running main.

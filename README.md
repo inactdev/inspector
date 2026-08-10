@@ -238,25 +238,30 @@ way. Making that hard to forget belongs to the installer (inspector#5), which
 knows the concrete value at install time and can write it where a human sees
 and confirms it - guessing at runtime is the wrong layer for that guarantee.
 
-That list is read from the *base* branch's `.inspector.json`, never the pull
-request's. If it cannot be read with certainty - a rate limit, a server error, a
-file too large for the API to inline, invalid JSON, a top level that is not a
-JSON object, or a `protectedPaths` that is not a list of strings - the gate
-fails closed and says which of those it hit, rather than quietly judging
-against a shorter list. Only a genuinely absent `.inspector.json` (HTTP 404) is
-a safe absence; that project still gets the always-protected floor.
+That list is read from the *base* branch's current tip, never the pull request's
+copy - the same place GitHub loads the workflow file itself from. Adding an
+entry to `protectedPaths` therefore applies immediately to pull requests that
+are already open, which also means a pull request's verdict can change without
+the pull request changing. That is the intended direction for a protection list.
+If the list cannot be read with certainty - a rate limit, a server error, a file
+too large for the API to inline, invalid JSON, a top level that is not a JSON
+object, or a `protectedPaths` that is not a list of strings - the gate fails
+closed and says which of those it hit, rather than quietly judging against a
+shorter list. Only a genuinely absent `.inspector.json` (HTTP 404) is a safe
+absence; that project still gets the always-protected floor.
 
-The workflow also runs on GitHub's `status` event, not just on the pull request
-itself. A commit status can only be posted to a commit that is already pushed,
-so inspector's green status lands *after* the push that made the gate say "no
-status posted at all" - without the second trigger, that first honest red would
-stand until someone re-ran the check by hand. The `status` run looks up which
-open pull request the commit heads through one read-only API call and re-asks
-both questions; a commit heading no open pull request is an honest pass, since
-there is nothing to gate. Note that GitHub associates a status-triggered run
-with the default branch's last commit, so it does not overwrite the `gate` check
-already recorded on the pull request's head commit - the workflow header records
-that limit and why fixing it would need write permission this job does not take.
+**Known limit: the check can go stale-red.** A commit status can only be posted
+to a commit that is already pushed, so inspector's green status lands *after*
+the push whose gate run correctly reported "no status posted at all". Nothing
+re-runs the gate when the status arrives, so that red stands until someone
+re-runs the workflow by hand. An `on: status` trigger was built for this and
+removed again: GitHub attaches a status-triggered run to the default branch's
+last commit rather than to the commit the status was posted to, so it never
+flipped the pull request's own check, and a status event cannot be filtered by
+context, so every unrelated third party's status re-ran the gate and landed
+failures on the default branch's tip. The real fix is inspector#18 - inspector
+owns the push, so a green status exists before a pull request is ever opened -
+not a retry bolted onto the gate.
 
 **Copying this workflow into a repo does not, by itself, block a merge.** GitHub
 only enforces a check once it is a *required* status check:
