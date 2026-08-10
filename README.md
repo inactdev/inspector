@@ -45,7 +45,13 @@ race detector is itself unsupported on some platforms, including 32-bit x86,
 linux/arm, and freebsd/arm - on those, run `CGO_ENABLED=0 go test ./...`
 instead, which runs the same suite without the race detector and so needs no C
 compiler. `script/check` also runs inspector-gate's own shell tests, which need
-`bash` and `jq` on PATH.
+`bash` and `jq` on PATH - `jq` is what inspector-gate.sh itself parses GitHub's
+API responses with, so it is a dependency of the shipped gate, not only of its
+tests. `script/check` checks for all of those before it runs anything and names
+whichever one is missing. That is also why inspector's own `.inspector.json`
+declares `"image": "cimg/go:1.22"` rather than `golang:1.22`: it carries `go`,
+`gofmt`, `gcc`, `bash` and `jq` together, and the check container has no
+network to install anything with.
 
 Also requires [Docker](https://docs.docker.com/get-docker/) - the check
 command runs inside a container, not on your machine directly. Without a

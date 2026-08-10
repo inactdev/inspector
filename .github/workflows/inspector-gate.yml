@@ -97,8 +97,30 @@ jobs:
         # like "release&hotfix" would silently fetch a different branch's
         # copy of this script. Same reasoning as the .inspector.json read
         # inside it.
+        #
+        # This is the one API read that cannot use inspector-gate.sh's own
+        # gh_api_failure_reason helper: it is the call that fetches the file
+        # that defines it. So the same one-line wording is inlined here,
+        # rather than letting a rate limit or a 5xx abort the step with only
+        # gh's raw stderr and nothing saying the gate could not read its own
+        # definition. Fails closed either way; this only makes it legible.
         run: |
           set -euo pipefail
-          script=$(gh api -X GET "repos/$REPO/contents/.github/scripts/inspector-gate.sh" -f ref="$BASE_REF" --jq '.content' | tr -d '\n' | base64 -d)
+          stderr_file=$(mktemp)
+          rc=0
+          encoded=$(gh api -X GET "repos/$REPO/contents/.github/scripts/inspector-gate.sh" -f ref="$BASE_REF" --jq '.content' 2>"$stderr_file") || rc=$?
+          reason=$(tr -d '\r' < "$stderr_file" |
+            awk 'NF { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); out = (out == "" ? $0 : out "; " $0) } END { print out }')
+          rm -f "$stderr_file"
+          if [ "$rc" -ne 0 ]; then
+            [ -n "$reason" ] || reason="gh exited $rc without printing a reason"
+            echo "::error::Could not read inspector-gate.sh from the base branch (\"$BASE_REF\") via the GitHub Contents API, so this gate could not load its own definition and neither of its two questions was asked: $reason. Failing closed rather than passing unchecked - this is a problem reaching GitHub, not a verdict on the code; re-run this check."
+            exit 1
+          fi
+          script=$(printf '%s' "$encoded" | tr -d '\n' | base64 -d)
+          if [ -z "$script" ]; then
+            echo "::error::inspector-gate.sh came back empty from the base branch (\"$BASE_REF\"), so this gate has no definition to run and neither of its two questions was asked. Failing closed rather than passing unchecked - check that .github/scripts/inspector-gate.sh exists on that branch, then re-run this check."
+            exit 1
+          fi
           source <(printf '%s' "$script")
           main
