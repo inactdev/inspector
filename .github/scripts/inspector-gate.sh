@@ -138,9 +138,11 @@ listing_count_check() {
 # But `check` holds a command line, not necessarily a path: `npm test &&
 # npm run lint` names no single file, and adding it as a pattern would
 # only produce something that can never match a filename while reading,
-# in the log, like a protection that exists. Anything with whitespace, a
-# shell metacharacter, a leading `/`, or a `..` segment is therefore left
-# out entirely - such a project must list the files it wants protected
+# in the log, like a protection that exists. The value is therefore used
+# only when it reads as a plain path - letters, digits, `.`, `_`, `-`, and
+# `/` only, with no `..` segment - so a value with whitespace, a shell
+# metacharacter, a leading `/`, or any other character is left out
+# entirely, and such a project must list the files it wants protected
 # under protectedPaths itself. A leading `./` is dropped rather than
 # disqualifying, since `./check.sh` and `check.sh` are the same file and
 # only the second form is what the files API reports.

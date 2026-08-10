@@ -44,7 +44,8 @@ compiler: it runs the suite under Go's race detector, which requires cgo. The
 race detector is itself unsupported on some platforms, including 32-bit x86,
 linux/arm, and freebsd/arm - on those, run `CGO_ENABLED=0 go test ./...`
 instead, which runs the same suite without the race detector and so needs no C
-compiler.
+compiler. `script/check` also runs inspector-gate's own shell tests, which need
+`bash` and `jq` on PATH.
 
 Also requires [Docker](https://docs.docker.com/get-docker/) - the check
 command runs inside a container, not on your machine directly. Without a
@@ -227,17 +228,20 @@ plus whatever a project lists under `protectedPaths` in its `.inspector.json`:
 A `check` that names a bare repo-relative path, like the `check.sh` above, is
 protected too without being listed - it is exactly what a worker under pressure
 edits to make a failing check stop failing, so a repo copying this gate does not
-have to remember to name it twice. That only works when the value is a path.
-A command line - `npm test && npm run lint`, or anything else with whitespace, a
-shell metacharacter, or a leading `/` - names no single file, so nothing is
-derived from it and nothing is claimed: **list the files that decide your
-verdict under `protectedPaths` yourself when your check command is a command.**
+have to remember to name it twice. That only works when the value reads as a
+plain path: letters, digits, `.`, `_`, `-`, and `/` only, with no `..` segment.
+Anything else - `npm test && npm run lint`, or any value with whitespace, a
+shell metacharacter, a leading `/`, or any other character - names no single
+file, so nothing is derived from it and nothing is claimed: **list the files
+that decide your verdict under `protectedPaths` yourself when your check command
+is a command.**
 
 That list is read from the *base* branch's `.inspector.json`, never the pull
 request's. If it cannot be read with certainty - a rate limit, a server error, a
-file too large for the API to inline, invalid JSON, a `protectedPaths` that is
-not a list of strings - the gate fails closed and says which of those it hit,
-rather than quietly judging against a shorter list. Only a genuinely absent
+file too large for the API to inline, invalid JSON, a top level that is not a
+JSON object, a `protectedPaths` that is not a list of strings, a `check` that is
+not a string - the gate fails closed and says which of those it hit, rather
+than quietly judging against a shorter list. Only a genuinely absent
 `.inspector.json` (HTTP 404) is a safe absence; that project still gets the
 always-protected floor.
 
