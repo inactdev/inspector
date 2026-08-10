@@ -221,29 +221,30 @@ plus whatever a project lists under `protectedPaths` in its `.inspector.json`:
 {
   "check": "check.sh",
   "image": "node:20",
-  "protectedPaths": ["deploy/**"]
+  "protectedPaths": ["check.sh", "deploy/**"]
 }
 ```
 
-A `check` that names a bare repo-relative path, like the `check.sh` above, is
-protected too without being listed - it is exactly what a worker under pressure
-edits to make a failing check stop failing, so a repo copying this gate does not
-have to remember to name it twice. That only works when the value reads as a
-plain path: letters, digits, `.`, `_`, `-`, and `/` only, with no `..` segment.
-Anything else - `npm test && npm run lint`, or any value with whitespace, a
-shell metacharacter, a leading `/`, or any other character - names no single
-file, so nothing is derived from it and nothing is claimed: **list the files
-that decide your verdict under `protectedPaths` yourself when your check command
-is a command.**
+**Your own check command is not protected automatically - list it under
+`protectedPaths` yourself.** This was tried the other way: deriving a pattern
+from `check`'s own value, on the reasoning that it is exactly what a worker
+under pressure edits to make a failing check stop failing. It doesn't hold up -
+telling a path from a command line by looking at the string alone doesn't work.
+`"script/check"` is a path, `"pytest"` is not, and `"check.sh"` could be either;
+every heuristic that tries to split them keeps producing wrong answers on one
+side or the other. So the gate no longer guesses: a bare-path check command and
+a multi-word one are both left for the project to declare, explicitly, the same
+way. Making that hard to forget belongs to the installer (inspector#5), which
+knows the concrete value at install time and can write it where a human sees
+and confirms it - guessing at runtime is the wrong layer for that guarantee.
 
 That list is read from the *base* branch's `.inspector.json`, never the pull
 request's. If it cannot be read with certainty - a rate limit, a server error, a
 file too large for the API to inline, invalid JSON, a top level that is not a
-JSON object, a `protectedPaths` that is not a list of strings, a `check` that is
-not a string - the gate fails closed and says which of those it hit, rather
-than quietly judging against a shorter list. Only a genuinely absent
-`.inspector.json` (HTTP 404) is a safe absence; that project still gets the
-always-protected floor.
+JSON object, or a `protectedPaths` that is not a list of strings - the gate
+fails closed and says which of those it hit, rather than quietly judging
+against a shorter list. Only a genuinely absent `.inspector.json` (HTTP 404) is
+a safe absence; that project still gets the always-protected floor.
 
 The workflow also runs on GitHub's `status` event, not just on the pull request
 itself. A commit status can only be posted to a commit that is already pushed,

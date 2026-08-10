@@ -55,9 +55,18 @@ set -euo pipefail
 # project's .inspector.json adds under protectedPaths: the workflow files,
 # this script (and any sibling under .github/scripts), and .inspector.json
 # itself, which could otherwise edit its own protectedPaths list away.
-# The project's own check command is protected too, but that path is not
-# knowable here - it is read out of .inspector.json by
-# protected_paths_from_response below.
+#
+# A project's own check command is NOT derived automatically from
+# .inspector.json's "check" field and added here - that was tried and
+# reverted. Telling a path from a command line by looking at the string
+# does not hold up: "script/check" is a path, "pytest" is not, and
+# "check.sh" could be either, so every heuristic that tries to split them
+# keeps producing exactly the kind of false claim this project has already
+# had to correct once. A project must list its own check command's file(s)
+# under protectedPaths itself - see the "inspector-gate" section of
+# README.md. Making that hard to forget is inspector#5's installer's job:
+# it knows the concrete value at install time and can write it where a
+# human sees and confirms it. Guessing at runtime is the wrong layer.
 ALWAYS_PROTECTED='.github/**
 .inspector.json'
 
@@ -128,24 +137,10 @@ listing_count_check() {
 
 # protected_paths_from_response turns the GitHub Contents API's raw
 # response for the BASE branch's .inspector.json into that project's own
-# protected patterns, one per line: its protectedPaths entries, plus its
-# check command when, and only when, that value names a bare
-# repo-relative path. A check command is precisely the thing a worker
-# under pressure edits to make a failing check stop failing (SPEC.md
-# section 8), so a repo that copies this gate gets a `"check":
-# "script/check"` protected without listing it twice.
-#
-# But `check` holds a command line, not necessarily a path: `npm test &&
-# npm run lint` names no single file, and adding it as a pattern would
-# only produce something that can never match a filename while reading,
-# in the log, like a protection that exists. The value is therefore used
-# only when it reads as a plain path - letters, digits, `.`, `_`, `-`, and
-# `/` only, with no `..` segment - so a value with whitespace, a shell
-# metacharacter, a leading `/`, or any other character is left out
-# entirely, and such a project must list the files it wants protected
-# under protectedPaths itself. A leading `./` is dropped rather than
-# disqualifying, since `./check.sh` and `check.sh` are the same file and
-# only the second form is what the files API reports.
+# protectedPaths entries, one per line. It does NOT derive anything from
+# the "check" field - see ALWAYS_PROTECTED's comment for why that was
+# tried and reverted; a project must list its own check command's file(s)
+# under protectedPaths explicitly.
 #
 # It fails CLOSED. On anything it cannot read with certainty it prints one
 # reason line and returns 1, and the caller must treat that as a hard
@@ -207,18 +202,7 @@ protected_paths_from_response() {
     echo "one of its \"protectedPaths\" entries is not a string"
     return 1
   fi
-  kind=$(jq -r '.check | type' <<< "$content")
-  if [ "$kind" != "null" ] && [ "$kind" != "string" ]; then
-    echo "its \"check\" is a JSON $kind, not a string"
-    return 1
-  fi
 
-  local check
-  check=$(jq -r '.check // ""' <<< "$content")
-  check="${check#./}"
-  if [[ "$check" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] && [[ ! "$check" =~ (^|/)\.\.?(/|$) ]]; then
-    printf '%s\n' "$check"
-  fi
   jq -r '(.protectedPaths // [])[]' <<< "$content"
 }
 

@@ -187,41 +187,21 @@ assert_fails_closed "a protectedPaths entry that is not a string fails closed" \
   "$(inspector_json_response '{"protectedPaths": ["ok.sh", 7]}')" \
   "not a string"
 
-assert_fails_closed "a check that is not a string fails closed" \
-  "$(inspector_json_response '{"check": ["script/check"]}')" \
-  "not a string"
-
-assert_patterns "a config with neither check nor protectedPaths adds nothing" \
+assert_patterns "a config with no protectedPaths adds nothing" \
   "$(inspector_json_response '{"timeoutSeconds": 600}')" \
   ""
 
-assert_patterns "a check command that names a bare path is protected without being listed" \
+assert_patterns "check is never read - a bare-path check command adds nothing on its own" \
   "$(inspector_json_response '{"check": "script/check"}')" \
-  "script/check"
-
-assert_patterns "a command-line check command yields no pattern at all, rather than an inert one" \
-  "$(inspector_json_response '{"check": "npm test && npm run lint"}')" \
   ""
 
-assert_patterns "a one-word check command that is still a command, not a path, yields nothing" \
-  "$(inspector_json_response '{"check": "make check", "protectedPaths": ["Makefile"]}')" \
-  "Makefile"
-
-assert_patterns "an absolute path cannot match a repo-relative filename, so it yields nothing" \
-  "$(inspector_json_response '{"check": "/usr/local/bin/check"}')" \
+assert_patterns "check is never read even when it is not a string - only protectedPaths is validated" \
+  "$(inspector_json_response '{"check": ["script/check"]}')" \
   ""
 
-assert_patterns "a leading ./ is dropped, since that is the same file the files API reports" \
-  "$(inspector_json_response '{"check": "./check.sh"}')" \
-  "check.sh"
-
-assert_patterns "a path escaping the repository yields nothing" \
-  "$(inspector_json_response '{"check": "../shared/check.sh"}')" \
-  ""
-
-assert_patterns "check command and protectedPaths are both returned" \
-  "$(inspector_json_response '{"check": "script/check", "protectedPaths": ["deploy.sh", "ci/**"]}')" \
-  "$(printf 'script/check\ndeploy.sh\nci/**')"
+assert_patterns "protectedPaths entries come back regardless of what check contains" \
+  "$(inspector_json_response '{"check": "script/check", "protectedPaths": ["script/check", "ci/**"]}')" \
+  "$(printf 'script/check\nci/**')"
 
 # --- pull_request_for_status ---
 
