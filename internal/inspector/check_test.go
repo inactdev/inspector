@@ -49,6 +49,46 @@ func requireInternet(t *testing.T) {
 	conn.Close()
 }
 
+// failingDockerKill puts a docker shim first on PATH that hands every
+// subcommand to the real docker except `kill`, which it fails the way
+// docker itself does for a container that is no longer running. That
+// makes the failed-kill path reproducible instead of dependent on
+// winning a race with --rm's auto-remove window, and the names it was
+// asked to kill are what the cleanup needs to remove the containers
+// that consequently outlived their run.
+func failingDockerKill(t *testing.T) {
+	t.Helper()
+	realDocker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skipf("no docker on PATH, skipping: %v", err)
+	}
+
+	dir := t.TempDir()
+	names := filepath.Join(dir, "kill-attempts")
+	shim := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "kill" ]; then
+	printf '%%s\n' "$2" >> %q
+	echo "Error response from daemon: Cannot kill container: $2: Container $2 is not running" >&2
+	exit 1
+fi
+exec %q "$@"
+`, names, realDocker)
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("writing the docker shim: %v", err)
+	}
+
+	t.Cleanup(func() {
+		attempted, err := os.ReadFile(names)
+		if err != nil {
+			return
+		}
+		for _, name := range strings.Fields(string(attempted)) {
+			_ = exec.Command(realDocker, "rm", "-f", name).Run()
+		}
+	})
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
@@ -345,6 +385,34 @@ func TestRunCheck_NetworkOptIn(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "REACHED") {
 		t.Fatalf("check command could not reach the network with Network: true - Output = %q (this test needs outbound internet access to pass)", result.Output)
+	}
+}
+
+func TestRunCheck_UnstoppableContainerIsReported(t *testing.T) {
+	// A timeout whose kill docker refused is the one case where a
+	// container can outlive its deadline against the repo, so it has to
+	// be visible - and still a timeout verdict, not an infrastructure
+	// error that would throw away the run's report.
+	requireDocker(t)
+	failingDockerKill(t)
+	dir := t.TempDir()
+	var stderr bytes.Buffer
+
+	result, err := RunCheck(dir, "sleep 30", testImage, false, 500*time.Millisecond, io.Discard, &stderr)
+	if err != nil {
+		t.Fatalf("a refused kill must stay a verdict, not become an infrastructure error: %v", err)
+	}
+	if !result.TimedOut {
+		t.Fatalf("TimedOut = false, want true - result = %+v", result)
+	}
+	if result.ExitCode != -1 {
+		t.Fatalf("ExitCode = %d, want -1 - `docker kill`'s own exit status is not the check command's", result.ExitCode)
+	}
+	if !strings.Contains(result.Output, "is not running") {
+		t.Fatalf("Output = %q, want docker's own refusal folded into the report", truncate(result.Output, 400))
+	}
+	if !strings.Contains(stderr.String(), "is not running") {
+		t.Fatalf("stderr = %q, want the refused kill reported live", truncate(stderr.String(), 400))
 	}
 }
 

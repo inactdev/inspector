@@ -119,12 +119,22 @@ func TestKillContainer_NotRunningIsARealError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
 
-	err := killContainer(name)
+	cmd := New(context.Background(), Run{RepoRoot: t.TempDir(), Command: "true", Image: "alpine"})
+	defer cmd.Cleanup()
+
+	err := cmd.kill(name)
 	if err == nil || errors.Is(err, os.ErrProcessDone) {
-		t.Fatalf("killContainer(created-but-never-started) = %v, want a real error", err)
+		t.Fatalf("kill(created-but-never-started) = %v, want a real error", err)
 	}
-	if !strings.Contains(err.Error(), name) {
-		t.Fatalf("killContainer error = %q, want it to name the container and carry docker's own message", err)
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		t.Fatalf("kill error wraps the `docker kill` process's own *exec.ExitError (%v) - callers read any ExitError as the check container's verdict", err)
+	}
+	if !strings.Contains(err.Error(), "is not running") {
+		t.Fatalf("kill error = %q, want docker's own message", err)
+	}
+	if recorded := cmd.KillError(); recorded == nil || recorded.Error() != err.Error() {
+		t.Fatalf("KillError() = %v, want the same failure recorded on the Cmd", recorded)
 	}
 }
 
@@ -192,6 +202,9 @@ func TestNew_TimeoutKillsContainerAndDescendants(t *testing.T) {
 
 	if elapsed > 5*time.Second {
 		t.Fatalf("Run() took %s to return after a 300ms timeout - the kill isn't taking effect promptly", elapsed)
+	}
+	if err := cmd.KillError(); err != nil {
+		t.Fatalf("KillError() = %v after a kill that worked, want nil", err)
 	}
 
 	time.Sleep(3200 * time.Millisecond)

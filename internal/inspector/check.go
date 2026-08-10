@@ -55,7 +55,10 @@ type CheckResult struct {
 // are expected to have already confirmed a usable runtime via
 // container.EnsureAvailable - RunCheck itself does not check again, so
 // its own failures here are the rarer kind: the daemon going away
-// mid-run, an image that doesn't exist, and the like.
+// mid-run, an image that doesn't exist, and the like. A container that
+// could not be stopped at the deadline is not one of them: that stays a
+// TimedOut CheckResult, with docker's own refusal reported on stderr and
+// kept in Output.
 func RunCheck(repoRoot, command, image string, network bool, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
 	// os/exec copies stdout and stderr on separate goroutines unless the
 	// two writers are the identical value, and tee never is, so the shared
@@ -93,9 +96,32 @@ func RunCheck(repoRoot, command, image string, network bool, timeout time.Durati
 		return CheckResult{}, fmt.Errorf("starting the container: %w", err)
 	}
 
+	// A container inspector tried and failed to stop is the one outcome
+	// that must never be silent, and run.Run's error can't be trusted to
+	// carry it either way: exec.Cmd.Wait drops Cancel's error whenever
+	// the `docker run` client itself exited badly - exactly the case
+	// where the container was left running - and surfaces it as a bare
+	// Go error in the harmless race where the container had already
+	// finished, which would cost this run both its timeout verdict and
+	// its saved report. container.Cmd records the kill's own outcome
+	// instead, so read it from there and put it in front of the person
+	// running the check, in the report as well as live on stderr.
+	killErr := run.KillError()
+	if killErr != nil {
+		fmt.Fprintf(run.Stderr, "\ninspector: could not stop the check container: %v\n"+
+			"inspector: it may still be running against this repo - check `docker ps` and stop it by hand\n", killErr)
+	}
+
 	result, resultErr := classifyResult(run.Cmd, err, capture.String())
 	if resultErr != nil {
-		return CheckResult{}, resultErr
+		if killErr == nil {
+			return CheckResult{}, resultErr
+		}
+		// The only way here is Wait reporting the failed cancellation
+		// itself, which says nothing about the check command. Cancel
+		// runs only once the deadline has fired, so this is a timeout,
+		// and the block below is what states that.
+		result = CheckResult{ExitCode: -1, Output: capture.String()}
 	}
 
 	// The Go documentation for CommandContext recommends judging a

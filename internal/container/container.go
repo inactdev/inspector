@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -68,10 +69,14 @@ type Run struct {
 
 // Cmd is one containerized run in progress: the *exec.Cmd for the
 // attached `docker run` client process, plus what Started needs to tell
-// a run that never got off the ground apart from one that did.
+// a run that never got off the ground apart from one that did, plus
+// whatever KillError has to report about stopping it.
 type Cmd struct {
 	*exec.Cmd
 	cidFile string
+
+	mu      sync.Mutex
+	killErr error
 }
 
 // New builds the *exec.Cmd for running r inside a fresh, single-use,
@@ -108,10 +113,35 @@ func New(ctx context.Context, r Run) *Cmd {
 	args = append(args, r.Image, "sh", "-c", r.Command)
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Cancel = func() error { return killContainer(name) }
 	cmd.WaitDelay = 5 * time.Second
 
-	return &Cmd{Cmd: cmd, cidFile: cidFile}
+	c := &Cmd{Cmd: cmd, cidFile: cidFile}
+	cmd.Cancel = func() error { return c.kill(name) }
+	return c
+}
+
+func (c *Cmd) kill(name string) error {
+	err := killContainer(name)
+	if err != nil && !errors.Is(err, os.ErrProcessDone) {
+		c.mu.Lock()
+		c.killErr = err
+		c.mu.Unlock()
+	}
+	return err
+}
+
+// KillError reports docker's own refusal to stop the container after
+// ctx's deadline fired, carrying docker's message, and nil when no kill
+// was needed or the kill worked. It is the authoritative answer to "did
+// this container actually get stopped": what Run returns is not, because
+// exec.Cmd.Wait prefers the `docker run` client's own exit status and
+// only falls back to Cancel's error when that status is clean - so
+// precisely when the container is left running and the client had to be
+// SIGKILLed, Wait discards the reason. Read it after Run/Wait returns.
+func (c *Cmd) KillError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.killErr
 }
 
 // Started reports whether the container was ever created, which is only
@@ -162,20 +192,26 @@ func randomHex(n int) string {
 // deadline fired looks like - the same race check.go's old
 // killProcessGroup had to account for, and narrowed just as carefully
 // there (ESRCH and a verified EPERM, not any errno). Every other
-// nonzero exit - "is not running", a daemon that stopped answering, a
-// permissions problem - is reported as a real error with docker's own
-// message attached, because os.ErrProcessDone would tell Wait the
-// cancellation succeeded and leave a container that may still be
-// running against the bind-mounted repo past its deadline, with the
-// failed kill recorded nowhere.
+// failure - "is not running", a daemon that stopped answering, a
+// permissions problem - is a real error carrying docker's own message,
+// since os.ErrProcessDone would claim a container that may still be
+// running against the bind-mounted repo had been dealt with.
+//
+// The returned error deliberately does not wrap the *exec.ExitError
+// from `docker kill` itself: that is a different process from the one
+// being waited on, and classifyResult reads any *exec.ExitError it can
+// find as the check container's own verdict.
 func killContainer(name string) error {
 	out, err := exec.Command("docker", "kill", name).CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && strings.Contains(strings.ToLower(string(out)), "no such container") {
+	message := strings.TrimSpace(string(out))
+	if message == "" {
+		message = err.Error()
+	}
+	if strings.Contains(strings.ToLower(message), "no such container") {
 		return os.ErrProcessDone
 	}
-	return fmt.Errorf("docker kill %s: %w: %s", name, err, strings.TrimSpace(string(out)))
+	return fmt.Errorf("docker kill %s: %s", name, message)
 }
