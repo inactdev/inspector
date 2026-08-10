@@ -171,6 +171,14 @@ assert_fails_closed "content that is not valid JSON fails closed" \
   "$(inspector_json_response 'check: script/check')" \
   "not valid JSON"
 
+assert_fails_closed "valid JSON that is not an object fails closed, naming the type" \
+  "$(inspector_json_response '["script/check"]')" \
+  "its top level is a JSON array, not an object"
+
+assert_fails_closed "a bare JSON null fails closed as a non-object, not as invalid JSON" \
+  "$(inspector_json_response 'null')" \
+  "its top level is a JSON null, not an object"
+
 assert_fails_closed "protectedPaths present but not an array fails closed" \
   "$(inspector_json_response '{"protectedPaths": "script/check"}')" \
   "not an array"
@@ -187,9 +195,29 @@ assert_patterns "a config with neither check nor protectedPaths adds nothing" \
   "$(inspector_json_response '{"timeoutSeconds": 600}')" \
   ""
 
-assert_patterns "the check command is protected without being listed" \
+assert_patterns "a check command that names a bare path is protected without being listed" \
   "$(inspector_json_response '{"check": "script/check"}')" \
   "script/check"
+
+assert_patterns "a command-line check command yields no pattern at all, rather than an inert one" \
+  "$(inspector_json_response '{"check": "npm test && npm run lint"}')" \
+  ""
+
+assert_patterns "a one-word check command that is still a command, not a path, yields nothing" \
+  "$(inspector_json_response '{"check": "make check", "protectedPaths": ["Makefile"]}')" \
+  "Makefile"
+
+assert_patterns "an absolute path cannot match a repo-relative filename, so it yields nothing" \
+  "$(inspector_json_response '{"check": "/usr/local/bin/check"}')" \
+  ""
+
+assert_patterns "a leading ./ is dropped, since that is the same file the files API reports" \
+  "$(inspector_json_response '{"check": "./check.sh"}')" \
+  "check.sh"
+
+assert_patterns "a path escaping the repository yields nothing" \
+  "$(inspector_json_response '{"check": "../shared/check.sh"}')" \
+  ""
 
 assert_patterns "check command and protectedPaths are both returned" \
   "$(inspector_json_response '{"check": "script/check", "protectedPaths": ["deploy.sh", "ci/**"]}')" \

@@ -58,10 +58,10 @@ type Config struct {
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
 	// ProtectedPaths lists project-specific paths inspector-gate (issue
 	// #4) treats as protected, in addition to its own fixed floor
-	// (.inspector.json itself, .github/**, and whatever path Check names
-	// - the check command is protected automatically, so no project has
-	// to remember to list the one file that decides whether its work
-	// passes). One glob pattern per
+	// (.inspector.json itself and .github/**). Check is protected too
+	// when it names a bare repo-relative path; when it is a command line
+	// it names no file, and a project wanting the files behind that
+	// command protected must list them here. One glob pattern per
 	// entry, matched the same way inspector-gate.sh matches them: `*`
 	// matches any characters, `/` included. inspector itself never reads
 	// this field - it exists only for inspector-gate, which reads it from

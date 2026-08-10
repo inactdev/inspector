@@ -213,9 +213,8 @@ status (no status at all is red, same as a failing one), and did the pull reques
 touch a protected path (any touch is red - there is no declared-changes path that
 passes; see `.github/scripts/inspector-gate.sh` for the full reasoning inline).
 
-Protected paths are `.inspector.json`, everything under `.github/`, and the
-project's own check command always, plus whatever it lists under `protectedPaths`
-in its `.inspector.json`:
+Protected paths are `.inspector.json` and everything under `.github/` always,
+plus whatever a project lists under `protectedPaths` in its `.inspector.json`:
 
 ```json
 {
@@ -225,9 +224,14 @@ in its `.inspector.json`:
 }
 ```
 
-The check command is protected without being listed, on purpose: it is exactly
-what a worker under pressure edits to make a failing check stop failing, so a
-repo copying this gate does not have to remember to name it twice.
+A `check` that names a bare repo-relative path, like the `check.sh` above, is
+protected too without being listed - it is exactly what a worker under pressure
+edits to make a failing check stop failing, so a repo copying this gate does not
+have to remember to name it twice. That only works when the value is a path.
+A command line - `npm test && npm run lint`, or anything else with whitespace, a
+shell metacharacter, or a leading `/` - names no single file, so nothing is
+derived from it and nothing is claimed: **list the files that decide your
+verdict under `protectedPaths` yourself when your check command is a command.**
 
 That list is read from the *base* branch's `.inspector.json`, never the pull
 request's. If it cannot be read with certainty - a rate limit, a server error, a

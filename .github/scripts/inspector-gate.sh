@@ -128,12 +128,22 @@ listing_count_check() {
 
 # protected_paths_from_response turns the GitHub Contents API's raw
 # response for the BASE branch's .inspector.json into that project's own
-# protected patterns, one per line: its protectedPaths entries, plus
-# whatever path its check command names. The check command is not left to
-# a project remembering to list it - it is precisely the thing a worker
+# protected patterns, one per line: its protectedPaths entries, plus its
+# check command when, and only when, that value names a bare
+# repo-relative path. A check command is precisely the thing a worker
 # under pressure edits to make a failing check stop failing (SPEC.md
-# section 8), so a repo that copies this gate gets it protected by
-# default.
+# section 8), so a repo that copies this gate gets a `"check":
+# "script/check"` protected without listing it twice.
+#
+# But `check` holds a command line, not necessarily a path: `npm test &&
+# npm run lint` names no single file, and adding it as a pattern would
+# only produce something that can never match a filename while reading,
+# in the log, like a protection that exists. Anything with whitespace, a
+# shell metacharacter, a leading `/`, or a `..` segment is therefore left
+# out entirely - such a project must list the files it wants protected
+# under protectedPaths itself. A leading `./` is dropped rather than
+# disqualifying, since `./check.sh` and `check.sh` are the same file and
+# only the second form is what the files API reports.
 #
 # It fails CLOSED. On anything it cannot read with certainty it prints one
 # reason line and returns 1, and the caller must treat that as a hard
@@ -177,8 +187,13 @@ protected_paths_from_response() {
     echo "it came back with empty content (the Contents API only inlines files up to 1MB, so a larger one reads as empty here)"
     return 1
   fi
-  if ! jq -e . >/dev/null 2>&1 <<< "$content"; then
+  if ! jq empty >/dev/null 2>&1 <<< "$content"; then
     echo "it is not valid JSON, so the paths it protects cannot be read"
+    return 1
+  fi
+  kind=$(jq -r 'type' <<< "$content")
+  if [ "$kind" != "object" ]; then
+    echo "its top level is a JSON $kind, not an object, so it has no protected paths to read"
     return 1
   fi
   kind=$(jq -r '.protectedPaths | type' <<< "$content")
@@ -196,7 +211,13 @@ protected_paths_from_response() {
     return 1
   fi
 
-  jq -r '[.check // empty] + (.protectedPaths // []) | .[]' <<< "$content"
+  local check
+  check=$(jq -r '.check // ""' <<< "$content")
+  check="${check#./}"
+  if [[ "$check" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] && [[ ! "$check" =~ (^|/)\.\.?(/|$) ]]; then
+    printf '%s\n' "$check"
+  fi
+  jq -r '(.protectedPaths // [])[]' <<< "$content"
 }
 
 # pull_request_for_status picks the pull request a `status` event concerns
