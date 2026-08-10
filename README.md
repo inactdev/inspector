@@ -225,6 +225,11 @@ status (no status at all is red, same as a failing one), and did the pull reques
 touch a protected path (any touch is red - there is no declared-changes path that
 passes; see `.github/scripts/inspector-gate.sh` for the full reasoning inline).
 
+Adopting it means copying **both** files. The workflow never checks the
+repository out, so it reads `.github/scripts/inspector-gate.sh` from the base
+branch through the GitHub API and runs that; with the workflow alone in place,
+every run fails closed saying it could not load its own definition.
+
 Protected paths are `.inspector.json` and everything under `.github/` always,
 plus whatever a project lists under `protectedPaths` in its `.inspector.json`:
 
