@@ -21,9 +21,10 @@ const (
 	// Red means the project's check command failed.
 	Red Outcome = "red"
 	// Refused means inspector never reached a verdict on the code - no
-	// check command configured, a dirty working tree, a check command
-	// killed by a signal before it could finish on its own, or a check
-	// command that ran past its timeout and was killed for it. Those
+	// check command or image configured, no usable container runtime, a
+	// dirty working tree, a check command killed by a signal before it
+	// could finish on its own, or a check command that ran past its
+	// timeout and was killed for it. Those
 	// last two did run, unlike the others: something (the OOM killer,
 	// an external kill, inspector's own deadline) killed it before it
 	// judged the code at all, so its exit status is not a verdict on
