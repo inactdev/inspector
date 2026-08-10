@@ -74,12 +74,52 @@ func TestRun_TimedOutCheckIsRefusedNotRed(t *testing.T) {
 	if !strings.Contains(result.Message, "timeout") {
 		t.Fatalf("message should mention the timeout, got: %s", result.Message)
 	}
+	if !strings.Contains(result.Message, "was killed") {
+		t.Fatalf("a kill docker accepted should still be described as one, got: %s", result.Message)
+	}
 	if result.ReportPath == "" {
 		t.Fatal("expected a report path - the check did run and its output is worth keeping")
 	}
 	data := readFile(t, result.ReportPath)
 	if !strings.Contains(data, `"timedOut": true`) {
 		t.Fatalf("report should record timedOut, got: %s", data)
+	}
+}
+
+func TestRun_TimedOutCheckWhoseContainerDockerRefusedToStop(t *testing.T) {
+	// The refusal a person reads has to match what actually happened: a
+	// container docker would not stop may still be running against the
+	// repo, so claiming it was killed would be a lie in exactly the
+	// situation where knowing the truth matters.
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{
+		ConfigFileName: `{"check": "sleep 30", "image": "alpine", "timeoutSeconds": 1}`,
+	})
+	failingDockerKill(t)
+	opts, _, stderr := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused - message: %s", result.Outcome, result.Message)
+	}
+	if strings.Contains(result.Message, "was killed") {
+		t.Fatalf("message claims the check was killed when docker refused to stop it: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "may still be running") {
+		t.Fatalf("message should say the container may still be running, got: %s", result.Message)
+	}
+	if !strings.Contains(stderr.String(), "could not stop the check container") {
+		t.Fatalf("stderr should carry the live warning, got: %s", truncate(stderr.String(), 400))
+	}
+	if result.ReportPath == "" {
+		t.Fatal("expected a report path - a refused kill must not cost the run its report")
+	}
+	data := readFile(t, result.ReportPath)
+	if !strings.Contains(data, "is not running") {
+		t.Fatalf("report should keep docker's own refusal, got: %s", truncate(data, 600))
 	}
 }
 

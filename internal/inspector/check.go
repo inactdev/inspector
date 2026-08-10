@@ -37,7 +37,15 @@ type CheckResult struct {
 	// also set in this case, since killing it is how the timeout is
 	// enforced, but TimedOut identifies who pulled the trigger and why).
 	TimedOut bool
-	Output   string
+	// KillFailed is set when the deadline fired and docker then refused
+	// to stop the container, so inspector cannot claim the check command
+	// is no longer running against the repo. It is additive reporting
+	// only - classifyResult neither sets nor reads it, and no outcome
+	// depends on it - but a caller phrasing a timeout to a human must
+	// check it rather than say the check was killed when it may not have
+	// been.
+	KillFailed bool
+	Output     string
 }
 
 // RunCheck runs command inside a fresh container built from image,
@@ -138,6 +146,7 @@ func RunCheck(repoRoot, command, image string, network bool, timeout time.Durati
 			result.Signal = "killed"
 		}
 	}
+	result.KillFailed = killErr != nil
 	return result, nil
 }
 

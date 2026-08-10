@@ -279,6 +279,9 @@ func TestRunCheck_Timeout(t *testing.T) {
 	if result.Signal == "" {
 		t.Fatalf("expected Signal to be set on a timed-out result, got CheckResult %+v", result)
 	}
+	if result.KillFailed {
+		t.Fatalf("KillFailed = true on a timeout whose kill docker accepted, got CheckResult %+v", result)
+	}
 	if elapsed > 10*time.Second {
 		t.Fatalf("RunCheck took %s to return after a 300ms timeout - the kill isn't taking effect promptly", elapsed)
 	}
@@ -404,6 +407,9 @@ func TestRunCheck_UnstoppableContainerIsReported(t *testing.T) {
 	}
 	if !result.TimedOut {
 		t.Fatalf("TimedOut = false, want true - result = %+v", result)
+	}
+	if !result.KillFailed {
+		t.Fatalf("KillFailed = false after docker refused the kill - callers phrasing this to a human would claim the check was stopped: %+v", result)
 	}
 	if result.ExitCode != -1 {
 		t.Fatalf("ExitCode = %d, want -1 - `docker kill`'s own exit status is not the check command's", result.ExitCode)

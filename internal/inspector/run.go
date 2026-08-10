@@ -172,6 +172,16 @@ func Run(opts Options) (Result, error) {
 	reportPath, writeErr := WriteReport(repoRoot, report)
 
 	switch {
+	case checkResult.TimedOut && checkResult.KillFailed:
+		result.Message = fmt.Sprintf(
+			"the check command did not finish within its %s timeout, and docker refused to stop its container - inspector cannot confirm it was stopped, so it may still be running against this repo (check `docker ps`; its own output above says what docker reported). inspector never reached a verdict, so this cannot be a verdict. Set timeoutSeconds in %s if this project's checks legitimately need longer.",
+			timeout, ConfigFileName,
+		)
+		if writeErr != nil {
+			result.Message += fmt.Sprintf(" Its local report also failed to save: %v", writeErr)
+		} else {
+			result.ReportPath = reportPath
+		}
 	case checkResult.TimedOut:
 		result.Message = fmt.Sprintf(
 			"the check command did not finish within its %s timeout and was killed, along with anything it started - inspector never reached a verdict, so this cannot be a verdict. Set timeoutSeconds in %s if this project's checks legitimately need longer.",
