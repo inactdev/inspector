@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/inactdev/inspector/internal/container"
+	"github.com/inactdev/inspector/internal/inspector"
 )
 
 // requireDocker skips a test that genuinely needs a live container
@@ -48,12 +49,14 @@ func newTestRepo(t *testing.T, files map[string]string) string {
 	return dir
 }
 
-func runGitT(t *testing.T, dir string, args ...string) {
+func runGitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
+	return string(out)
 }
 
 // statusRequest is what the fake GitHub API in stubGitHubStatusAPI
@@ -66,21 +69,32 @@ type statusRequest struct {
 	Desc  string `json:"description"`
 }
 
-// stubGitHubStatusAPI points githubAPIBaseURL at a fake GitHub API for
-// the duration of the test, and gives dir an origin remote plus
-// GITHUB_TOKEN so postCommitStatus has everything real posting needs.
-// statusCode is the response the fake API returns; the recorded request
-// is captured in the returned pointer regardless of what the caller's
-// check outcome ends up being.
-func stubGitHubStatusAPI(t *testing.T, dir string, statusCode int, responseBody string) *statusRequest {
+type statusAPIStub struct {
+	Request *statusRequest
+	Remote  string
+}
+
+// stubGitHubStatusAPI points githubAPIBaseURL at a fake GitHub API and gives
+// dir an origin whose fetch URL looks like GitHub while its push URL is a local
+// bare repository. observe runs while inspector is posting, after it staged C
+// but before GitHub accepts the status, so it can prove the branch has not
+// moved early.
+func stubGitHubStatusAPI(t *testing.T, dir string, statusCode int, responseBody string, observe func(remote string)) *statusAPIStub {
 	t.Helper()
-	got := &statusRequest{}
+	stub := &statusAPIStub{
+		Request: &statusRequest{},
+		Remote:  newBareTestRemote(t),
+	}
+	configureTestOrigin(t, dir, stub.Remote)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got.Path = r.URL.Path
-		got.Auth = r.Header.Get("Authorization")
+		stub.Request.Path = r.URL.Path
+		stub.Request.Auth = r.Header.Get("Authorization")
 		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, got)
+		_ = json.Unmarshal(body, stub.Request)
+		if observe != nil {
+			observe(stub.Remote)
+		}
 		w.WriteHeader(statusCode)
 		if responseBody != "" {
 			w.Write([]byte(responseBody))
@@ -91,11 +105,35 @@ func stubGitHubStatusAPI(t *testing.T, dir string, statusCode int, responseBody 
 	prevBaseURL := githubAPIBaseURL
 	githubAPIBaseURL = server.URL
 	t.Cleanup(func() { githubAPIBaseURL = prevBaseURL })
-
-	runGitT(t, dir, "remote", "add", "origin", "https://github.com/inactdev/inspector.git")
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
-	return got
+	return stub
+}
+
+func newBareTestRemote(t *testing.T) string {
+	t.Helper()
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	cmd := exec.Command("git", "init", "--bare", "-q", remote)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("creating bare remote: %v\n%s", err, out)
+	}
+	return remote
+}
+
+func configureTestOrigin(t *testing.T, dir, remote string) {
+	t.Helper()
+	runGitT(t, dir, "remote", "add", "origin", "https://github.com/inactdev/inspector.git")
+	runGitT(t, dir, "remote", "set-url", "--push", "origin", remote)
+}
+
+func remoteRef(t *testing.T, remote, ref string) (string, bool) {
+	t.Helper()
+	cmd := exec.Command("git", "--git-dir", remote, "rev-parse", "--verify", "--quiet", ref)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
 }
 
 // runCLI invokes run() the same way main() does, in-process - no need to
@@ -111,10 +149,21 @@ func runCLI(t *testing.T, dir string, args ...string) (exitCode int, stdout, std
 	return exitCode, outBuf.String(), errBuf.String()
 }
 
-func TestCLI_Green(t *testing.T) {
+func TestCLI_GreenPublishesStatusBeforeBranch(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
-	got := stubGitHubStatusAPI(t, dir, http.StatusCreated, "")
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
+	stagingRef := inspector.StagingRefForCommit(commit)
+	branchRef := "refs/heads/" + branch
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", func(remote string) {
+		if got, exists := remoteRef(t, remote, stagingRef); !exists || got != commit {
+			t.Errorf("staging ref during status post = (%q, %t), want (%q, true)", got, exists, commit)
+		}
+		if got, exists := remoteRef(t, remote, branchRef); exists {
+			t.Errorf("pull-request branch moved before its status was recorded: %s = %s", branchRef, got)
+		}
+	})
 
 	code, stdout, _ := runCLI(t, dir)
 	if code != exitGreen {
@@ -123,36 +172,53 @@ func TestCLI_Green(t *testing.T) {
 	if !strings.Contains(stdout, "green") {
 		t.Fatalf("stdout = %q, want it to contain %q", stdout, "green")
 	}
-	if got.State != "success" {
-		t.Fatalf("posted status state = %q, want success", got.State)
+	if stub.Request.State != "success" {
+		t.Fatalf("posted status state = %q, want success", stub.Request.State)
 	}
-	if got.Ctx != "inspector" {
-		t.Fatalf("posted status context = %q, want %q", got.Ctx, "inspector")
+	if stub.Request.Ctx != "inspector" {
+		t.Fatalf("posted status context = %q, want %q", stub.Request.Ctx, "inspector")
 	}
-	if got.Auth != "Bearer test-token" {
-		t.Fatalf("posted status Authorization = %q, want %q", got.Auth, "Bearer test-token")
+	if stub.Request.Auth != "Bearer test-token" {
+		t.Fatalf("posted status Authorization = %q, want %q", stub.Request.Auth, "Bearer test-token")
+	}
+	if got, exists := remoteRef(t, stub.Remote, branchRef); !exists || got != commit {
+		t.Fatalf("published branch = (%q, %t), want (%q, true)", got, exists, commit)
+	}
+	if got, exists := remoteRef(t, stub.Remote, stagingRef); exists {
+		t.Fatalf("temporary staging ref still exists after publication: %s = %s", stagingRef, got)
 	}
 }
 
-func TestCLI_Red(t *testing.T) {
+func TestCLI_RedDoesNotPublish(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false", "image": "alpine"}`})
-	got := stubGitHubStatusAPI(t, dir, http.StatusCreated, "")
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
 	code, stdout, _ := runCLI(t, dir)
 	if code != exitRed {
 		t.Fatalf("exit code = %d, want %d", code, exitRed)
 	}
-	if !strings.Contains(stdout, "red") {
-		t.Fatalf("stdout = %q, want it to contain %q", stdout, "red")
+	if !strings.Contains(stdout, "red") || !strings.Contains(stdout, "not published by policy") {
+		t.Fatalf("stdout = %q, want an explicit unpublished red verdict", stdout)
 	}
-	if got.State != "failure" {
-		t.Fatalf("posted status state = %q, want failure", got.State)
+	if stub.Request.State != "" {
+		t.Fatalf("posted status state = %q, want no status for a red verdict", stub.Request.State)
+	}
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/"+branch); exists {
+		t.Fatalf("red verdict published branch %s", got)
+	}
+	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatalf("red verdict published staging ref %s", got)
 	}
 }
 
 func TestCLI_RefusesWithoutConfig(t *testing.T) {
 	dir := newTestRepo(t, nil)
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
 	code, _, stderr := runCLI(t, dir)
 	if code != exitRefused {
@@ -160,6 +226,15 @@ func TestCLI_RefusesWithoutConfig(t *testing.T) {
 	}
 	if !strings.Contains(stderr, ".inspector.json") {
 		t.Fatalf("stderr = %q, want it to mention .inspector.json", stderr)
+	}
+	if stub.Request.State != "" {
+		t.Fatalf("refusal posted status state %q", stub.Request.State)
+	}
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/"+branch); exists {
+		t.Fatalf("refusal published branch %s", got)
+	}
+	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatalf("refusal published staging ref %s", got)
 	}
 }
 
@@ -211,7 +286,7 @@ func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".inspector"), []byte("occupied"), 0o644); err != nil {
 		t.Fatalf("occupying .inspector: %v", err)
 	}
-	stubGitHubStatusAPI(t, dir, http.StatusCreated, "")
+	stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
 	code, stdout, stderr := runCLI(t, dir)
 	if code != exitGreen {
@@ -231,7 +306,7 @@ func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
 func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
-	stubGitHubStatusAPI(t, dir, http.StatusCreated, "")
+	stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
 	code, _, _ := runCLI(t, dir, "the", "login", "flow", "is", "done")
 	if code != exitGreen {
@@ -239,11 +314,10 @@ func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 	}
 }
 
-// A green or red check is a real local result, but SPEC.md section 7
-// makes the posted commit status - not that local result - the thing
-// the gate reads. These cover the ways posting it can fail: no token
-// at all, no GitHub remote to post to, and the API itself refusing the
-// request. Each must fail loudly and never exit as if it had succeeded.
+// A green check becomes a real verdict only after inspector publishes its
+// recorded status and branch. These cover the ways that publication can fail:
+// no token, no GitHub remote, and the API refusing the status. Each must fail
+// loudly and never exit as if it had succeeded.
 
 func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 	requireDocker(t)
@@ -258,8 +332,8 @@ func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 	if code == exitGreen {
 		t.Fatal("a missing token must never exit green")
 	}
-	if !strings.Contains(stdout, "green") {
-		t.Fatalf("stdout = %q, want the real local verdict still printed", stdout)
+	if strings.Contains(stdout, "green -") {
+		t.Fatalf("stdout = %q, must not print an unpublished green as a verdict", stdout)
 	}
 	if !strings.Contains(stderr, "GITHUB_TOKEN") {
 		t.Fatalf("stderr = %q, want it to name the missing GITHUB_TOKEN requirement", stderr)
@@ -275,27 +349,35 @@ func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d - no origin remote must never exit as a success", code, exitRefused)
 	}
-	if !strings.Contains(stderr, "could not post a commit status") {
-		t.Fatalf("stderr = %q, want it to say the status could not be posted", stderr)
+	if !strings.Contains(stderr, "could not publish a green result") {
+		t.Fatalf("stderr = %q, want it to say the green result could not be published", stderr)
 	}
 }
 
 func TestCLI_StatusAPIRefusalFailsLoudly(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
-	stubGitHubStatusAPI(t, dir, http.StatusUnauthorized, `{"message":"Bad credentials"}`)
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusUnauthorized, `{"message":"Bad credentials"}`, nil)
 
 	code, stdout, stderr := runCLI(t, dir)
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d - an API refusal must never exit as a success", code, exitRefused)
 	}
-	if !strings.Contains(stdout, "green") {
-		t.Fatalf("stdout = %q, want the real local verdict still printed", stdout)
+	if strings.Contains(stdout, "green -") {
+		t.Fatalf("stdout = %q, must not print an unpublished green as a verdict", stdout)
 	}
 	if !strings.Contains(stderr, "Bad credentials") {
 		t.Fatalf("stderr = %q, want GitHub's own rejection reason surfaced", stderr)
 	}
 	if !strings.Contains(stderr, warningBar) {
 		t.Fatalf("stderr = %q, want the loud warning bar", stderr)
+	}
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/"+branch); exists {
+		t.Fatalf("status API refusal published branch %s", got)
+	}
+	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatalf("status API refusal left staging ref %s", got)
 	}
 }

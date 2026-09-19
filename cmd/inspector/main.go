@@ -15,10 +15,11 @@ import (
 // Exit codes reserve 0, 1, and 2 for verdicts only: 0 green, 1 red, 2
 // refused (inspector tried to reach a verdict and could not - see
 // inspector.Refused for those causes, plus any infrastructure failure
-// Run reports as an error). A local green or red that could not be
-// posted as a commit status - see postCommitStatus - also exits 2: an
-// unrecorded result proves nothing to inspector-gate, so it is not a
-// verdict either. exitUsage is for everything that is not a verdict
+// Run reports as an error). A local green that inspector could not
+// publish in full - staging it remotely, recording its status, then
+// moving the branch - also exits 2: an unpublished result proves
+// nothing to inspector-gate, so it is not a verdict either. exitUsage
+// is for everything that is not a verdict
 // attempt at all - --help, an unrecognized flag, bad usage - so a
 // caller can never mistake a help request for a result. 64 follows the
 // BSD sysexits.h convention for a command-line usage error (EX_USAGE).
@@ -46,10 +47,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, `usage: inspector [flags] [claim text...]
 
 Runs the project's own check command against the repo's current HEAD
-commit and reports green or red. A green or red run also records that
-result as a GitHub commit status, so it needs GITHUB_TOKEN set to a
-token with commit-status write access, a GitHub 'origin' remote, and
-HEAD already pushed there. See README.md for setup.
+commit and reports green or red. For green, inspector itself puts that
+commit on GitHub, records its status, then updates the current branch,
+so it needs GITHUB_TOKEN set to a token with commit-status write access
+and a GitHub 'origin' remote. See README.md for setup.
 
 flags:
 `)
@@ -78,18 +79,22 @@ flags:
 
 	switch result.Outcome {
 	case inspector.Green:
-		fmt.Fprintf(stdout, "\ngreen - %s%s\n", result.Commit, reportSuffix(result.ReportPath))
-		if err := postCommitStatus(*repoPath, result, inspector.StatusSuccess); err != nil {
-			printStatusFailure(stderr, err)
+		cleanupWarning, err := publishGreen(*repoPath, result)
+		if err != nil {
+			printPublicationFailure(stderr, err)
 			return exitRefused
 		}
+		if cleanupWarning != "" {
+			fmt.Fprintf(stderr, "\n%s\n%s\n%s\n\n", warningBar, cleanupWarning, warningBar)
+		}
+		fmt.Fprintf(stdout, "\ngreen - %s%s\n", result.Commit, reportSuffix(result.ReportPath))
 		return exitGreen
 	case inspector.Red:
-		fmt.Fprintf(stdout, "\nred - %s%s\n", result.Commit, reportSuffix(result.ReportPath))
-		if err := postCommitStatus(*repoPath, result, inspector.StatusFailure); err != nil {
-			printStatusFailure(stderr, err)
-			return exitRefused
-		}
+		// v1 deliberately does not publish red work. The local report and
+		// this red exit are the record; no remote branch or status is made
+		// for a commit inspector did not approve. The Client may overrule
+		// this policy in a later version.
+		fmt.Fprintf(stdout, "\nred - %s%s (not published by policy)\n", result.Commit, reportSuffix(result.ReportPath))
 		return exitRed
 	default: // inspector.Refused
 		fmt.Fprintf(stderr, "refused: %s%s\n", result.Message, reportSuffix(result.ReportPath))
@@ -97,50 +102,73 @@ flags:
 	}
 }
 
-// postCommitStatus records result as a GitHub commit status on the exact
-// commit inspector checked - see SPEC.md section 7. A Refused outcome
-// never reaches here: its absence already reads as a failure to
-// inspector-gate (issue #4), the same as an unreachable API or a missing
-// token below, so there is nothing more honest to post for it.
-func postCommitStatus(repoPath string, result inspector.Result, state inspector.StatusState) error {
+// publishGreen performs the publication order that keeps inspector-gate from
+// observing a pull-request branch without an inspector status: stage the
+// checked commit remotely, record its green status, then move the branch.
+// The stage is a non-branch ref and is deleted once the branch moves.
+func publishGreen(repoPath string, result inspector.Result) (cleanupWarning string, err error) {
 	token := os.Getenv(inspector.GitHubTokenEnvVar)
 	if strings.TrimSpace(token) == "" {
-		return fmt.Errorf("%s is not set - inspector needs a GitHub token with commit-status write access to record its result", inspector.GitHubTokenEnvVar)
+		return "", fmt.Errorf("%s is not set - inspector needs a GitHub token with commit-status write access to publish a green result", inspector.GitHubTokenEnvVar)
 	}
 
 	repoRoot, err := inspector.ResolveRepoRoot(repoPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	owner, repo, err := inspector.RemoteOwnerRepo(repoRoot)
 	if err != nil {
-		return err
+		return "", err
+	}
+	branch, err := inspector.CurrentBranch(repoRoot)
+	if err != nil {
+		return "", err
 	}
 
-	description := fmt.Sprintf("inspector: %s", result.Outcome)
+	stagingRef := inspector.StagingRefForCommit(result.Commit)
+	if err := inspector.PushRef(repoRoot, result.Commit, stagingRef); err != nil {
+		return "", err
+	}
+	cleanupAfterFailure := func(cause error) error {
+		if cleanupErr := inspector.DeleteRemoteRef(repoRoot, stagingRef); cleanupErr != nil {
+			return fmt.Errorf("%w; %v", cause, cleanupErr)
+		}
+		return cause
+	}
+
+	description := "inspector: green"
 	if result.ReportPath != "" {
-		description = fmt.Sprintf("inspector: %s - see %s/%s locally", result.Outcome, inspector.RunsDirName, inspector.LatestReportName)
+		description = fmt.Sprintf("inspector: green - see %s/%s locally", inspector.RunsDirName, inspector.LatestReportName)
 	}
-
-	return inspector.PostCommitStatus(inspector.PostStatusOptions{
+	if err := inspector.PostCommitStatus(inspector.PostStatusOptions{
 		Owner:       owner,
 		Repo:        repo,
 		Commit:      result.Commit,
-		State:       state,
+		State:       inspector.StatusSuccess,
 		Description: description,
 		Token:       token,
 		APIBaseURL:  githubAPIBaseURL,
-	})
+	}); err != nil {
+		return "", cleanupAfterFailure(err)
+	}
+
+	branchRef := "refs/heads/" + branch
+	if err := inspector.PushRef(repoRoot, result.Commit, branchRef); err != nil {
+		return "", cleanupAfterFailure(err)
+	}
+	if err := inspector.DeleteRemoteRef(repoRoot, stagingRef); err != nil {
+		return fmt.Sprintf("inspector published the green branch, but could not remove its temporary staging ref: %v", err), nil
+	}
+	return "", nil
 }
 
-// printStatusFailure makes a failed post impossible to miss: the check
-// result printed above it is real, but SPEC.md section 7 treats an
-// unrecorded result the same as a failing one, so this must never look
-// like the quiet warning a report-save failure gets.
-func printStatusFailure(stderr io.Writer, err error) {
-	fmt.Fprintf(stderr, "\n%s\ninspector: could not post a commit status: %v\n"+
-		"the check result above is real, but without a posted status the gate has nothing to key on -\n"+
-		"no result reads the same as a failing one.\n%s\n\n",
+// printPublicationFailure makes an incomplete green publication impossible to
+// mistake for a verdict. A green check only becomes green to a GitHub reader
+// once all three publication steps have completed.
+func printPublicationFailure(stderr io.Writer, err error) {
+	fmt.Fprintf(stderr, "\n%s\ninspector: could not publish a green result: %v\n"+
+		"the local check passed, but inspector did not publish a green branch with its recorded status.\n"+
+		"this is a refusal, not a red verdict.\n%s\n\n",
 		warningBar, err, warningBar)
 }
 

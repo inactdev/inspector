@@ -49,10 +49,11 @@ var statusHTTPClient = &http.Client{
 	},
 }
 
-// StatusState is the state GitHub records for a commit status. Only
-// success and failure are used - a Refused outcome posts no status at
-// all, so its absence reads as a failure the same way an unreachable
-// API or a missing token does (SPEC.md section 7).
+// StatusState is the state GitHub records for a commit status. v1
+// publishes only success: a red result and a Refused outcome publish
+// neither a branch nor a status, so their absence fails inspector-gate.
+// StatusFailure remains available for a future Client-approved red
+// publication policy.
 type StatusState string
 
 const (
@@ -137,7 +138,7 @@ func PostCommitStatus(opts PostStatusOptions) error {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		detail := strings.TrimSpace(string(respBody))
 		if commitUnknownToGitHub(resp.StatusCode, detail) {
-			return fmt.Errorf("GitHub has no commit %s in %s/%s (%s): push this commit to 'origin' before inspecting it - a commit status can only attach to a commit GitHub already has: %s",
+			return fmt.Errorf("GitHub has no commit %s in %s/%s (%s): inspector must first make a green commit available through its temporary staging ref before recording the status - a commit status can only attach to a commit GitHub already has: %s",
 				opts.Commit, opts.Owner, opts.Repo, resp.Status, detail)
 		}
 		if loc := resp.Header.Get("Location"); loc != "" {
@@ -150,12 +151,11 @@ func PostCommitStatus(opts PostStatusOptions) error {
 
 // commitUnknownToGitHub reports whether a rejection means GitHub has
 // never seen this commit, which it answers with "No commit found for
-// SHA: ..." (422 for a well-formed SHA it does not have). By far the
-// most common cause is a commit that only exists locally: inspector
-// inspects HEAD, and HEAD reaches GitHub only when it is pushed. That
-// body is accurate but names no cause, so the error is rewritten to name
-// the missing push - the same rule as every other failure here, that a
-// caller must be told the concrete thing to fix.
+// SHA: ..." (422 for a well-formed SHA it does not have). Inspector
+// normally stages a green commit before posting, so this response means
+// that staging did not make the checked commit available. The body is
+// accurate but names no cause, so the error explains inspector's own
+// required order rather than telling a builder to push the commit.
 func commitUnknownToGitHub(statusCode int, body string) bool {
 	if statusCode != http.StatusUnprocessableEntity && statusCode != http.StatusNotFound {
 		return false

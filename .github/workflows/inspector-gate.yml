@@ -24,22 +24,13 @@
 # status checks to pass before merging" -> add "gate". That is a manual
 # repository setting this workflow cannot turn on for itself; see the
 # "inspector-gate" section of README.md for the same note in context.
-# Honest limit, recorded rather than papered over: a commit status can
-# only be posted to a commit that is already on the remote, so inspector's
-# green status lands seconds AFTER the push whose `synchronize` run has
-# already, correctly, reported "no status posted at all". Nothing re-runs
-# this check when the status finally arrives, so that first honest red
-# stands until a human re-runs the workflow by hand.
-#
-# An `on: status` trigger was built to close that gap and has been removed
-# again: GitHub associates a status-triggered run with the DEFAULT
-# branch's last commit, not with the commit the status was posted to, so
-# it never flipped the pull request's own check - and since a status event
-# cannot be filtered by context, every unrelated third party's status
-# re-ran the whole gate and landed its failures on the default branch's
-# tip. The real fix is inspector#18 (inspector itself owns the push, so a
-# green status exists before a pull request is ever opened), not a retry
-# or re-trigger mechanism bolted onto this gate.
+# inspector stages a green commit remotely, records its status, and only
+# then updates the pull request branch. The `synchronize` run therefore
+# sees a status on its first look. An `on: status` trigger is neither
+# necessary nor correct: GitHub associates a status-triggered run with the
+# default branch's last commit, not the pull request head, and a status
+# event cannot be filtered by context. inspector#18 fixes the ordering at
+# the publisher instead of retrying this gate.
 name: inspector-gate
 
 on:
@@ -57,6 +48,9 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  # The gate reads the status inspector recorded before the branch moved. It
+  # never creates a status or re-triggers itself, so statuses: write is not
+  # needed.
   statuses: read
 
 jobs:

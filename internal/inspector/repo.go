@@ -28,6 +28,47 @@ func HeadCommit(repoRoot string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// CurrentBranch returns the local branch currently checked out at HEAD.
+// Inspector needs this exact name only after it has recorded a green result:
+// that is the branch a pull request can point at, so a detached HEAD has no
+// safe publication target.
+func CurrentBranch(repoRoot string) (string, error) {
+	out, err := runGit(repoRoot, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolving the branch checked out at HEAD (inspector cannot publish from a detached HEAD): %w", err)
+	}
+	branch := strings.TrimSpace(out)
+	if branch == "" {
+		return "", fmt.Errorf("resolving the branch checked out at HEAD: no branch name returned")
+	}
+	return branch, nil
+}
+
+// StagingRefForCommit names the non-branch ref that temporarily makes commit
+// available to GitHub for its status post. It deliberately cannot be the
+// pull-request branch: the status must exist before that branch moves.
+func StagingRefForCommit(commit string) string {
+	return "refs/inspector/staging/" + commit
+}
+
+// PushRef sends source to origin under destination. Callers use an explicit
+// source commit and destination ref rather than a tracking ref, so a checked
+// commit is the only object a publication step can move.
+func PushRef(repoRoot, source, destination string) error {
+	if _, err := runGit(repoRoot, "push", "--porcelain", "origin", source+":"+destination); err != nil {
+		return fmt.Errorf("pushing %s to %s: %w", source, destination, err)
+	}
+	return nil
+}
+
+// DeleteRemoteRef removes ref from origin after its staging purpose ends.
+func DeleteRemoteRef(repoRoot, ref string) error {
+	if _, err := runGit(repoRoot, "push", "--porcelain", "origin", ":"+ref); err != nil {
+		return fmt.Errorf("deleting temporary staging ref %s: %w", ref, err)
+	}
+	return nil
+}
+
 // githubRemoteRE matches the URL shapes `git remote get-url` returns for
 // a github.com remote: HTTPS (with or without a credential prefix or a
 // trailing .git), the git@ scp-like form, and the ssh:// form.

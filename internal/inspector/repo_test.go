@@ -39,6 +39,28 @@ func TestHeadCommit(t *testing.T) {
 	}
 }
 
+func TestCurrentBranch(t *testing.T) {
+	dir := newTestRepo(t, nil)
+
+	got, err := CurrentBranch(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
+	if got != want {
+		t.Fatalf("CurrentBranch = %q, want %q", got, want)
+	}
+}
+
+func TestCurrentBranch_RefusesDetachedHead(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	runGitT(t, dir, "checkout", "--detach", "-q")
+
+	if _, err := CurrentBranch(dir); err == nil {
+		t.Fatal("expected a detached HEAD to have no publication branch")
+	}
+}
+
 func TestWorkingTreeStatus_Clean(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{"a.txt": "hello"})
 

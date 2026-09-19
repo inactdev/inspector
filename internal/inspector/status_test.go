@@ -175,11 +175,10 @@ func TestPostCommitStatus_Non201SuccessIsNotSuccess(t *testing.T) {
 	}
 }
 
-// A commit that was never pushed does not exist on GitHub, so there is
-// nothing for a status to attach to. GitHub answers 422 "No commit found
-// for SHA", which says what happened but not what to do about it - the
-// error must name the missing push.
-func TestPostCommitStatus_UnpushedCommitNamesTheMissingPush(t *testing.T) {
+// A commit GitHub has never seen cannot carry a status. Inspector owns that
+// transfer: it stages green work before posting rather than asking a builder
+// to push it, so the error must name the failed staging order.
+func TestPostCommitStatus_UnavailableCommitNamesStaging(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		w.Write([]byte(`{"message":"No commit found for SHA: deadbeef"}`))
@@ -197,8 +196,8 @@ func TestPostCommitStatus_UnpushedCommitNamesTheMissingPush(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a commit GitHub does not have")
 	}
-	if !strings.Contains(err.Error(), "push this commit") {
-		t.Fatalf("error = %q, want it to name the missing push", err.Error())
+	if !strings.Contains(err.Error(), "temporary staging ref") {
+		t.Fatalf("error = %q, want it to name inspector's staging step", err.Error())
 	}
 	if !strings.Contains(err.Error(), "deadbeef") {
 		t.Fatalf("error = %q, want it to name the commit", err.Error())
@@ -226,8 +225,8 @@ func TestPostCommitStatus_NotFoundIsNotReportedAsUnpushed(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a 404 response")
 	}
-	if strings.Contains(err.Error(), "push this commit") {
-		t.Fatalf("error = %q, should not blame an unpushed commit for a 404", err.Error())
+	if strings.Contains(err.Error(), "temporary staging ref") {
+		t.Fatalf("error = %q, should not blame a staging failure for a 404", err.Error())
 	}
 }
 
