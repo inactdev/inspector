@@ -50,6 +50,7 @@ type Options struct {
 type Result struct {
 	Outcome Outcome
 	Commit  string
+	Branch  string
 	Message string // human-readable explanation; always set for Refused
 	// ReportPath is set whenever the check actually ran and its report
 	// saved successfully - for Green, Red, and a signal-killed Refused,
@@ -58,10 +59,9 @@ type Result struct {
 	ReportPath string
 	// Warning is set when the check reached a real verdict (Green or
 	// Red) but something worth loudly flagging happened alongside it -
-	// currently, only that the local report could not be saved. The
-	// commit status, not this local report, is the authority (SPEC.md),
-	// so a save failure must never downgrade or discard the verdict
-	// itself.
+	// currently, only that the local report could not be saved. Green
+	// publication and the exit code, not this local report, carry the
+	// verdict, so a save failure must never downgrade or discard it.
 	Warning string
 }
 
@@ -91,12 +91,29 @@ func Run(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	branch, err := CurrentBranch(repoRoot)
+	if err != nil {
+		return Result{Outcome: Refused, Commit: commit, Message: err.Error()}, nil
+	}
+	confirmedCommit, err := HeadCommit(repoRoot)
+	if err != nil {
+		return Result{}, err
+	}
+	if confirmedCommit != commit {
+		return Result{
+			Outcome: Refused,
+			Commit:  confirmedCommit,
+			Branch:  branch,
+			Message: fmt.Sprintf("HEAD changed while inspector was capturing the handed-off branch: started at %s, then moved to %s", commit, confirmedCommit),
+		}, nil
+	}
 
 	cfg, err := LoadConfig(repoRoot)
 	if errors.Is(err, ErrNoCheckCommand) {
 		return Result{
 			Outcome: Refused,
 			Commit:  commit,
+			Branch:  branch,
 			Message: fmt.Sprintf(
 				"no check command configured for this repo.\n\n"+
 					"inspector refuses to run rather than silently doing nothing - a repo that runs\n"+
@@ -112,6 +129,7 @@ func Run(opts Options) (Result, error) {
 		return Result{
 			Outcome: Refused,
 			Commit:  commit,
+			Branch:  branch,
 			Message: fmt.Sprintf(
 				"no container image configured for this repo.\n\n"+
 					"the check command runs inside a container, not on this machine - inspector\n"+
@@ -123,13 +141,14 @@ func Run(opts Options) (Result, error) {
 		}, nil
 	}
 	if err != nil {
-		return Result{Outcome: Refused, Commit: commit, Message: err.Error()}, nil
+		return Result{Outcome: Refused, Commit: commit, Branch: branch, Message: err.Error()}, nil
 	}
 
 	if err := container.EnsureAvailable(); err != nil {
 		return Result{
 			Outcome: Refused,
 			Commit:  commit,
+			Branch:  branch,
 			Message: fmt.Sprintf(
 				"no usable container runtime: %v\n\n"+
 					"inspector runs every check command inside a container instead of on this\n"+
@@ -170,7 +189,7 @@ func Run(opts Options) (Result, error) {
 		Output:       checkResult.Output,
 	}
 
-	result := Result{Outcome: outcome, Commit: commit}
+	result := Result{Outcome: outcome, Commit: commit, Branch: branch}
 	reportPath, writeErr := WriteReport(repoRoot, report)
 
 	switch {
@@ -207,10 +226,9 @@ func Run(opts Options) (Result, error) {
 	case writeErr != nil:
 		// outcome is Green or Red here - a real verdict already reached.
 		// Discarding it because its notes failed to save would lose the
-		// answer over losing the footnote; the commit status, not this
-		// file, is authoritative (SPEC.md), so the verdict stands
-		// regardless and the failure is surfaced as a loud warning
-		// instead.
+		// answer over losing the footnote; this file is never authority,
+		// so the verdict stands regardless and the failure is surfaced as
+		// a loud warning instead.
 		result.Warning = fmt.Sprintf(
 			"the %s verdict above is real, but its local report could not be saved: %v\n"+
 				"the report is notes only, never authority - the verdict stands regardless.",

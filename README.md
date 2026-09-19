@@ -126,9 +126,12 @@ publication steps, in this exact order:
 4. It updates the current branch on `origin`, where a pull request can point at C.
 
 The staging ref exists only so GitHub has C when it receives the status. It is
-removed after the branch moves. The pull request branch never points at C until
-its status already exists, so inspector-gate's first run sees the result instead
-of a stale missing-status failure.
+removed after the branch moves. Inspector captures the current branch together
+with C before checking, then confirms both are still checked out before the
+staging push, so a branch switch during the check cannot redirect publication.
+The pull request branch never points at C until its status already exists, so
+inspector-gate's first run sees the result instead of a stale missing-status
+failure.
 
 **v1 red policy, which the Client may overrule:** a red result stays local.
 inspector writes its report and returns `1`, but neither pushes a branch nor
@@ -155,8 +158,10 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
   inspector's own deadline - it never judged the code, so its exit status is
   not a verdict either way), an infrastructure failure, or a local green that
   inspector could not publish completely (see "Recording the result" below) -
-  an unrecorded result proves nothing to the gate, so it isn't a verdict
-  either. Never treat `2` as red.
+  an incomplete result proves nothing to the gate, so it isn't a verdict
+  either. An ordinary refusal makes no remote change; an incomplete green
+  publication may leave the staging ref or status described below. Never treat
+  `2` as red.
 
   A signal kill is detected two ways, because a compound check command like
   `npm test && npm run lint` doesn't show it the same way a plain one does:
@@ -211,12 +216,23 @@ pointing at `.inspector/latest.json`; the report holds the detail, the status
 just says whether to trust it.
 
 This needs a token: set `GITHUB_TOKEN` to one with commit-status write access
-on the repo, and the repo's `origin` remote must point at GitHub. Posting is
-not optional - a missing token, an unresolvable remote, a failed staging push,
-or GitHub refusing the request all fail loudly and exit `2`, the same as a
-refusal, even when the local check passed. A real local green that inspector
-could not publish in full is worth nothing to a reader who can only see
-GitHub, so it must never look like success.
+on the repo, and `origin`'s push URL must point at the same GitHub repository
+that receives the status. Pushes are non-interactive and time out rather than
+waiting forever for credentials or a stalled transport. Posting is not
+optional - a missing token, an unresolvable remote, a failed staging push, or
+GitHub refusing the request all fail loudly and exit `2`, even when the local
+check passed. A real local green that inspector could not publish in full is
+worth nothing to a reader who can only see GitHub, so it must never look like
+success.
+
+Once the staging push succeeds, inspector does not try to erase partial remote
+state. If the status post fails, the staging ref remains but has no status and
+the pull request branch does not move. If the final branch push fails, the
+staging ref and green status remain but the pull request branch still does not
+move. Both are reported as incomplete publication, distinct from an ordinary
+refusal, and exit `2`. This is the captain's deliberate policy and may be
+overruled: compensation cannot make a partially published sequence atomic, so
+the safe boundary is that no incomplete sequence moves the pull request branch.
 
 What a reader should conclude:
 
@@ -224,8 +240,8 @@ What a reader should conclude:
 - **Red status** - a manually recorded failure. v1 inspector does not publish
   red work or post this status itself.
 - **No status at all** - this commit has not been approved, or inspector
-  reached a verdict locally but could not publish a green result completely.
-  Read the same as red. A status from an earlier commit does not carry forward.
+  reached a verdict locally but could not record its green status. Read the
+  same as red. A status from an earlier commit does not carry forward.
 
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.

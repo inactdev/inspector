@@ -229,9 +229,9 @@ no-mistakes blocks mid-run, so getting one pull request finished cost the Client
 roughly fifteen separate interruptions across a single afternoon. One red
 carrying every finding costs him one.
 
-The honest trade: when inspector finishes, the pull request is **not** ready -
-it is red with a list. That is the price of not being interrupted, and it is
-worth paying.
+The honest trade: when inspector finishes red, there is no published pull
+request branch for that work. The local report carries the list instead. That
+is the price of not being interrupted, and it is worth paying.
 
 ### How many times the Client may say fix
 
@@ -278,7 +278,8 @@ So verification has two layers, and only one of them counts as independent:
 
 The verdict is per-outcome - confirmed, not confirmed, or could not be tested -
 so a red says which claimed capability is missing, not just "something failed".
-The commit status stays red unless every testable outcome is confirmed.
+Unless every testable outcome is confirmed, the result stays local and no green
+commit status is published.
 
 **This list is the statement of intent, not a second thing beside it.**
 no-mistakes takes an intent - a sentence saying what the work set out to achieve
@@ -300,10 +301,18 @@ inspector records its result as a **commit status** - a small record attached to
 one exact commit, posted through the API with a token. Not a comment, not a
 checklist. Text can be typed by anyone; a status cannot.
 
-For a green result, inspector first stages the commit on the remote, then posts
-its status, and only then moves the pull request branch. The gate's first run
-therefore sees the result already attached to its exact head commit. A builder
-does not publish the branch itself.
+For a green result, inspector first stages the commit on a non-branch remote
+ref, then posts its status, and only then moves the pull request branch. The
+gate's first run therefore sees the result already attached to its exact head
+commit. A builder does not publish the branch itself.
+
+A failed status post leaves the staging ref in place, without a status or pull
+request branch move. A failed branch move after a successful status leaves the
+staging ref and status in place, but still does not move the pull request
+branch. These incomplete green publications exit `2` and report their exact
+remote state; inspector does not compensate or pretend they are ordinary
+refusals. Before publication starts, an ordinary refusal still makes no remote
+change.
 
 - merging stays blocked until inspector has blessed the exact head commit
 - a later branch update without inspector's sequence goes red on its own,
@@ -427,5 +436,6 @@ Fabrica is in the loop that travels with the delivery, but at the day job there
 is no delivery to carry it, and a bare red mark would mean "something failed,
 re-run it and watch".
 
-The report is notes, never authority. The status on the commit remains the only
-thing the gate reads and the only thing that decides a merge.
+The report is notes, never authority. A green status on the commit, or its
+absence, remains the only result the gate reads and the only thing here that
+decides whether it permits a merge.

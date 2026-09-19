@@ -1,9 +1,11 @@
 package inspector
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveRepoRoot(t *testing.T) {
@@ -58,6 +60,20 @@ func TestCurrentBranch_RefusesDetachedHead(t *testing.T) {
 
 	if _, err := CurrentBranch(dir); err == nil {
 		t.Fatal("expected a detached HEAD to have no publication branch")
+	}
+}
+
+func TestValidatePublicationHead(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
+
+	if err := ValidatePublicationHead(dir, branch, commit); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	runGitT(t, dir, "checkout", "-q", "-b", "other")
+	if err := ValidatePublicationHead(dir, branch, commit); err == nil {
+		t.Fatal("expected changed branch to be rejected")
 	}
 }
 
@@ -141,6 +157,31 @@ func TestRemoteOwnerRepo(t *testing.T) {
 	}
 }
 
+func TestRemoteOwnerRepo_UsesPushTarget(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	runGitT(t, dir, "remote", "add", "origin", "https://github.com/fetch-owner/fetch-repo.git")
+	runGitT(t, dir, "remote", "set-url", "--push", "origin", "https://github.com/push-owner/push-repo.git")
+
+	owner, repo, err := RemoteOwnerRepo(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if owner != "push-owner" || repo != "push-repo" {
+		t.Fatalf("RemoteOwnerRepo = (%q, %q), want push target (%q, %q)", owner, repo, "push-owner", "push-repo")
+	}
+}
+
+func TestRemoteOwnerRepo_RejectsMultiplePushTargets(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	runGitT(t, dir, "remote", "add", "origin", "https://github.com/owner/repo.git")
+	runGitT(t, dir, "remote", "set-url", "--add", "--push", "origin", "https://github.com/owner/first.git")
+	runGitT(t, dir, "remote", "set-url", "--add", "--push", "origin", "https://github.com/owner/second.git")
+
+	if _, _, err := RemoteOwnerRepo(dir); err == nil {
+		t.Fatal("expected multiple push targets to be rejected")
+	}
+}
+
 func TestRemoteOwnerRepo_NoOrigin(t *testing.T) {
 	dir := newTestRepo(t, nil)
 
@@ -174,6 +215,62 @@ func TestRemoteOwnerRepo_NotGitHubRedactsCredentials(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "gitlab.com") {
 		t.Fatalf("error = %q, want it to still name the remote host", err.Error())
+	}
+}
+
+func TestPushRefUsesNonInteractiveAuthentication(t *testing.T) {
+	binDir := t.TempDir()
+	fakeGit := filepath.Join(binDir, "git")
+	script := `#!/bin/sh
+[ "$GIT_ASKPASS" = "true" ] || exit 11
+[ "$GIT_TERMINAL_PROMPT" = "0" ] || exit 12
+[ "$GCM_INTERACTIVE" = "Never" ] || exit 13
+case "$GIT_SSH_COMMAND" in *BatchMode=yes*) exit 0 ;; *) exit 14 ;; esac
+`
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake git: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := PushRefToRemote(t.TempDir(), "origin", "abc", "refs/heads/test"); err != nil {
+		t.Fatalf("unexpected push error: %v", err)
+	}
+}
+
+func TestPushRefTimesOut(t *testing.T) {
+	binDir := t.TempDir()
+	fakeGit := filepath.Join(binDir, "git")
+	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatalf("writing fake git: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	previousTimeout := gitPushTimeout
+	gitPushTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { gitPushTimeout = previousTimeout })
+
+	err := PushRefToRemote(t.TempDir(), "origin", "abc", "refs/heads/test")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error = %v, want push timeout", err)
+	}
+}
+
+func TestPushRefRedactsCredentialsFromGitError(t *testing.T) {
+	binDir := t.TempDir()
+	fakeGit := filepath.Join(binDir, "git")
+	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\necho 'fatal: https://user:supersecret@example.com/o/r.git rejected' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("writing fake git: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := PushRefToRemote(t.TempDir(), "origin", "abc", "refs/heads/test")
+	if err == nil {
+		t.Fatal("expected push failure")
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Fatalf("error = %q, want the embedded credential redacted", err.Error())
+	}
+	if !strings.Contains(err.Error(), "example.com") {
+		t.Fatalf("error = %q, want the remote host preserved", err.Error())
 	}
 }
 

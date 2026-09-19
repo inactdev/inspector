@@ -17,7 +17,7 @@ import (
 // inspector.Refused for those causes, plus any infrastructure failure
 // Run reports as an error). A local green that inspector could not
 // publish in full - staging it remotely, recording its status, then
-// moving the branch - also exits 2: an unpublished result proves
+// moving the branch - also exits 2: an incomplete publication proves
 // nothing to inspector-gate, so it is not a verdict either. exitUsage
 // is for everything that is not a verdict
 // attempt at all - --help, an unrecognized flag, bad usage - so a
@@ -38,6 +38,7 @@ func main() {
 // uses the real API; tests point this at an httptest server instead of
 // the network.
 var githubAPIBaseURL string
+var resolvePublicationTarget = inspector.ResolvePublicationTarget
 
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("inspector", flag.ContinueOnError)
@@ -116,24 +117,17 @@ func publishGreen(repoPath string, result inspector.Result) (cleanupWarning stri
 	if err != nil {
 		return "", err
 	}
-	owner, repo, err := inspector.RemoteOwnerRepo(repoRoot)
+	target, err := resolvePublicationTarget(repoRoot)
 	if err != nil {
 		return "", err
 	}
-	branch, err := inspector.CurrentBranch(repoRoot)
-	if err != nil {
+	if err := inspector.ValidatePublicationHead(repoRoot, result.Branch, result.Commit); err != nil {
 		return "", err
 	}
 
 	stagingRef := inspector.StagingRefForCommit(result.Commit)
-	if err := inspector.PushRef(repoRoot, result.Commit, stagingRef); err != nil {
+	if err := inspector.PushRefToRemote(repoRoot, target.PushURL, result.Commit, stagingRef); err != nil {
 		return "", err
-	}
-	cleanupAfterFailure := func(cause error) error {
-		if cleanupErr := inspector.DeleteRemoteRef(repoRoot, stagingRef); cleanupErr != nil {
-			return fmt.Errorf("%w; %v", cause, cleanupErr)
-		}
-		return cause
 	}
 
 	description := "inspector: green"
@@ -141,22 +135,22 @@ func publishGreen(repoPath string, result inspector.Result) (cleanupWarning stri
 		description = fmt.Sprintf("inspector: green - see %s/%s locally", inspector.RunsDirName, inspector.LatestReportName)
 	}
 	if err := inspector.PostCommitStatus(inspector.PostStatusOptions{
-		Owner:       owner,
-		Repo:        repo,
+		Owner:       target.Owner,
+		Repo:        target.Repo,
 		Commit:      result.Commit,
 		State:       inspector.StatusSuccess,
 		Description: description,
 		Token:       token,
 		APIBaseURL:  githubAPIBaseURL,
 	}); err != nil {
-		return "", cleanupAfterFailure(err)
+		return "", fmt.Errorf("recording the green status failed; temporary staging ref %s remains and the branch was not moved: %w", stagingRef, err)
 	}
 
-	branchRef := "refs/heads/" + branch
-	if err := inspector.PushRef(repoRoot, result.Commit, branchRef); err != nil {
-		return "", cleanupAfterFailure(err)
+	branchRef := "refs/heads/" + result.Branch
+	if err := inspector.PushRefToRemote(repoRoot, target.PushURL, result.Commit, branchRef); err != nil {
+		return "", fmt.Errorf("moving the branch failed after the green status was recorded; temporary staging ref %s remains: %w", stagingRef, err)
 	}
-	if err := inspector.DeleteRemoteRef(repoRoot, stagingRef); err != nil {
+	if err := inspector.DeleteRefFromRemote(repoRoot, target.PushURL, stagingRef); err != nil {
 		return fmt.Sprintf("inspector published the green branch, but could not remove its temporary staging ref: %v", err), nil
 	}
 	return "", nil
@@ -166,9 +160,9 @@ func publishGreen(repoPath string, result inspector.Result) (cleanupWarning stri
 // mistake for a verdict. A green check only becomes green to a GitHub reader
 // once all three publication steps have completed.
 func printPublicationFailure(stderr io.Writer, err error) {
-	fmt.Fprintf(stderr, "\n%s\ninspector: could not publish a green result: %v\n"+
-		"the local check passed, but inspector did not publish a green branch with its recorded status.\n"+
-		"this is a refusal, not a red verdict.\n%s\n\n",
+	fmt.Fprintf(stderr, "\n%s\ninspector: could not complete green publication: %v\n"+
+		"the local check passed, but the pull-request branch was not confirmed published after the required staging and status steps.\n"+
+		"this is an incomplete publication, not a red verdict or an ordinary refusal.\n%s\n\n",
 		warningBar, err, warningBar)
 }
 
