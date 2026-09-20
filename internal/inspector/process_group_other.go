@@ -2,13 +2,18 @@
 
 package inspector
 
-import "os/exec"
+import (
+	"fmt"
+	"os/exec"
+	"runtime"
+)
+
+func validatePublicationPlatform() error {
+	return fmt.Errorf("green publication is unavailable on %s because inspector cannot guarantee termination of git's complete process tree", runtime.GOOS)
+}
 
 func configureProcessGroup(*exec.Cmd) {}
 
-func killProcessGroup(cmd *exec.Cmd) error {
-	if cmd.Process == nil {
-		return nil
-	}
-	return cmd.Process.Kill()
+func killProcessGroup(*exec.Cmd) error {
+	return validatePublicationPlatform()
 }

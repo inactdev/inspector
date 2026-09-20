@@ -8,6 +8,10 @@ import (
 	"syscall"
 )
 
+func validatePublicationPlatform() error {
+	return nil
+}
+
 func configureProcessGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }

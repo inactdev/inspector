@@ -66,6 +66,12 @@ func ValidatePublicationCommit(repoRoot, expectedCommit string) error {
 
 var gitPushTimeout = 30 * time.Second
 
+// ValidatePublicationPlatform refuses platforms where a timed-out push cannot
+// reliably terminate git's complete process tree.
+func ValidatePublicationPlatform() error {
+	return validatePublicationPlatform()
+}
+
 // PushRefToRemote sends source to the resolved publication remote. Callers use
 // an explicit source commit and destination ref rather than a tracking ref, so
 // a checked commit is the only object a publication step can move.
@@ -162,6 +168,10 @@ func runGit(dir string, args ...string) (string, error) {
 }
 
 func runGitPush(dir string, args ...string) (string, error) {
+	if err := ValidatePublicationPlatform(); err != nil {
+		return "", err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), gitPushTimeout)
 	defer cancel()
 

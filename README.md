@@ -164,8 +164,9 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
 - `1` red
 - `2` refused - inspector tried to reach a verdict and couldn't: no check
   command or image configured, no usable container runtime, a dirty working
-  tree, a check command that ran past its timeout or was killed by a signal
-  before it could finish on its own (the OOM killer, an external kill,
+  tree, a platform where publication cannot safely terminate a timed-out git
+  process tree, a check command that ran past its timeout or was killed by a
+  signal before it could finish on its own (the OOM killer, an external kill,
   inspector's own deadline - it never judged the code, so its exit status is
   not a verdict either way), an infrastructure failure, or a local green that
   inspector could not publish completely (see "Recording the result" below) -
@@ -231,8 +232,10 @@ This needs a token: set `GITHUB_TOKEN` to one with commit-status write access
 on the repo, and `origin`'s push URL must point at the same GitHub repository
 that receives the status. Pushes are non-interactive and time out rather than
 waiting forever for credentials or a stalled transport; a timeout kills git and
-its helper processes together. Posting is not
-optional - a missing token, an unresolvable remote, a failed staging push, or
+its helper processes together. On platforms where Inspector cannot guarantee
+that complete process-tree termination, it refuses before running checks or
+starting any publication step. Posting is not optional - a missing token, an
+unresolvable remote, a failed staging push, or
 GitHub refusing the request all fail loudly and exit `2`, even when the local
 check passed. A real local green that inspector could not publish in full is
 worth nothing to a reader who can only see GitHub, so it must never look like

@@ -310,7 +310,10 @@ when named. This is a captain decision that may be overruled: ambient authority
 conflicts with the explicit handoff architecture, and a freshly pulled checkout
 normally points at the default branch. The gate's first run therefore sees the
 result already attached to its exact head commit without risking a direct
-default-branch update. A builder does not publish the branch itself.
+default-branch update. A builder does not publish the branch itself. Inspector
+refuses before inspection on platforms where it cannot guarantee terminating a
+timed-out push's complete process tree, so no remote helper can mutate a ref
+after that refusal.
 
 Network failures can lose a successful response, so inspector cannot always
 know whether a failed staging push created its ref, a failed status request was
@@ -434,13 +437,13 @@ green; that is issue #9, deliberately deferred.
 **A repo with no check command: refuse.** Running unprotected looks identical to
 running protected until it matters, so the gap must be loud rather than silent.
 
-**inspector keeps a small local report per run.** The commit status is tiny - it
-carries pass or fail and little else, which is enough to gate a merge and not
-enough to act on a failure. The report holds the useful part: which claimed
-outcome did not hold, what the fixer tried, what the failing output said. When
-Fabrica is in the loop that travels with the delivery, but at the day job there
-is no delivery to carry it, and a bare red mark would mean "something failed,
-re-run it and watch".
+**inspector keeps a small local report per run.** The green commit status is
+tiny - it carries approval and little else, which is enough to gate a merge.
+A red result stays local, where the report holds the useful part: which claimed
+outcome did not hold, what the fixer tried, and what the failing output said.
+When Fabrica is in the loop, that report travels with the delivery. At the day
+job there is no delivery to carry it, and a bare red mark would mean "something
+failed, re-run it and watch".
 
 The report is notes, never authority. A green status on the commit, or its
 absence, remains the only result the gate reads and the only thing here that

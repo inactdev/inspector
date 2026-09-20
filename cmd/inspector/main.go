@@ -70,6 +70,10 @@ flags:
 		fmt.Fprintf(stderr, "refused: invalid publication branch: %v\n", err)
 		return exitRefused
 	}
+	if err := inspector.ValidatePublicationPlatform(); err != nil {
+		fmt.Fprintf(stderr, "refused: %v\n", err)
+		return exitRefused
+	}
 
 	opts := inspector.Options{
 		RepoPath: *repoPath,
