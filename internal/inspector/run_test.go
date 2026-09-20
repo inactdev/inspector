@@ -36,10 +36,6 @@ func TestRun_Green(t *testing.T) {
 	if result.Commit == "" {
 		t.Fatal("expected a commit for a green run")
 	}
-	wantBranch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
-	if result.Branch != wantBranch {
-		t.Fatalf("Branch = %q, want handed-off branch %q", result.Branch, wantBranch)
-	}
 }
 
 func TestRun_Red(t *testing.T) {

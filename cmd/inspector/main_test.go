@@ -87,6 +87,11 @@ func stubGitHubStatusAPI(t *testing.T, dir string, statusCode int, responseBody 
 	configureTestOrigin(t, dir, stub.Remote)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"default_branch":"main"}`))
+			return
+		}
 		stub.Request.Path = r.URL.Path
 		stub.Request.Auth = r.Header.Get("Authorization")
 		body, _ := io.ReadAll(r.Body)
@@ -96,7 +101,7 @@ func stubGitHubStatusAPI(t *testing.T, dir string, statusCode int, responseBody 
 		}
 		w.WriteHeader(statusCode)
 		if responseBody != "" {
-			w.Write([]byte(responseBody))
+			_, _ = w.Write([]byte(responseBody))
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -156,10 +161,11 @@ func runCLI(t *testing.T, dir string, args ...string) (exitCode int, stdout, std
 func TestCLI_GreenPublishesStatusBeforeBranch(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	runGitT(t, dir, "checkout", "-q", "-b", "local-checkout")
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
-	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
+	publicationBranch := "feature"
 	stagingRef := inspector.StagingRefForCommit(commit)
-	branchRef := "refs/heads/" + branch
+	branchRef := "refs/heads/" + publicationBranch
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", func(remote string) {
 		if got, exists := remoteRef(t, remote, stagingRef); !exists || got != commit {
 			t.Errorf("staging ref during status post = (%q, %t), want (%q, true)", got, exists, commit)
@@ -169,7 +175,7 @@ func TestCLI_GreenPublishesStatusBeforeBranch(t *testing.T) {
 		}
 	})
 
-	code, stdout, _ := runCLI(t, dir)
+	code, stdout, _ := runCLI(t, dir, "--branch", publicationBranch)
 	if code != exitGreen {
 		t.Fatalf("exit code = %d, want %d", code, exitGreen)
 	}
@@ -197,10 +203,9 @@ func TestCLI_RedDoesNotPublish(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false", "image": "alpine"}`})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
-	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
-	code, stdout, _ := runCLI(t, dir)
+	code, stdout, _ := runCLI(t, dir, "--branch", "feature")
 	if code != exitRed {
 		t.Fatalf("exit code = %d, want %d", code, exitRed)
 	}
@@ -210,7 +215,7 @@ func TestCLI_RedDoesNotPublish(t *testing.T) {
 	if stub.Request.State != "" {
 		t.Fatalf("posted status state = %q, want no status for a red verdict", stub.Request.State)
 	}
-	if got, exists := remoteRef(t, stub.Remote, "refs/heads/"+branch); exists {
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
 		t.Fatalf("red verdict published branch %s", got)
 	}
 	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
@@ -221,10 +226,9 @@ func TestCLI_RedDoesNotPublish(t *testing.T) {
 func TestCLI_RefusesWithoutConfig(t *testing.T) {
 	dir := newTestRepo(t, nil)
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
-	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
-	code, _, stderr := runCLI(t, dir)
+	code, _, stderr := runCLI(t, dir, "--branch", "feature")
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d", code, exitRefused)
 	}
@@ -234,11 +238,23 @@ func TestCLI_RefusesWithoutConfig(t *testing.T) {
 	if stub.Request.State != "" {
 		t.Fatalf("refusal posted status state %q", stub.Request.State)
 	}
-	if got, exists := remoteRef(t, stub.Remote, "refs/heads/"+branch); exists {
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
 		t.Fatalf("refusal published branch %s", got)
 	}
 	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
 		t.Fatalf("refusal published staging ref %s", got)
+	}
+}
+
+func TestCLI_RequiresExplicitPublicationBranch(t *testing.T) {
+	dir := newTestRepo(t, nil)
+
+	code, _, stderr := runCLI(t, dir)
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	}
+	if !strings.Contains(stderr, "--branch") {
+		t.Fatalf("stderr = %q, want it to name the missing --branch", stderr)
 	}
 }
 
@@ -275,7 +291,7 @@ func TestCLI_SignalKilledCheckExitsRefused(t *testing.T) {
 	// AGENTS.md.
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "sh -c 'kill -9 $$' && true", "image": "alpine"}`})
 
-	code, _, stderr := runCLI(t, dir)
+	code, _, stderr := runCLI(t, dir, "--branch", "feature")
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d (never a verdict) - stderr: %s", code, exitRefused, stderr)
 	}
@@ -292,7 +308,7 @@ func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
 	}
 	stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
-	code, stdout, stderr := runCLI(t, dir)
+	code, stdout, stderr := runCLI(t, dir, "--branch", "feature")
 	if code != exitGreen {
 		t.Fatalf("exit code = %d, want %d - a reached verdict must survive a report-write failure", code, exitGreen)
 	}
@@ -312,7 +328,7 @@ func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
-	code, _, _ := runCLI(t, dir, "the", "login", "flow", "is", "done")
+	code, _, _ := runCLI(t, dir, "--branch", "feature", "the", "login", "flow", "is", "done")
 	if code != exitGreen {
 		t.Fatalf("exit code = %d, want %d", code, exitGreen)
 	}
@@ -329,7 +345,7 @@ func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 	runGitT(t, dir, "remote", "add", "origin", "https://github.com/inactdev/inspector.git")
 	t.Setenv("GITHUB_TOKEN", "")
 
-	code, stdout, stderr := runCLI(t, dir)
+	code, stdout, stderr := runCLI(t, dir, "--branch", "feature")
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d - a missing token must never exit as a success", code, exitRefused)
 	}
@@ -349,7 +365,7 @@ func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
-	code, _, stderr := runCLI(t, dir)
+	code, _, stderr := runCLI(t, dir, "--branch", "feature")
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d - no origin remote must never exit as a success", code, exitRefused)
 	}
@@ -362,10 +378,9 @@ func TestCLI_StatusAPIRefusalFailsLoudly(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
-	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusUnauthorized, `{"message":"Bad credentials"}`, nil)
 
-	code, stdout, stderr := runCLI(t, dir)
+	code, stdout, stderr := runCLI(t, dir, "--branch", "feature")
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d - an API refusal must never exit as a success", code, exitRefused)
 	}
@@ -378,7 +393,7 @@ func TestCLI_StatusAPIRefusalFailsLoudly(t *testing.T) {
 	if !strings.Contains(stderr, warningBar) {
 		t.Fatalf("stderr = %q, want the loud warning bar", stderr)
 	}
-	if got, exists := remoteRef(t, stub.Remote, "refs/heads/"+branch); exists {
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
 		t.Fatalf("status API refusal published branch %s", got)
 	}
 	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); !exists || got != commit {
@@ -389,7 +404,7 @@ func TestCLI_StatusAPIRefusalFailsLoudly(t *testing.T) {
 func TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails(t *testing.T) {
 	dir := newTestRepo(t, nil)
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
-	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
+	branch := "feature"
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
 	if err := os.WriteFile(filepath.Join(dir, "remote.txt"), []byte("remote"), 0o644); err != nil {
@@ -401,7 +416,7 @@ func TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails(t *testing.T) {
 	runGitT(t, dir, "push", "-q", "origin", "HEAD:refs/heads/"+branch)
 	runGitT(t, dir, "reset", "-q", "--hard", commit)
 
-	_, err := publishGreen(dir, inspector.Result{Outcome: inspector.Green, Commit: commit, Branch: branch})
+	_, err := publishGreen(dir, branch, inspector.Result{Outcome: inspector.Green, Commit: commit})
 	if err == nil {
 		t.Fatal("expected non-fast-forward branch move to fail")
 	}
@@ -416,50 +431,47 @@ func TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails(t *testing.T) {
 	}
 }
 
-func TestPublishGreenRefusesChangedCheckoutBeforeRemoteSideEffects(t *testing.T) {
-	cases := []struct {
-		name   string
-		change func(t *testing.T, dir string)
-	}{
-		{
-			name: "branch",
-			change: func(t *testing.T, dir string) {
-				runGitT(t, dir, "checkout", "-q", "-b", "other")
-			},
-		},
-		{
-			name: "head",
-			change: func(t *testing.T, dir string) {
-				if err := os.WriteFile(filepath.Join(dir, "changed.txt"), []byte("changed"), 0o644); err != nil {
-					t.Fatalf("writing changed file: %v", err)
-				}
-				runGitT(t, dir, "add", "changed.txt")
-				runGitT(t, dir, "commit", "-q", "-m", "changed")
-			},
-		},
+func TestPublishGreenRefusesRemoteDefaultBranch(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+
+	_, err := publishGreen(dir, "main", inspector.Result{Outcome: inspector.Green, Commit: commit})
+	if err == nil || !strings.Contains(err.Error(), "default branch") {
+		t.Fatalf("error = %v, want remote default branch refusal", err)
 	}
+	if stub.Request.State != "" {
+		t.Fatalf("default branch refusal posted status state %q", stub.Request.State)
+	}
+	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatal("default branch refusal published a staging ref")
+	}
+	if _, exists := remoteRef(t, stub.Remote, "refs/heads/main"); exists {
+		t.Fatal("default branch refusal moved the default branch")
+	}
+}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := newTestRepo(t, nil)
-			commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
-			branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
-			stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
-			tc.change(t, dir)
+func TestPublishGreenRefusesChangedHeadBeforeRemoteSideEffects(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	if err := os.WriteFile(filepath.Join(dir, "changed.txt"), []byte("changed"), 0o644); err != nil {
+		t.Fatalf("writing changed file: %v", err)
+	}
+	runGitT(t, dir, "add", "changed.txt")
+	runGitT(t, dir, "commit", "-q", "-m", "changed")
 
-			_, err := publishGreen(dir, inspector.Result{Outcome: inspector.Green, Commit: commit, Branch: branch})
-			if err == nil {
-				t.Fatal("expected changed checkout to stop publication")
-			}
-			if stub.Request.State != "" {
-				t.Fatalf("changed checkout posted status state %q", stub.Request.State)
-			}
-			if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
-				t.Fatal("changed checkout published a staging ref")
-			}
-			if _, exists := remoteRef(t, stub.Remote, "refs/heads/"+branch); exists {
-				t.Fatal("changed checkout published the handed-off branch")
-			}
-		})
+	_, err := publishGreen(dir, "feature", inspector.Result{Outcome: inspector.Green, Commit: commit})
+	if err == nil {
+		t.Fatal("expected changed HEAD to stop publication")
+	}
+	if stub.Request.State != "" {
+		t.Fatalf("changed HEAD posted status state %q", stub.Request.State)
+	}
+	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatal("changed HEAD published a staging ref")
+	}
+	if _, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
+		t.Fatal("changed HEAD published the named branch")
 	}
 }

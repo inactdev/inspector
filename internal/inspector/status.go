@@ -61,6 +61,56 @@ const (
 	StatusFailure StatusState = "failure"
 )
 
+// RepositoryOptions identifies a GitHub repository.
+type RepositoryOptions struct {
+	Owner, Repo string
+	Token       string
+	APIBaseURL  string
+}
+
+// RepositoryDefaultBranch returns the repository's configured default branch.
+func RepositoryDefaultBranch(opts RepositoryOptions) (string, error) {
+	if strings.TrimSpace(opts.Token) == "" {
+		return "", fmt.Errorf("no GitHub token: set %s to read the repository default branch", GitHubTokenEnvVar)
+	}
+	if opts.Owner == "" || opts.Repo == "" {
+		return "", fmt.Errorf("no GitHub owner/repo to read the default branch from")
+	}
+
+	base := opts.APIBaseURL
+	if base == "" {
+		base = defaultStatusAPIBaseURL
+	}
+	url := fmt.Sprintf("%s/repos/%s/%s", base, opts.Owner, opts.Repo)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("building repository request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+opts.Token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "inspector")
+
+	resp, err := statusHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("reading the default branch from %s: %w", base, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("GitHub did not return the repository default branch (%s): %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	var repository struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&repository); err != nil {
+		return "", fmt.Errorf("decoding GitHub repository response: %w", err)
+	}
+	if repository.DefaultBranch == "" {
+		return "", fmt.Errorf("GitHub returned no default branch for %s/%s", opts.Owner, opts.Repo)
+	}
+	return repository.DefaultBranch, nil
+}
+
 // PostStatusOptions configures one commit-status post.
 type PostStatusOptions struct {
 	Owner, Repo, Commit string

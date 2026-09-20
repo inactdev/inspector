@@ -41,39 +41,29 @@ func TestHeadCommit(t *testing.T) {
 	}
 }
 
-func TestCurrentBranch(t *testing.T) {
-	dir := newTestRepo(t, nil)
-
-	got, err := CurrentBranch(dir)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestValidatePublicationBranch(t *testing.T) {
+	for _, branch := range []string{"feature", "user/topic", "release-1.2"} {
+		if err := ValidatePublicationBranch(branch); err != nil {
+			t.Fatalf("ValidatePublicationBranch(%q): %v", branch, err)
+		}
 	}
-	want := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
-	if got != want {
-		t.Fatalf("CurrentBranch = %q, want %q", got, want)
-	}
-}
-
-func TestCurrentBranch_RefusesDetachedHead(t *testing.T) {
-	dir := newTestRepo(t, nil)
-	runGitT(t, dir, "checkout", "--detach", "-q")
-
-	if _, err := CurrentBranch(dir); err == nil {
-		t.Fatal("expected a detached HEAD to have no publication branch")
+	for _, branch := range []string{"", " main", "main ", "refs/heads/main", "bad..name", "-option"} {
+		if err := ValidatePublicationBranch(branch); err == nil {
+			t.Fatalf("ValidatePublicationBranch(%q) unexpectedly succeeded", branch)
+		}
 	}
 }
 
-func TestValidatePublicationHead(t *testing.T) {
+func TestValidatePublicationCommit(t *testing.T) {
 	dir := newTestRepo(t, nil)
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
-	branch := strings.TrimSpace(runGitT(t, dir, "branch", "--show-current"))
 
-	if err := ValidatePublicationHead(dir, branch, commit); err != nil {
+	if err := ValidatePublicationCommit(dir, commit); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	runGitT(t, dir, "checkout", "-q", "-b", "other")
-	if err := ValidatePublicationHead(dir, branch, commit); err == nil {
-		t.Fatal("expected changed branch to be rejected")
+	runGitT(t, dir, "commit", "--allow-empty", "-q", "-m", "other")
+	if err := ValidatePublicationCommit(dir, commit); err == nil {
+		t.Fatal("expected changed HEAD to be rejected")
 	}
 }
 
@@ -237,13 +227,16 @@ case "$GIT_SSH_COMMAND" in *BatchMode=yes*) exit 0 ;; *) exit 14 ;; esac
 	}
 }
 
-func TestPushRefTimesOut(t *testing.T) {
+func TestPushRefTimeoutKillsChildProcesses(t *testing.T) {
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
-	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
+	marker := filepath.Join(t.TempDir(), "survived")
+	script := "#!/bin/sh\n(sleep 0.3; touch \"$SURVIVAL_MARKER\") &\nwait\n"
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake git: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SURVIVAL_MARKER", marker)
 	previousTimeout := gitPushTimeout
 	gitPushTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { gitPushTimeout = previousTimeout })
@@ -251,6 +244,12 @@ func TestPushRefTimesOut(t *testing.T) {
 	err := PushRefToRemote(t.TempDir(), "origin", "abc", "refs/heads/test")
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("error = %v, want push timeout", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("git child survived the publication timeout")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking child survival marker: %v", err)
 	}
 }
 

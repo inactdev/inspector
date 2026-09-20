@@ -31,20 +31,6 @@ func HeadCommit(repoRoot string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// CurrentBranch returns the local branch currently checked out at HEAD.
-// A detached HEAD has no safe publication target.
-func CurrentBranch(repoRoot string) (string, error) {
-	out, err := runGit(repoRoot, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("resolving the branch checked out at HEAD (inspector cannot publish from a detached HEAD): %w", err)
-	}
-	branch := strings.TrimSpace(out)
-	if branch == "" {
-		return "", fmt.Errorf("resolving the branch checked out at HEAD: no branch name returned")
-	}
-	return branch, nil
-}
-
 // StagingRefForCommit names the non-branch ref that temporarily makes commit
 // available to GitHub for its status post. It deliberately cannot be the
 // pull-request branch: the status must exist before that branch moves.
@@ -52,16 +38,22 @@ func StagingRefForCommit(commit string) string {
 	return "refs/inspector/staging/" + commit
 }
 
-// ValidatePublicationHead confirms the checked branch and commit are still
-// checked out before publication starts.
-func ValidatePublicationHead(repoRoot, expectedBranch, expectedCommit string) error {
-	branch, err := CurrentBranch(repoRoot)
-	if err != nil {
-		return err
+// ValidatePublicationBranch accepts only a full, unambiguous branch name.
+func ValidatePublicationBranch(branch string) error {
+	if branch == "" || strings.TrimSpace(branch) != branch {
+		return fmt.Errorf("branch name must be non-empty and contain no leading or trailing whitespace")
 	}
-	if branch != expectedBranch {
-		return fmt.Errorf("checked-out branch changed during inspection: started on %q, now on %q", expectedBranch, branch)
+	if strings.HasPrefix(branch, "refs/") {
+		return fmt.Errorf("branch name %q must not include a refs/ prefix", branch)
 	}
+	if _, err := runGit(".", "check-ref-format", "--branch", branch); err != nil {
+		return fmt.Errorf("%q is not a valid git branch name: %w", branch, err)
+	}
+	return nil
+}
+
+// ValidatePublicationCommit confirms the checked commit is still HEAD.
+func ValidatePublicationCommit(repoRoot, expectedCommit string) error {
 	commit, err := HeadCommit(repoRoot)
 	if err != nil {
 		return err
@@ -174,6 +166,8 @@ func runGitPush(dir string, args ...string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	configureProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	cmd.WaitDelay = time.Second
 	cmd.Env = nonInteractiveGitEnv()
 	out, err := gitOutput(cmd, args)

@@ -44,14 +44,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("inspector", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repoPath := fs.String("repo", ".", "path to the repository to inspect")
+	publicationBranch := fs.String("branch", "", "pull request branch to publish after a green result (required)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, `usage: inspector [flags] [claim text...]
 
 Runs the project's own check command against the repo's current HEAD
-commit and reports green or red. For green, inspector itself puts that
-commit on GitHub, records its status, then updates the current branch,
-so it needs GITHUB_TOKEN set to a token with commit-status write access
-and a GitHub 'origin' remote. See README.md for setup.
+commit and reports green or red. --branch must explicitly name the pull
+request branch that inspector may update after a green result. Inspector
+puts the commit on GitHub, records its status, then updates only that named
+branch, so it needs GITHUB_TOKEN set to a token with commit-status write
+access and a GitHub 'origin' remote. See README.md for setup.
 
 flags:
 `)
@@ -59,6 +61,14 @@ flags:
 	}
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
+	}
+	if strings.TrimSpace(*publicationBranch) == "" {
+		fmt.Fprintln(stderr, "refused: missing required --branch <pull-request-branch>; inspector never infers a publication branch from the checkout")
+		return exitRefused
+	}
+	if err := inspector.ValidatePublicationBranch(*publicationBranch); err != nil {
+		fmt.Fprintf(stderr, "refused: invalid publication branch: %v\n", err)
+		return exitRefused
 	}
 
 	opts := inspector.Options{
@@ -80,7 +90,7 @@ flags:
 
 	switch result.Outcome {
 	case inspector.Green:
-		cleanupWarning, err := publishGreen(*repoPath, result)
+		cleanupWarning, err := publishGreen(*repoPath, *publicationBranch, result)
 		if err != nil {
 			printPublicationFailure(stderr, err)
 			return exitRefused
@@ -107,7 +117,10 @@ flags:
 // observing a pull-request branch without an inspector status: stage the
 // checked commit remotely, record its green status, then move the branch.
 // The stage is a non-branch ref and is deleted once the branch moves.
-func publishGreen(repoPath string, result inspector.Result) (cleanupWarning string, err error) {
+func publishGreen(repoPath, publicationBranch string, result inspector.Result) (cleanupWarning string, err error) {
+	if err := inspector.ValidatePublicationBranch(publicationBranch); err != nil {
+		return "", err
+	}
 	token := os.Getenv(inspector.GitHubTokenEnvVar)
 	if strings.TrimSpace(token) == "" {
 		return "", fmt.Errorf("%s is not set - inspector needs a GitHub token with commit-status write access to publish a green result", inspector.GitHubTokenEnvVar)
@@ -121,13 +134,25 @@ func publishGreen(repoPath string, result inspector.Result) (cleanupWarning stri
 	if err != nil {
 		return "", err
 	}
-	if err := inspector.ValidatePublicationHead(repoRoot, result.Branch, result.Commit); err != nil {
+	defaultBranch, err := inspector.RepositoryDefaultBranch(inspector.RepositoryOptions{
+		Owner:      target.Owner,
+		Repo:       target.Repo,
+		Token:      token,
+		APIBaseURL: githubAPIBaseURL,
+	})
+	if err != nil {
+		return "", err
+	}
+	if publicationBranch == defaultBranch {
+		return "", fmt.Errorf("publication branch %q is the remote default branch; inspector may update only a pull request branch", publicationBranch)
+	}
+	if err := inspector.ValidatePublicationCommit(repoRoot, result.Commit); err != nil {
 		return "", err
 	}
 
 	stagingRef := inspector.StagingRefForCommit(result.Commit)
 	if err := inspector.PushRefToRemote(repoRoot, target.PushURL, result.Commit, stagingRef); err != nil {
-		return "", err
+		return "", fmt.Errorf("staging push failed; whether temporary staging ref %s was updated is unknown, and no status post or branch move was attempted: %w", stagingRef, err)
 	}
 
 	description := "inspector: green"
@@ -143,15 +168,15 @@ func publishGreen(repoPath string, result inspector.Result) (cleanupWarning stri
 		Token:       token,
 		APIBaseURL:  githubAPIBaseURL,
 	}); err != nil {
-		return "", fmt.Errorf("recording the green status failed; temporary staging ref %s remains and the branch was not moved: %w", stagingRef, err)
+		return "", fmt.Errorf("recording the green status failed; whether GitHub accepted it is unknown, temporary staging ref %s was created, and branch %q was not attempted: %w", stagingRef, publicationBranch, err)
 	}
 
-	branchRef := "refs/heads/" + result.Branch
+	branchRef := "refs/heads/" + publicationBranch
 	if err := inspector.PushRefToRemote(repoRoot, target.PushURL, result.Commit, branchRef); err != nil {
-		return "", fmt.Errorf("moving the branch failed after the green status was recorded; temporary staging ref %s remains: %w", stagingRef, err)
+		return "", fmt.Errorf("moving branch %q failed after the green status was recorded; whether the remote branch moved is unknown, and temporary staging ref %s may remain: %w", publicationBranch, stagingRef, err)
 	}
 	if err := inspector.DeleteRefFromRemote(repoRoot, target.PushURL, stagingRef); err != nil {
-		return fmt.Sprintf("inspector published the green branch, but could not remove its temporary staging ref: %v", err), nil
+		return fmt.Sprintf("inspector published green branch %q, but could not confirm removal of its temporary staging ref: %v", publicationBranch, err), nil
 	}
 	return "", nil
 }

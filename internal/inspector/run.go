@@ -50,7 +50,6 @@ type Options struct {
 type Result struct {
 	Outcome Outcome
 	Commit  string
-	Branch  string
 	Message string // human-readable explanation; always set for Refused
 	// ReportPath is set whenever the check actually ran and its report
 	// saved successfully - for Green, Red, and a signal-killed Refused,
@@ -91,29 +90,12 @@ func Run(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	branch, err := CurrentBranch(repoRoot)
-	if err != nil {
-		return Result{Outcome: Refused, Commit: commit, Message: err.Error()}, nil
-	}
-	confirmedCommit, err := HeadCommit(repoRoot)
-	if err != nil {
-		return Result{}, err
-	}
-	if confirmedCommit != commit {
-		return Result{
-			Outcome: Refused,
-			Commit:  confirmedCommit,
-			Branch:  branch,
-			Message: fmt.Sprintf("HEAD changed while inspector was capturing the handed-off branch: started at %s, then moved to %s", commit, confirmedCommit),
-		}, nil
-	}
 
 	cfg, err := LoadConfig(repoRoot)
 	if errors.Is(err, ErrNoCheckCommand) {
 		return Result{
 			Outcome: Refused,
 			Commit:  commit,
-			Branch:  branch,
 			Message: fmt.Sprintf(
 				"no check command configured for this repo.\n\n"+
 					"inspector refuses to run rather than silently doing nothing - a repo that runs\n"+
@@ -129,7 +111,6 @@ func Run(opts Options) (Result, error) {
 		return Result{
 			Outcome: Refused,
 			Commit:  commit,
-			Branch:  branch,
 			Message: fmt.Sprintf(
 				"no container image configured for this repo.\n\n"+
 					"the check command runs inside a container, not on this machine - inspector\n"+
@@ -141,14 +122,13 @@ func Run(opts Options) (Result, error) {
 		}, nil
 	}
 	if err != nil {
-		return Result{Outcome: Refused, Commit: commit, Branch: branch, Message: err.Error()}, nil
+		return Result{Outcome: Refused, Commit: commit, Message: err.Error()}, nil
 	}
 
 	if err := container.EnsureAvailable(); err != nil {
 		return Result{
 			Outcome: Refused,
 			Commit:  commit,
-			Branch:  branch,
 			Message: fmt.Sprintf(
 				"no usable container runtime: %v\n\n"+
 					"inspector runs every check command inside a container instead of on this\n"+
@@ -189,7 +169,7 @@ func Run(opts Options) (Result, error) {
 		Output:       checkResult.Output,
 	}
 
-	result := Result{Outcome: outcome, Commit: commit, Branch: branch}
+	result := Result{Outcome: outcome, Commit: commit}
 	reportPath, writeErr := WriteReport(repoRoot, report)
 
 	switch {

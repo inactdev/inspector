@@ -83,7 +83,8 @@ calls it.
        fabrica runs the project's check command -> green
        fabrica now believes the feature is finished
 
-    2. fabrica hands the branch to inspector          <- the handoff IS the trigger
+    2. fabrica explicitly names and hands the branch to inspector
+                                                       <- the handoff IS the trigger
 
     3. inspector runs everything - checks, lint, review, docs, outcome tests
        fixes what it may fix, without asking
@@ -302,17 +303,22 @@ one exact commit, posted through the API with a token. Not a comment, not a
 checklist. Text can be typed by anyone; a status cannot.
 
 For a green result, inspector first stages the commit on a non-branch remote
-ref, then posts its status, and only then moves the pull request branch. The
-gate's first run therefore sees the result already attached to its exact head
-commit. A builder does not publish the branch itself.
+ref, then posts its status, and only then moves an explicitly caller-named pull
+request branch. It never infers that destination from checkout, HEAD, tracking
+state, or another ambient source, and refuses the remote default branch even
+when named. This is a captain decision that may be overruled: ambient authority
+conflicts with the explicit handoff architecture, and a freshly pulled checkout
+normally points at the default branch. The gate's first run therefore sees the
+result already attached to its exact head commit without risking a direct
+default-branch update. A builder does not publish the branch itself.
 
-A failed status post leaves the staging ref in place, without a status or pull
-request branch move. A failed branch move after a successful status leaves the
-staging ref and status in place, but still does not move the pull request
-branch. These incomplete green publications exit `2` and report their exact
-remote state; inspector does not compensate or pretend they are ordinary
-refusals. Before publication starts, an ordinary refusal still makes no remote
-change.
+Network failures can lose a successful response, so inspector cannot always
+know whether a failed staging push created its ref, a failed status request was
+accepted, or a failed final push moved the named branch. It reports those states
+as unknown and identifies which later operations were not attempted. These
+incomplete green publications exit `2`; inspector does not compensate or
+pretend they are ordinary refusals. Before publication starts, an ordinary
+refusal still makes no remote change.
 
 - merging stays blocked until inspector has blessed the exact head commit
 - a later branch update without inspector's sequence goes red on its own,

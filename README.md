@@ -15,7 +15,7 @@ It has two halves:
 
 - **inspector** runs on your machine. It runs the project's checks, repairs what it
   can, re-verifies, records a green result against the exact commit it checked, and
-  only then publishes that commit's branch.
+  only then publishes the explicitly named pull request branch.
 - **inspector-gate** runs on GitHub. Small and dumb on purpose: does this commit
   carry a green inspector result, and were any protected files touched.
 
@@ -123,15 +123,26 @@ publication steps, in this exact order:
 1. It runs the check locally on C.
 2. It transfers C to a temporary non-branch staging ref on `origin`.
 3. It records C's green commit status.
-4. It updates the current branch on `origin`, where a pull request can point at C.
+4. It updates the explicitly named pull request branch on `origin`.
+
+Name that destination on every invocation:
+
+```
+inspector --branch my-feature
+```
+
+`--branch` is required. Inspector never derives publication authority from the
+checkout, HEAD, tracking configuration, or any other ambient state, and it
+refuses the remote default branch even when explicitly named. This is a captain
+decision that may be overruled: ambient destination authority conflicts with
+the architecture's explicit handoff, and a freshly pulled checkout is normally
+on the default branch, where an inferred push would bypass the pull request.
 
 The staging ref exists only so GitHub has C when it receives the status. It is
-removed after the branch moves. Inspector captures the current branch together
-with C before checking, then confirms both are still checked out before the
-staging push, so a branch switch during the check cannot redirect publication.
-The pull request branch never points at C until its status already exists, so
-inspector-gate's first run sees the result instead of a stale missing-status
-failure.
+removed after the named branch moves. Inspector confirms C is still HEAD before
+the staging push. The pull request branch never points at C until its status
+already exists, so inspector-gate's first run sees the result instead of a
+stale missing-status failure.
 
 **v1 red policy, which the Client may overrule:** a red result stays local.
 inspector writes its report and returns `1`, but neither pushes a branch nor
@@ -140,7 +151,7 @@ unverified work does not become a GitHub branch. The local report is the record
 for deciding what to do next.
 
 ```
-inspector
+inspector --branch my-feature
 ```
 
 This runs the configured check command against the repo's current HEAD and
@@ -183,13 +194,14 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
 
 Flags:
 
+- `--branch <name>` - required pull request branch to publish after green
 - `--repo <path>` - inspect a repo other than the current directory
 
 Anything after the flags is a free-text claim, recorded for context and not acted
 on:
 
 ```
-inspector implemented the login flow
+inspector --branch my-feature implemented the login flow
 ```
 
 Each run writes a small JSON report to `.inspector/runs/`, and copies it to
@@ -218,21 +230,23 @@ just says whether to trust it.
 This needs a token: set `GITHUB_TOKEN` to one with commit-status write access
 on the repo, and `origin`'s push URL must point at the same GitHub repository
 that receives the status. Pushes are non-interactive and time out rather than
-waiting forever for credentials or a stalled transport. Posting is not
+waiting forever for credentials or a stalled transport; a timeout kills git and
+its helper processes together. Posting is not
 optional - a missing token, an unresolvable remote, a failed staging push, or
 GitHub refusing the request all fail loudly and exit `2`, even when the local
 check passed. A real local green that inspector could not publish in full is
 worth nothing to a reader who can only see GitHub, so it must never look like
 success.
 
-Once the staging push succeeds, inspector does not try to erase partial remote
-state. If the status post fails, the staging ref remains but has no status and
-the pull request branch does not move. If the final branch push fails, the
-staging ref and green status remain but the pull request branch still does not
-move. Both are reported as incomplete publication, distinct from an ordinary
-refusal, and exit `2`. This is the captain's deliberate policy and may be
-overruled: compensation cannot make a partially published sequence atomic, so
-the safe boundary is that no incomplete sequence moves the pull request branch.
+Once publication starts, inspector does not try to erase partial remote state.
+A failed network operation can mean either that GitHub rejected the operation or
+that GitHub completed it but the client lost the response. Inspector therefore
+reports uncertain remote state honestly: a failed staging push may have created
+the staging ref; a failed status post may have recorded the status; and a failed
+final push may have moved the named branch. It does state which later operations
+were never attempted. These incomplete publications are distinct from an
+ordinary refusal and exit `2`. This is the captain's deliberate policy and may
+be overruled: compensation cannot make a partially published sequence atomic.
 
 What a reader should conclude:
 
@@ -326,7 +340,8 @@ The check (issue #1) is built: locally, `inspector` runs a project's own check
 command against HEAD, inside a container (issue #13), and reports green or
 red, refusing loudly when no check command or image is configured, or no
 usable container runtime is found. Inspector-owned publication (issue #18) is
-also built: it stages a green commit, posts its status, then moves the branch;
-a red result remains local by v1 policy. The gate workflow (issue #4, above)
-reads that status under the context `inspector`. Still to come: the fixer and
+also built: it stages a green commit, posts its status, then moves an explicitly
+named non-default branch; a red result remains local by v1 policy. The gate
+workflow (issue #4, above) reads that status under the context `inspector`.
+Still to come: the fixer and
 the installer - see [SPEC.md](SPEC.md) and the repo's issues.
