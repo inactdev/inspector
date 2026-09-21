@@ -111,6 +111,10 @@ func TestValidatePublicationCommit(t *testing.T) {
 	runGitT(t, dir, "add", ".gitignore")
 	runGitT(t, dir, "commit", "-q", "-m", "ignore build output")
 	commit = strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	policy, err = CaptureValidationPolicy(dir)
+	if err != nil {
+		t.Fatalf("recapturing validation policy: %v", err)
+	}
 	writeFiles(t, dir, map[string]string{"ignored.txt": "build output"})
 	if err := ValidatePublicationCommit(dir, commit, policy); err != nil {
 		t.Fatalf("ignored build output prevented publication: %v", err)
@@ -205,6 +209,53 @@ func TestValidatePublicationCommitPreservesCapturedIgnorePolicy(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "from-info.txt") || strings.Contains(err.Error(), "from-global.txt") {
 		t.Fatalf("error = %v, want captured ignore rules preserved", err)
+	}
+}
+
+func TestFilteredCheckoutUsesFrozenWorktreeForPublicationValidation(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	runGitT(t, dir, "config", "filter.snapshot.clean", "sed 's/^worktree$/stored/'")
+	runGitT(t, dir, "config", "filter.snapshot.smudge", "sed 's/^stored$/worktree/'")
+	writeFiles(t, dir, map[string]string{
+		".gitattributes": "asset.txt filter=snapshot\n",
+		"asset.txt":      "worktree\n",
+	})
+	runGitT(t, dir, "add", ".gitattributes", "asset.txt")
+	runGitT(t, dir, "commit", "-q", "-m", "add filtered asset")
+
+	status, err := WorkingTreeStatus(dir)
+	if err != nil {
+		t.Fatalf("checking filtered worktree: %v", err)
+	}
+	if status != "" {
+		t.Fatalf("filtered checkout reported dirty: %q", status)
+	}
+	policy, err := CaptureValidationPolicy(dir)
+	if err != nil {
+		t.Fatalf("capturing filtered worktree: %v", err)
+	}
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+
+	marker := filepath.Join(t.TempDir(), "filter-ran")
+	filter := filepath.Join(t.TempDir(), "clean-filter")
+	if err := os.WriteFile(filter, []byte("#!/bin/sh\ntouch \"$FILTER_MARKER\"\nprintf 'stored\\n'\n"), 0o755); err != nil {
+		t.Fatalf("writing replacement filter: %v", err)
+	}
+	t.Setenv("FILTER_MARKER", marker)
+	runGitT(t, dir, "config", "filter.snapshot.clean", filter)
+
+	if err := ValidatePublicationCommit(dir, commit, policy); err != nil {
+		t.Fatalf("unchanged filtered checkout prevented publication: %v", err)
+	}
+	writeFiles(t, dir, map[string]string{"asset.txt": "changed after check\n"})
+	err = ValidatePublicationCommit(dir, commit, policy)
+	if err == nil || !strings.Contains(err.Error(), "asset.txt") {
+		t.Fatalf("error = %v, want changed filtered file to be named", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("post-check validation executed the check-mutated clean filter")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking filter marker: %v", err)
 	}
 }
 

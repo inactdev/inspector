@@ -114,6 +114,35 @@ func TestPostCommitStatus_APIRefusal(t *testing.T) {
 	if !strings.Contains(err.Error(), "401") {
 		t.Fatalf("error = %q, want it to name the status code", err.Error())
 	}
+	if strings.Contains(err.Error(), "outcome unconfirmed") {
+		t.Fatalf("error = %q, want an explicit client rejection to be definitive", err.Error())
+	}
+}
+
+func TestPostCommitStatus_ServerFailureIsUnconfirmed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"message":"upstream response lost"}`))
+	}))
+	defer server.Close()
+
+	err := PostCommitStatus(PostStatusOptions{
+		Owner:      "inactdev",
+		Repo:       "inspector",
+		Commit:     "deadbeef",
+		State:      StatusSuccess,
+		Token:      "test-token",
+		APIBaseURL: server.URL,
+	})
+	if err == nil {
+		t.Fatal("expected an error for a 503 response")
+	}
+	if !strings.Contains(err.Error(), "stamp sent, outcome unconfirmed") {
+		t.Fatalf("error = %q, want ambiguous publication wording", err.Error())
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Fatalf("error = %q, want it to name the status code", err.Error())
+	}
 }
 
 // GitHub answers 301 for a renamed or transferred repository, and a

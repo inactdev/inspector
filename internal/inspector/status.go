@@ -135,9 +135,9 @@ type PostStatusOptions struct {
 // (https://docs.github.com/en/rest/commits/statuses). Every failure -
 // a missing token, an unreachable API, anything but the documented 201
 // Created (a redirect included) - comes back
-// as a descriptive error naming the concrete problem, so a caller can
-// never mistake a failed post for a successful one and silently treat
-// an unrecorded result as a recorded one.
+// as a descriptive error naming the concrete problem. Server failures
+// after the request was sent are reported as unconfirmed because an
+// intermediary may have lost GitHub's successful response.
 func PostCommitStatus(opts PostStatusOptions) error {
 	if strings.TrimSpace(opts.Token) == "" {
 		return fmt.Errorf("no GitHub token: set %s to a token with commit-status write access", GitHubTokenEnvVar)
@@ -194,15 +194,18 @@ func PostCommitStatus(opts PostStatusOptions) error {
 	}
 	defer resp.Body.Close()
 
-	// Only the documented 201 Created means GitHub actually recorded the
-	// status. Anything else - including a redirect this client stopped at
-	// - is a failure to record, and must be reported as one.
+	// Only the documented 201 Created confirms that GitHub recorded the
+	// status. A server failure after the request was written is ambiguous;
+	// explicit client rejections and stopped redirects are definitive.
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		detail := strings.TrimSpace(string(respBody))
 		if commitUnknownToGitHub(resp.StatusCode, detail) {
 			return fmt.Errorf("GitHub has no commit %s in %s/%s (%s): inspector must first make a green commit available through its temporary staging ref before recording the status - a commit status can only attach to a commit GitHub already has: %s",
 				opts.Commit, opts.Owner, opts.Repo, resp.Status, detail)
+		}
+		if resp.StatusCode >= http.StatusInternalServerError {
+			return fmt.Errorf("GitHub returned %s after the status request was written: stamp sent, outcome unconfirmed: %s", resp.Status, detail)
 		}
 		if loc := resp.Header.Get("Location"); loc != "" {
 			detail = strings.TrimSpace(fmt.Sprintf("redirected to %s (the repository may have been renamed or transferred; update the 'origin' remote) %s", loc, detail))

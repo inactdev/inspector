@@ -3,6 +3,7 @@ package inspector
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -57,10 +58,20 @@ func ValidatePublicationBranch(branch string) error {
 	return nil
 }
 
+type trackedWorktreeEntry struct {
+	path        string
+	mode        os.FileMode
+	digest      [sha256.Size]byte
+	missing     bool
+	gitlink     bool
+	gitlinkHead string
+}
+
 type ValidationPolicy struct {
 	objectFormat   string
 	globalExcludes []byte
 	infoExcludes   []byte
+	trackedTree    []trackedWorktreeEntry
 }
 
 func CaptureValidationPolicy(repoRoot string) (ValidationPolicy, error) {
@@ -84,10 +95,15 @@ func CaptureValidationPolicy(repoRoot string) (ValidationPolicy, error) {
 	if err != nil {
 		return ValidationPolicy{}, fmt.Errorf("reading global exclude rules: %w", err)
 	}
+	trackedTree, err := captureTrackedWorktree(repoRoot)
+	if err != nil {
+		return ValidationPolicy{}, err
+	}
 	return ValidationPolicy{
 		objectFormat:   objectFormat,
 		globalExcludes: globalExcludes,
 		infoExcludes:   infoExcludes,
+		trackedTree:    trackedTree,
 	}, nil
 }
 
@@ -201,20 +217,23 @@ func hasEmbeddedHTTPCredentials(value string) bool {
 // WorkingTreeStatus returns differences between HEAD and the worktree plus any
 // mutable index flags that could hide tracked changes. It omits untracked files
 // in RunsDirName, inspector's own report directory, but still reports tracked
-// changes there. Without the untracked exclusion, a repo that never gitignores
-// RunsDirName would go dirty after its first report. A non-empty result means
-// the working tree cannot be proven to match HEAD, so a check run against it
-// cannot honestly be bound to that commit.
+// changes there. The initial check uses the checkout's clean filters so valid
+// filtered worktrees compare against HEAD correctly. A captured raw snapshot,
+// rather than those mutable filters, protects the post-check comparison.
 func WorkingTreeStatus(repoRoot string) (string, error) {
-	commit, err := validationHeadCommit(repoRoot)
+	out, err := runWorktreeGit(repoRoot, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none", "--", ".", ":!"+RunsDirName)
+	if err != nil {
+		return "", fmt.Errorf("checking working tree status: %w", err)
+	}
+	trackedRuns, err := runWorktreeGit(repoRoot, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=none", "--", RunsDirName)
+	if err != nil {
+		return "", fmt.Errorf("checking tracked report files: %w", err)
+	}
+	mutableIndex, err := mutableIndexFlags(repoRoot)
 	if err != nil {
 		return "", err
 	}
-	policy, err := CaptureValidationPolicy(repoRoot)
-	if err != nil {
-		return "", err
-	}
-	return workingTreeStatusAtCommit(repoRoot, commit, policy)
+	return out + trackedRuns + mutableIndex, nil
 }
 
 func validationHeadCommit(repoRoot string) (string, error) {
@@ -226,6 +245,108 @@ func validationHeadCommit(repoRoot string) (string, error) {
 }
 
 func workingTreeStatusAtCommit(repoRoot, commit string, policy ValidationPolicy) (string, error) {
+	trackedChanges, err := compareTrackedWorktree(repoRoot, policy.trackedTree)
+	if err != nil {
+		return "", err
+	}
+	untracked, err := isolatedUntrackedFiles(repoRoot, commit, policy)
+	if err != nil {
+		return "", err
+	}
+	indexChanges, err := runValidationGit(repoRoot, "diff-index", "--cached", "--name-status", commit, "--")
+	if err != nil {
+		return "", fmt.Errorf("checking staged changes: %w", err)
+	}
+	mutableIndex, err := mutableIndexFlags(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	return trackedChanges + untracked + indexChanges + mutableIndex, nil
+}
+
+func captureTrackedWorktree(repoRoot string) ([]trackedWorktreeEntry, error) {
+	out, err := runValidationGit(repoRoot, "ls-files", "--stage", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("listing tracked files: %w", err)
+	}
+	var snapshot []trackedWorktreeEntry
+	for _, record := range strings.Split(out, "\x00") {
+		if record == "" {
+			continue
+		}
+		metadata, path, ok := strings.Cut(record, "\t")
+		fields := strings.Fields(metadata)
+		if !ok || len(fields) != 3 || fields[2] != "0" {
+			return nil, fmt.Errorf("cannot snapshot unresolved index entry %q", record)
+		}
+		entry, err := snapshotTrackedPath(repoRoot, path, fields[0] == "160000")
+		if err != nil {
+			return nil, err
+		}
+		snapshot = append(snapshot, entry)
+	}
+	return snapshot, nil
+}
+
+func snapshotTrackedPath(repoRoot, path string, gitlink bool) (trackedWorktreeEntry, error) {
+	entry := trackedWorktreeEntry{path: path, gitlink: gitlink}
+	fullPath := filepath.Join(repoRoot, filepath.FromSlash(path))
+	info, err := os.Lstat(fullPath)
+	if errors.Is(err, os.ErrNotExist) {
+		entry.missing = true
+		return entry, nil
+	}
+	if err != nil {
+		return trackedWorktreeEntry{}, fmt.Errorf("reading tracked path %s: %w", path, err)
+	}
+	entry.mode = info.Mode() & (os.ModeType | 0o111)
+	if gitlink {
+		head, err := runValidationGit(fullPath, "rev-parse", "HEAD")
+		if err != nil {
+			return trackedWorktreeEntry{}, fmt.Errorf("reading tracked submodule %s: %w", path, err)
+		}
+		entry.gitlinkHead = strings.TrimSpace(head)
+		return entry, nil
+	}
+	var contents []byte
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(fullPath)
+		if err != nil {
+			return trackedWorktreeEntry{}, fmt.Errorf("reading tracked symlink %s: %w", path, err)
+		}
+		contents = []byte(target)
+	} else {
+		if !info.Mode().IsRegular() {
+			return trackedWorktreeEntry{}, fmt.Errorf("tracked path %s is not a regular file or symlink", path)
+		}
+		contents, err = os.ReadFile(fullPath)
+		if err != nil {
+			return trackedWorktreeEntry{}, fmt.Errorf("reading tracked file %s: %w", path, err)
+		}
+	}
+	entry.digest = sha256.Sum256(contents)
+	return entry, nil
+}
+
+func compareTrackedWorktree(repoRoot string, snapshot []trackedWorktreeEntry) (string, error) {
+	var changes strings.Builder
+	for _, expected := range snapshot {
+		actual, err := snapshotTrackedPath(repoRoot, expected.path, expected.gitlink)
+		if err != nil {
+			return "", err
+		}
+		if actual != expected {
+			code := " M "
+			if actual.missing {
+				code = " D "
+			}
+			fmt.Fprintf(&changes, "%s%s\n", code, expected.path)
+		}
+	}
+	return changes.String(), nil
+}
+
+func isolatedUntrackedFiles(repoRoot, commit string, policy ValidationPolicy) (string, error) {
 	objectDir, err := gitObjectDirectory(repoRoot)
 	if err != nil {
 		return "", err
@@ -247,7 +368,6 @@ func workingTreeStatusAtCommit(repoRoot, commit string, policy ValidationPolicy)
 	if err := os.WriteFile(globalExcludesPath, policy.globalExcludes, 0o600); err != nil {
 		return "", fmt.Errorf("installing global exclude rules: %w", err)
 	}
-
 	env = append(env,
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES="+objectDir,
 		"GIT_INDEX_FILE="+filepath.Join(validationRepo, "validation-index"),
@@ -258,33 +378,20 @@ func workingTreeStatusAtCommit(repoRoot, commit string, policy ValidationPolicy)
 	if _, err := gitOutput(readTree, []string{"read-tree", commit}); err != nil {
 		return "", fmt.Errorf("reading checked commit tree: %w", err)
 	}
-	updateHead := exec.Command("git", append(args, "update-ref", "HEAD", commit)...)
-	updateHead.Env = env
-	if _, err := gitOutput(updateHead, []string{"update-ref", "HEAD", commit}); err != nil {
-		return "", fmt.Errorf("binding isolated validation HEAD: %w", err)
-	}
-
-	statusCmd := exec.Command("git", append(args, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none", "--", ".", ":!"+RunsDirName)...)
-	statusCmd.Env = env
-	out, err := gitOutput(statusCmd, []string{"status", "--porcelain", "--untracked-files=all"})
+	untrackedCmd := exec.Command("git", append(args, "ls-files", "--others", "--exclude-standard", "-z", "--", ".")...)
+	untrackedCmd.Env = env
+	out, err := gitOutput(untrackedCmd, []string{"ls-files", "--others", "--exclude-standard", "-z"})
 	if err != nil {
-		return "", fmt.Errorf("checking working tree status: %w", err)
+		return "", fmt.Errorf("checking untracked files: %w", err)
 	}
-	trackedRunsCmd := exec.Command("git", append(args, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=none", "--", RunsDirName)...)
-	trackedRunsCmd.Env = env
-	trackedRuns, err := gitOutput(trackedRunsCmd, []string{"status", "--porcelain", "--untracked-files=no", "--", RunsDirName})
-	if err != nil {
-		return "", fmt.Errorf("checking tracked report files: %w", err)
+	var status strings.Builder
+	for _, path := range strings.Split(out, "\x00") {
+		if path == "" || path == RunsDirName || strings.HasPrefix(path, RunsDirName+"/") {
+			continue
+		}
+		fmt.Fprintf(&status, "?? %s\n", path)
 	}
-	indexChanges, err := runValidationGit(repoRoot, "diff-index", "--cached", "--name-status", commit, "--")
-	if err != nil {
-		return "", fmt.Errorf("checking staged changes: %w", err)
-	}
-	mutableIndex, err := mutableIndexFlags(repoRoot)
-	if err != nil {
-		return "", err
-	}
-	return out + trackedRuns + indexChanges + mutableIndex, nil
+	return status.String(), nil
 }
 
 func mutableIndexFlags(repoRoot string) (string, error) {
@@ -317,6 +424,13 @@ func runValidationGit(dir string, args ...string) (string, error) {
 	gitArgs := append([]string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-C", dir}, args...)
 	cmd := exec.Command("git", gitArgs...)
 	cmd.Env = validationGitEnv()
+	return gitOutput(cmd, args)
+}
+
+func runWorktreeGit(dir string, args ...string) (string, error) {
+	gitArgs := append([]string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-C", dir}, args...)
+	cmd := exec.Command("git", gitArgs...)
+	cmd.Env = nonInteractiveGitEnv()
 	return gitOutput(cmd, args)
 }
 
@@ -405,6 +519,7 @@ func initBareRepository(path, objectFormat string, env []string) error {
 func effectiveGlobalExcludePath(repoRoot string) (string, error) {
 	args := []string{"config", "--path", "--get", "core.excludesFile"}
 	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+	cmd.Env = nonInteractiveGitEnv()
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
 	out, err := cmd.Output()
@@ -468,6 +583,7 @@ func nonInteractiveGitEnv() []string {
 		"GIT_CONFIG_GLOBAL":                true,
 		"GIT_CONFIG_NOSYSTEM":              true,
 		"GIT_CONFIG_PARAMETERS":            true,
+		"GIT_CONFIG_SYSTEM":                true,
 		"GIT_DIR":                          true,
 		"GIT_INDEX_FILE":                   true,
 		"GIT_OBJECT_DIRECTORY":             true,
