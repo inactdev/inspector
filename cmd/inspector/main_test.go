@@ -530,6 +530,36 @@ func TestPublishGreenRefusesRemoteDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestCLI_RefusesGreenCheckThatChangesTrackedCode(t *testing.T) {
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{
+		".inspector.json": `{"check": "printf changed > tracked.txt", "image": "alpine"}`,
+		"tracked.txt":     "original",
+	})
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+
+	code, stdout, stderr := runCLI(t, dir, "--branch", "feature")
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	}
+	if strings.Contains(stdout, "green -") {
+		t.Fatalf("stdout = %q, must not bless code changed by the check", stdout)
+	}
+	if !strings.Contains(stderr, "tracked.txt") {
+		t.Fatalf("stderr = %q, want it to name the file changed by the check", stderr)
+	}
+	if stub.Request.State != "" {
+		t.Fatalf("check-written change posted status state %q", stub.Request.State)
+	}
+	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatal("check-written change published a staging ref")
+	}
+	if _, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
+		t.Fatal("check-written change published the named branch")
+	}
+}
+
 func TestPublishGreenRefusesChangedHeadBeforeRemoteSideEffects(t *testing.T) {
 	dir := newTestRepo(t, nil)
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))

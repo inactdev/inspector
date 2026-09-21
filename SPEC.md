@@ -313,7 +313,13 @@ result already attached to its exact head commit without risking a direct
 default-branch update. A builder does not publish the branch itself. On
 platforms where inspector cannot guarantee terminating a timed-out push's
 complete process tree, it still runs the local check and can return red, but a
-green result exits `2` before any remote publication step starts.
+green result exits `2` before any remote publication step starts. Before any
+remote operation, inspector also confirms that HEAD and the working tree still
+name exactly the code checked. It refuses and names tracked changes or
+non-ignored additions left by the check, while allowing ignored build output.
+This is a captain decision that may be overruled: a stamp must name the exact
+code tested; check-written code exists nowhere and could launder a green result
+for a different commit.
 
 Network failures can lose a successful response, so inspector cannot always
 know whether a failed staging push created its ref or a failed final push moved

@@ -132,6 +132,9 @@ func publishGreen(repoPath, publicationBranch string, result inspector.Result) (
 	if err != nil {
 		return "", err
 	}
+	if err := inspector.ValidatePublicationCommit(repoRoot, result.Commit); err != nil {
+		return "", err
+	}
 	target, err := resolvePublicationTarget(repoRoot)
 	if err != nil {
 		return "", err
@@ -147,9 +150,6 @@ func publishGreen(repoPath, publicationBranch string, result inspector.Result) (
 	}
 	if publicationBranch == defaultBranch {
 		return "", fmt.Errorf("publication branch %q is the remote default branch; inspector may update only a pull request branch", publicationBranch)
-	}
-	if err := inspector.ValidatePublicationCommit(repoRoot, result.Commit); err != nil {
-		return "", err
 	}
 
 	stagingRef := inspector.StagingRefForCommit(result.Commit)

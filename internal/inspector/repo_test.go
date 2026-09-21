@@ -54,12 +54,54 @@ func TestValidatePublicationBranch(t *testing.T) {
 	}
 }
 
-func TestValidatePublicationCommit(t *testing.T) {
+func TestValidatePublicationBranchRejectsCheckoutShorthand(t *testing.T) {
 	dir := newTestRepo(t, nil)
+	runGitT(t, dir, "checkout", "-q", "-b", "previous")
+	runGitT(t, dir, "checkout", "-q", "-b", "current")
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getting current directory: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("changing to test repo: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restoring current directory: %v", err)
+		}
+	})
+
+	if err := ValidatePublicationBranch("@{-1}"); err == nil {
+		t.Fatal("checkout shorthand unexpectedly accepted as a literal publication branch")
+	}
+}
+
+func TestValidatePublicationCommit(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{"tracked.txt": "original"})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 
 	if err := ValidatePublicationCommit(dir, commit); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	writeFiles(t, dir, map[string]string{"tracked.txt": "changed"})
+	if err := ValidatePublicationCommit(dir, commit); err == nil || !strings.Contains(err.Error(), "tracked.txt") {
+		t.Fatalf("error = %v, want changed tracked file to be named", err)
+	}
+	runGitT(t, dir, "reset", "--hard", "-q", "HEAD")
+	writeFiles(t, dir, map[string]string{"untracked.txt": "new"})
+	if err := ValidatePublicationCommit(dir, commit); err == nil || !strings.Contains(err.Error(), "untracked.txt") {
+		t.Fatalf("error = %v, want non-ignored untracked file to be named", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "untracked.txt")); err != nil {
+		t.Fatalf("removing untracked file: %v", err)
+	}
+	writeFiles(t, dir, map[string]string{".gitignore": "ignored.txt\n"})
+	runGitT(t, dir, "add", ".gitignore")
+	runGitT(t, dir, "commit", "-q", "-m", "ignore build output")
+	commit = strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	writeFiles(t, dir, map[string]string{"ignored.txt": "build output"})
+	if err := ValidatePublicationCommit(dir, commit); err != nil {
+		t.Fatalf("ignored build output prevented publication: %v", err)
 	}
 	runGitT(t, dir, "commit", "--allow-empty", "-q", "-m", "other")
 	if err := ValidatePublicationCommit(dir, commit); err == nil {
@@ -108,6 +150,19 @@ func TestWorkingTreeStatus_IgnoresOwnRunsDir(t *testing.T) {
 	}
 }
 
+func TestWorkingTreeStatus_IncludesTrackedRunsFile(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{RunsDirName + "/tracked.txt": "original"})
+	writeFiles(t, dir, map[string]string{RunsDirName + "/tracked.txt": "changed"})
+
+	status, err := WorkingTreeStatus(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(status, RunsDirName+"/tracked.txt") {
+		t.Fatalf("status = %q, want tracked report-directory file", status)
+	}
+}
+
 func TestWorkingTreeStatus_ModifiedFile(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{"a.txt": "hello"})
 	writeFiles(t, dir, map[string]string{"a.txt": "changed"})
@@ -127,7 +182,6 @@ func TestRemoteOwnerRepo(t *testing.T) {
 	}{
 		{"https", "https://github.com/inactdev/inspector.git", "inactdev", "inspector"},
 		{"https no dot git", "https://github.com/inactdev/inspector", "inactdev", "inspector"},
-		{"https with credential", "https://x-access-token:abc123@github.com/inactdev/inspector.git", "inactdev", "inspector"},
 		{"scp-like ssh", "git@github.com:inactdev/inspector.git", "inactdev", "inspector"},
 		{"ssh url", "ssh://git@github.com/inactdev/inspector.git", "inactdev", "inspector"},
 	}
@@ -144,6 +198,22 @@ func TestRemoteOwnerRepo(t *testing.T) {
 				t.Fatalf("RemoteOwnerRepo(%q) = (%q, %q), want (%q, %q)", tc.url, owner, repo, tc.wantOwner, tc.wantRepo)
 			}
 		})
+	}
+}
+
+func TestRemoteOwnerRepo_RejectsEmbeddedHTTPCredentials(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	runGitT(t, dir, "remote", "add", "origin", "https://x-access-token:supersecret@github.com/inactdev/inspector.git")
+
+	_, _, err := RemoteOwnerRepo(dir)
+	if err == nil {
+		t.Fatal("expected embedded HTTP credentials to be rejected")
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Fatalf("error = %q, want the embedded credential omitted", err.Error())
+	}
+	if !strings.Contains(err.Error(), "credential helper or SSH") {
+		t.Fatalf("error = %q, want safe authentication alternatives", err.Error())
 	}
 }
 
@@ -192,23 +262,49 @@ func TestRemoteOwnerRepo_NotGitHub(t *testing.T) {
 // The unrecognized-remote error goes to stderr, which for this tool ends
 // up in CI and pipeline logs, so a credential embedded in the URL must
 // not travel with it.
-func TestRemoteOwnerRepo_NotGitHubRedactsCredentials(t *testing.T) {
+func TestRemoteOwnerRepo_NotGitHubCredentialDoesNotLeak(t *testing.T) {
 	dir := newTestRepo(t, nil)
 	runGitT(t, dir, "remote", "add", "origin", "https://x-access-token:supersecret@gitlab.com/inactdev/inspector.git")
 
 	_, _, err := RemoteOwnerRepo(dir)
 	if err == nil {
-		t.Fatal("expected an error for a non-github.com remote")
+		t.Fatal("expected credential-bearing remote to be rejected")
 	}
 	if strings.Contains(err.Error(), "supersecret") {
-		t.Fatalf("error = %q, want the embedded credential redacted", err.Error())
+		t.Fatalf("error = %q, want the embedded credential omitted", err.Error())
 	}
-	if !strings.Contains(err.Error(), "gitlab.com") {
-		t.Fatalf("error = %q, want it to still name the remote host", err.Error())
+	if !strings.Contains(err.Error(), "credential helper or SSH") {
+		t.Fatalf("error = %q, want safe authentication alternatives", err.Error())
+	}
+}
+
+func TestPushRefRejectsEmbeddedHTTPCredentialsBeforeStartingGit(t *testing.T) {
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-started")
+	fakeGit := filepath.Join(binDir, "git")
+	script := "#!/bin/sh\ntouch \"$GIT_STARTED_MARKER\"\n"
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake git: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_STARTED_MARKER", marker)
+
+	err := PushRefToRemote(t.TempDir(), "https://user:supersecret@github.com/owner/repo.git", "abc", "refs/heads/test")
+	if err == nil || !strings.Contains(err.Error(), "credential helper or SSH") {
+		t.Fatalf("error = %v, want embedded-credential refusal", err)
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Fatalf("error = %q, want credential omitted", err.Error())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("git started with credentials in its process arguments")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking git start marker: %v", err)
 	}
 }
 
 func TestPushRefUsesNonInteractiveAuthentication(t *testing.T) {
+	requirePublicationPlatform(t)
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
 	script := `#!/bin/sh
@@ -228,6 +324,7 @@ case "$GIT_SSH_COMMAND" in *BatchMode=yes*) exit 0 ;; *) exit 14 ;; esac
 }
 
 func TestPushRefTimeoutKillsChildProcesses(t *testing.T) {
+	requirePublicationPlatform(t)
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
 	marker := filepath.Join(t.TempDir(), "survived")
@@ -254,6 +351,7 @@ func TestPushRefTimeoutKillsChildProcesses(t *testing.T) {
 }
 
 func TestPushRefRedactsCredentialsFromGitError(t *testing.T) {
+	requirePublicationPlatform(t)
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
 	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\necho 'fatal: https://user:supersecret@example.com/o/r.git rejected' >&2\nexit 1\n"), 0o755); err != nil {
@@ -270,6 +368,13 @@ func TestPushRefRedactsCredentialsFromGitError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "example.com") {
 		t.Fatalf("error = %q, want the remote host preserved", err.Error())
+	}
+}
+
+func requirePublicationPlatform(t *testing.T) {
+	t.Helper()
+	if err := ValidatePublicationPlatform(); err != nil {
+		t.Skipf("green publication is intentionally unavailable: %v", err)
 	}
 }
 

@@ -139,10 +139,15 @@ the architecture's explicit handoff, and a freshly pulled checkout is normally
 on the default branch, where an inferred push would bypass the pull request.
 
 The staging ref exists only so GitHub has C when it receives the status. It is
-removed after the named branch moves. Inspector confirms C is still HEAD before
-the staging push. The pull request branch never points at C until its status
-already exists, so inspector-gate's first run sees the result instead of a
-stale missing-status failure.
+removed after the named branch moves. Inspector confirms C is still HEAD and
+rechecks the working tree after the check, before any remote operation. It
+refuses and names every tracked change or non-ignored addition the check left
+behind; ignored build output does not block publication. This is a captain
+decision that may be overruled: a stamp must name the exact code tested, while
+a check-written change means the passing code exists nowhere and could launder
+a green result for a different commit. The pull request branch never points at
+C until its status already exists, so inspector-gate's first run sees the result
+instead of a stale missing-status failure.
 
 **v1 red policy, which the Client may overrule:** a red result stays local.
 inspector writes its report and returns `1`, but neither pushes a branch nor
@@ -228,7 +233,9 @@ just says whether to trust it.
 
 This needs a token: set `GITHUB_TOKEN` to one with commit-status write access
 on the repo, and `origin`'s push URL must point at the same GitHub repository
-that receives the status. Pushes are non-interactive and time out rather than
+that receives the status. HTTP push URLs must not contain embedded credentials,
+which would expose them in the push process arguments; use a credential helper
+or SSH instead. Pushes are non-interactive and time out rather than
 waiting forever for credentials or a stalled transport; a timeout kills git and
 its helper processes together. On platforms where Inspector cannot guarantee
 that complete process-tree termination, it still runs the local check and can

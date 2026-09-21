@@ -46,13 +46,17 @@ func ValidatePublicationBranch(branch string) error {
 	if strings.HasPrefix(branch, "refs/") {
 		return fmt.Errorf("branch name %q must not include a refs/ prefix", branch)
 	}
-	if _, err := runGit(".", "check-ref-format", "--branch", branch); err != nil {
+	if strings.HasPrefix(branch, "-") {
+		return fmt.Errorf("branch name %q must not begin with a hyphen", branch)
+	}
+	if _, err := runGit(".", "check-ref-format", "refs/heads/"+branch); err != nil {
 		return fmt.Errorf("%q is not a valid git branch name: %w", branch, err)
 	}
 	return nil
 }
 
-// ValidatePublicationCommit confirms the checked commit is still HEAD.
+// ValidatePublicationCommit confirms the checked commit is still HEAD and the
+// working tree still contains exactly that commit's code.
 func ValidatePublicationCommit(repoRoot, expectedCommit string) error {
 	commit, err := HeadCommit(repoRoot)
 	if err != nil {
@@ -60,6 +64,13 @@ func ValidatePublicationCommit(repoRoot, expectedCommit string) error {
 	}
 	if commit != expectedCommit {
 		return fmt.Errorf("HEAD changed during inspection: checked %s, now at %s", expectedCommit, commit)
+	}
+	status, err := WorkingTreeStatus(repoRoot)
+	if err != nil {
+		return err
+	}
+	if status != "" {
+		return fmt.Errorf("working tree changed during inspection, so the passing check was not run against commit %s exactly; commit or stash these files before retrying:\n\n%s", expectedCommit, status)
 	}
 	return nil
 }
@@ -94,6 +105,7 @@ func DeleteRefFromRemote(repoRoot, remote, ref string) error {
 // a github.com remote: HTTPS (with or without a credential prefix or a
 // trailing .git), the git@ scp-like form, and the ssh:// form.
 var githubRemoteRE = regexp.MustCompile(`^(?:https?://(?:[^@/]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])([^/]+)/(.+?)(?:\.git)?/?$`)
+var httpURLCredentialRE = regexp.MustCompile(`(?i)^https?://[^/@\s]+@`)
 
 // PublicationTarget binds the exact push URL to the GitHub repository that
 // receives the commit status.
@@ -113,12 +125,15 @@ func ResolvePublicationTarget(repoRoot string) (PublicationTarget, error) {
 	if len(urls) != 1 || strings.TrimSpace(urls[0]) == "" {
 		return PublicationTarget{}, fmt.Errorf("origin must have exactly one push URL so refs and status cannot be split across repositories; found %d", len(urls))
 	}
-	url := strings.TrimSpace(urls[0])
-	m := githubRemoteRE.FindStringSubmatch(url)
-	if m == nil {
-		return PublicationTarget{}, fmt.Errorf("origin push remote %q is not a github.com URL inspector recognizes", redactURLCredentials(url))
+	pushURL := strings.TrimSpace(urls[0])
+	if hasEmbeddedHTTPCredentials(pushURL) {
+		return PublicationTarget{}, fmt.Errorf("origin push remote contains embedded HTTP credentials; use a credential helper or SSH instead")
 	}
-	return PublicationTarget{PushURL: url, Owner: m[1], Repo: m[2]}, nil
+	m := githubRemoteRE.FindStringSubmatch(pushURL)
+	if m == nil {
+		return PublicationTarget{}, fmt.Errorf("origin push remote %q is not a github.com URL inspector recognizes", redactURLCredentials(pushURL))
+	}
+	return PublicationTarget{PushURL: pushURL, Owner: m[1], Repo: m[2]}, nil
 }
 
 // RemoteOwnerRepo returns the GitHub owner and repository name for origin's
@@ -143,19 +158,26 @@ func redactURLCredentials(url string) string {
 	return urlCredentialRE.ReplaceAllString(url, "${1}[redacted]@")
 }
 
-// WorkingTreeStatus returns the raw `git status --porcelain` output,
-// excluding RunsDirName - inspector's own report directory. Without the
-// exclusion, a repo that never gitignores RunsDirName would go dirty the
-// moment inspector wrote its first report, permanently refusing every
-// run after. A non-empty result means the working tree does not
-// otherwise match HEAD, so a check run against it cannot honestly be
-// bound to that commit.
+func hasEmbeddedHTTPCredentials(value string) bool {
+	return httpURLCredentialRE.MatchString(value)
+}
+
+// WorkingTreeStatus returns the raw `git status --porcelain` output. It omits
+// untracked files in RunsDirName, inspector's own report directory, but still
+// reports tracked changes there. Without the untracked exclusion, a repo that
+// never gitignores RunsDirName would go dirty after its first report. A
+// non-empty result means the working tree does not match HEAD, so a check run
+// against it cannot honestly be bound to that commit.
 func WorkingTreeStatus(repoRoot string) (string, error) {
-	out, err := runGit(repoRoot, "status", "--porcelain", "--", ".", ":!"+RunsDirName)
+	out, err := runGit(repoRoot, "status", "--porcelain", "--untracked-files=all", "--", ".", ":!"+RunsDirName)
 	if err != nil {
 		return "", fmt.Errorf("checking working tree status: %w", err)
 	}
-	return out, nil
+	trackedRuns, err := runGit(repoRoot, "status", "--porcelain", "--untracked-files=no", "--", RunsDirName)
+	if err != nil {
+		return "", fmt.Errorf("checking tracked report files: %w", err)
+	}
+	return out + trackedRuns, nil
 }
 
 // runGit returns only git's stdout. Its stderr is kept separate and used
@@ -168,6 +190,11 @@ func runGit(dir string, args ...string) (string, error) {
 }
 
 func runGitPush(dir string, args ...string) (string, error) {
+	for _, arg := range args {
+		if hasEmbeddedHTTPCredentials(arg) {
+			return "", fmt.Errorf("git push target contains embedded HTTP credentials; use a credential helper or SSH instead")
+		}
+	}
 	if err := ValidatePublicationPlatform(); err != nil {
 		return "", err
 	}
