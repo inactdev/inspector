@@ -59,14 +59,14 @@ func ValidatePublicationBranch(branch string) error {
 // ValidatePublicationCommit confirms the checked commit is still HEAD and the
 // working tree still contains exactly that commit's code.
 func ValidatePublicationCommit(repoRoot, expectedCommit string) error {
-	commit, err := HeadCommit(repoRoot)
+	commit, err := validationHeadCommit(repoRoot)
 	if err != nil {
 		return err
 	}
 	if commit != expectedCommit {
 		return fmt.Errorf("HEAD changed during inspection: checked %s, now at %s", expectedCommit, commit)
 	}
-	status, err := WorkingTreeStatus(repoRoot)
+	status, err := workingTreeStatusAtCommit(repoRoot, expectedCommit)
 	if err != nil {
 		return err
 	}
@@ -163,31 +163,88 @@ func hasEmbeddedHTTPCredentials(value string) bool {
 	return httpURLCredentialRE.MatchString(value)
 }
 
-// WorkingTreeStatus returns `git status --porcelain` output plus any mutable
-// index flags that could hide tracked changes. It omits untracked files in
-// RunsDirName, inspector's own report directory, but still reports tracked
+// WorkingTreeStatus returns differences between HEAD and the worktree plus any
+// mutable index flags that could hide tracked changes. It omits untracked files
+// in RunsDirName, inspector's own report directory, but still reports tracked
 // changes there. Without the untracked exclusion, a repo that never gitignores
 // RunsDirName would go dirty after its first report. A non-empty result means
 // the working tree cannot be proven to match HEAD, so a check run against it
 // cannot honestly be bound to that commit.
 func WorkingTreeStatus(repoRoot string) (string, error) {
-	out, err := runGit(repoRoot, "status", "--porcelain", "--untracked-files=all", "--", ".", ":!"+RunsDirName)
+	commit, err := validationHeadCommit(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	return workingTreeStatusAtCommit(repoRoot, commit)
+}
+
+func validationHeadCommit(repoRoot string) (string, error) {
+	out, err := runValidationGit(repoRoot, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolving HEAD: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func workingTreeStatusAtCommit(repoRoot, commit string) (string, error) {
+	objectDir, err := gitObjectDirectory(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	validationRepo, err := os.MkdirTemp("", "inspector-validation-")
+	if err != nil {
+		return "", fmt.Errorf("creating isolated validation repository: %w", err)
+	}
+	defer os.RemoveAll(validationRepo)
+
+	env := validationGitEnv()
+	initCmd := exec.Command("git", "init", "--bare", "--quiet", validationRepo)
+	initCmd.Env = env
+	if _, err := gitOutput(initCmd, []string{"init", "--bare", "--quiet", validationRepo}); err != nil {
+		return "", fmt.Errorf("creating isolated validation repository: %w", err)
+	}
+
+	env = append(env,
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES="+objectDir,
+		"GIT_INDEX_FILE="+filepath.Join(validationRepo, "validation-index"),
+	)
+	args := []string{"--git-dir=" + validationRepo, "--work-tree=" + repoRoot, "-c", "core.bare=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull}
+	readTree := exec.Command("git", append(args, "read-tree", commit)...)
+	readTree.Env = env
+	if _, err := gitOutput(readTree, []string{"read-tree", commit}); err != nil {
+		return "", fmt.Errorf("reading checked commit tree: %w", err)
+	}
+	updateHead := exec.Command("git", append(args, "update-ref", "HEAD", commit)...)
+	updateHead.Env = env
+	if _, err := gitOutput(updateHead, []string{"update-ref", "HEAD", commit}); err != nil {
+		return "", fmt.Errorf("binding isolated validation HEAD: %w", err)
+	}
+
+	statusCmd := exec.Command("git", append(args, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none", "--", ".", ":!"+RunsDirName)...)
+	statusCmd.Env = env
+	out, err := gitOutput(statusCmd, []string{"status", "--porcelain", "--untracked-files=all"})
 	if err != nil {
 		return "", fmt.Errorf("checking working tree status: %w", err)
 	}
-	trackedRuns, err := runGit(repoRoot, "status", "--porcelain", "--untracked-files=no", "--", RunsDirName)
+	trackedRunsCmd := exec.Command("git", append(args, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=none", "--", RunsDirName)...)
+	trackedRunsCmd.Env = env
+	trackedRuns, err := gitOutput(trackedRunsCmd, []string{"status", "--porcelain", "--untracked-files=no", "--", RunsDirName})
 	if err != nil {
 		return "", fmt.Errorf("checking tracked report files: %w", err)
+	}
+	indexChanges, err := runValidationGit(repoRoot, "diff-index", "--cached", "--name-status", commit, "--")
+	if err != nil {
+		return "", fmt.Errorf("checking staged changes: %w", err)
 	}
 	mutableIndex, err := mutableIndexFlags(repoRoot)
 	if err != nil {
 		return "", err
 	}
-	return out + trackedRuns + mutableIndex, nil
+	return out + trackedRuns + indexChanges + mutableIndex, nil
 }
 
 func mutableIndexFlags(repoRoot string) (string, error) {
-	out, err := runGit(repoRoot, "ls-files", "-v", "-z")
+	out, err := runValidationGit(repoRoot, "ls-files", "-v", "-z")
 	if err != nil {
 		return "", fmt.Errorf("checking mutable index flags: %w", err)
 	}
@@ -209,6 +266,13 @@ func mutableIndexFlags(repoRoot string) (string, error) {
 // commit SHA or as a dirty working tree.
 func runGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	return gitOutput(cmd, args)
+}
+
+func runValidationGit(dir string, args ...string) (string, error) {
+	gitArgs := append([]string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-C", dir}, args...)
+	cmd := exec.Command("git", gitArgs...)
+	cmd.Env = validationGitEnv()
 	return gitOutput(cmd, args)
 }
 
@@ -257,7 +321,7 @@ func runGitPush(dir string, args ...string) (string, error) {
 }
 
 func gitObjectDirectory(repoRoot string) (string, error) {
-	out, err := runGit(repoRoot, "rev-parse", "--git-path", "objects")
+	out, err := runValidationGit(repoRoot, "rev-parse", "--git-path", "objects")
 	if err != nil {
 		return "", fmt.Errorf("resolving repository object directory: %w", err)
 	}
@@ -286,10 +350,15 @@ func nonInteractiveGitEnv() []string {
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
 		"GIT_ASKPASS":                      true,
 		"GIT_COMMON_DIR":                   true,
+		"GIT_ATTR_NOSYSTEM":                true,
 		"GIT_CONFIG_COUNT":                 true,
+		"GIT_CONFIG_GLOBAL":                true,
+		"GIT_CONFIG_NOSYSTEM":              true,
 		"GIT_CONFIG_PARAMETERS":            true,
 		"GIT_DIR":                          true,
+		"GIT_INDEX_FILE":                   true,
 		"GIT_OBJECT_DIRECTORY":             true,
+		"GIT_OPTIONAL_LOCKS":               true,
 		"GIT_SSH_COMMAND":                  true,
 		"GIT_TERMINAL_PROMPT":              true,
 		"GIT_WORK_TREE":                    true,
@@ -307,6 +376,15 @@ func nonInteractiveGitEnv() []string {
 		"GIT_SSH_COMMAND=ssh -oBatchMode=yes",
 		"GIT_TERMINAL_PROMPT=0",
 		"GCM_INTERACTIVE=Never",
+	)
+}
+
+func validationGitEnv() []string {
+	return append(nonInteractiveGitEnv(),
+		"GIT_ATTR_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_OPTIONAL_LOCKS=0",
 	)
 }
 

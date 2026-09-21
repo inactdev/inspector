@@ -26,6 +26,13 @@ func requireDocker(t *testing.T) {
 	}
 }
 
+func requirePublicationPlatform(t *testing.T) {
+	t.Helper()
+	if err := inspector.ValidatePublicationPlatform(); err != nil {
+		t.Skipf("green publication is intentionally unavailable: %v", err)
+	}
+}
+
 func newTestRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -160,6 +167,7 @@ func runCLI(t *testing.T, dir string, args ...string) (exitCode int, stdout, std
 }
 
 func TestCLI_GreenPublishesStatusBeforeBranch(t *testing.T) {
+	requirePublicationPlatform(t)
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	runGitT(t, dir, "checkout", "-q", "-b", "local-checkout")
@@ -305,6 +313,7 @@ func TestCLI_SignalKilledCheckExitsRefused(t *testing.T) {
 }
 
 func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
+	requirePublicationPlatform(t)
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	if err := os.WriteFile(filepath.Join(dir, ".inspector"), []byte("occupied"), 0o644); err != nil {
@@ -328,6 +337,7 @@ func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
 }
 
 func TestCLI_ClaimTextIsAccepted(t *testing.T) {
+	requirePublicationPlatform(t)
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
@@ -344,6 +354,7 @@ func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 // loudly and never exit as if it had succeeded.
 
 func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
+	requirePublicationPlatform(t)
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	if err := os.WriteFile(filepath.Join(dir, ".inspector"), []byte("occupied"), 0o644); err != nil {
@@ -374,6 +385,7 @@ func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 }
 
 func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
+	requirePublicationPlatform(t)
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	t.Setenv("GITHUB_TOKEN", "test-token")
@@ -388,6 +400,7 @@ func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
 }
 
 func TestCLI_StatusAPIRefusalFailsLoudly(t *testing.T) {
+	requirePublicationPlatform(t)
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
@@ -418,6 +431,7 @@ func TestCLI_StatusAPIRefusalFailsLoudly(t *testing.T) {
 }
 
 func TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails(t *testing.T) {
+	requirePublicationPlatform(t)
 	dir := newTestRepo(t, nil)
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	branch := "feature"
@@ -448,6 +462,7 @@ func TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails(t *testing.T) {
 }
 
 func TestPublishGreenReportsLostStatusResponseAsUnconfirmed(t *testing.T) {
+	requirePublicationPlatform(t)
 	dir := newTestRepo(t, nil)
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	remote := newBareTestRemote(t)
@@ -511,6 +526,7 @@ func TestPublishGreenRefusesUnsupportedPlatformBeforePublication(t *testing.T) {
 }
 
 func TestPublishGreenRefusesRemoteDefaultBranch(t *testing.T) {
+	requirePublicationPlatform(t)
 	dir := newTestRepo(t, nil)
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
@@ -531,6 +547,7 @@ func TestPublishGreenRefusesRemoteDefaultBranch(t *testing.T) {
 }
 
 func TestCLI_RefusesGreenCheckThatChangesTrackedCode(t *testing.T) {
+	requirePublicationPlatform(t)
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
 		".inspector.json": `{"check": "printf changed > tracked.txt", "image": "alpine"}`,
@@ -561,6 +578,7 @@ func TestCLI_RefusesGreenCheckThatChangesTrackedCode(t *testing.T) {
 }
 
 func TestPublishGreenRefusesRetargetedOriginBeforeRemoteSideEffects(t *testing.T) {
+	requirePublicationPlatform(t)
 	dir := newTestRepo(t, nil)
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	runGitT(t, dir, "remote", "add", "origin", "https://github.com/owner/original.git")
@@ -575,6 +593,7 @@ func TestPublishGreenRefusesRetargetedOriginBeforeRemoteSideEffects(t *testing.T
 }
 
 func TestPublishGreenRefusesChangedHeadBeforeRemoteSideEffects(t *testing.T) {
+	requirePublicationPlatform(t)
 	dir := newTestRepo(t, nil)
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)

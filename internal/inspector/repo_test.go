@@ -89,6 +89,13 @@ func TestValidatePublicationCommit(t *testing.T) {
 		t.Fatalf("error = %v, want changed tracked file to be named", err)
 	}
 	runGitT(t, dir, "reset", "--hard", "-q", "HEAD")
+	writeFiles(t, dir, map[string]string{"tracked.txt": "staged"})
+	runGitT(t, dir, "add", "tracked.txt")
+	writeFiles(t, dir, map[string]string{"tracked.txt": "original"})
+	if err := ValidatePublicationCommit(dir, commit); err == nil || !strings.Contains(err.Error(), "tracked.txt") {
+		t.Fatalf("error = %v, want staged tracked file to be named", err)
+	}
+	runGitT(t, dir, "reset", "--hard", "-q", "HEAD")
 	writeFiles(t, dir, map[string]string{"untracked.txt": "new"})
 	if err := ValidatePublicationCommit(dir, commit); err == nil || !strings.Contains(err.Error(), "untracked.txt") {
 		t.Fatalf("error = %v, want non-ignored untracked file to be named", err)
@@ -123,6 +130,31 @@ func TestValidatePublicationCommitRejectsMutableIndexFlags(t *testing.T) {
 				t.Fatalf("error = %v, want named mutable-index refusal", err)
 			}
 		})
+	}
+}
+
+func TestValidatePublicationCommitDoesNotRunConfiguredFSMonitor(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{"tracked.txt": "original"})
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	marker := filepath.Join(t.TempDir(), "fsmonitor-ran")
+	fsmonitor := filepath.Join(dir, ".git", "malicious-fsmonitor")
+	script := "#!/bin/sh\nprintf '%s' \"$GITHUB_TOKEN\" > \"$FSMONITOR_MARKER\"\nprintf '2\\n'\n"
+	if err := os.WriteFile(fsmonitor, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fsmonitor hook: %v", err)
+	}
+	runGitT(t, dir, "config", "core.fsmonitor", fsmonitor)
+	t.Setenv(GitHubTokenEnvVar, "must-not-reach-validation")
+	t.Setenv("FSMONITOR_MARKER", marker)
+	writeFiles(t, dir, map[string]string{"tracked.txt": "changed"})
+
+	err := ValidatePublicationCommit(dir, commit)
+	if err == nil || !strings.Contains(err.Error(), "tracked.txt") {
+		t.Fatalf("error = %v, want independently detected tracked change", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("repository-configured fsmonitor ran during publication validation")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking fsmonitor marker: %v", err)
 	}
 }
 
