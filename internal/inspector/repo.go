@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,22 +60,39 @@ func ValidatePublicationBranch(branch string) error {
 }
 
 type trackedWorktreeEntry struct {
-	path        string
-	mode        os.FileMode
-	digest      [sha256.Size]byte
-	missing     bool
-	gitlink     bool
-	gitlinkHead string
+	path            string
+	mode            os.FileMode
+	digest          [sha256.Size]byte
+	missing         bool
+	gitlink         bool
+	gitlinkCommit   string
+	submodulePolicy *ValidationPolicy
+}
+
+type validationIgnoreFile struct {
+	path     string
+	contents []byte
 }
 
 type ValidationPolicy struct {
-	objectFormat   string
-	globalExcludes []byte
-	infoExcludes   []byte
-	trackedTree    []trackedWorktreeEntry
+	commit          string
+	objectFormat    string
+	globalExcludes  []byte
+	infoExcludes    []byte
+	ignoreFiles     []validationIgnoreFile
+	trackedTree     []trackedWorktreeEntry
+	excludeRunsPath bool
 }
 
 func CaptureValidationPolicy(repoRoot string) (ValidationPolicy, error) {
+	return captureValidationPolicy(repoRoot, true)
+}
+
+func captureValidationPolicy(repoRoot string, excludeRunsPath bool) (ValidationPolicy, error) {
+	commit, err := validationHeadCommit(repoRoot)
+	if err != nil {
+		return ValidationPolicy{}, err
+	}
 	objectFormat, err := gitObjectFormat(repoRoot)
 	if err != nil {
 		return ValidationPolicy{}, err
@@ -99,17 +117,34 @@ func CaptureValidationPolicy(repoRoot string) (ValidationPolicy, error) {
 	if err != nil {
 		return ValidationPolicy{}, err
 	}
+	ignoreFiles, err := captureIgnoreFiles(repoRoot, trackedTree)
+	if err != nil {
+		return ValidationPolicy{}, err
+	}
+	currentCommit, err := validationHeadCommit(repoRoot)
+	if err != nil {
+		return ValidationPolicy{}, err
+	}
+	if currentCommit != commit {
+		return ValidationPolicy{}, fmt.Errorf("HEAD changed while validation state was captured: started at %s, ended at %s", commit, currentCommit)
+	}
 	return ValidationPolicy{
-		objectFormat:   objectFormat,
-		globalExcludes: globalExcludes,
-		infoExcludes:   infoExcludes,
-		trackedTree:    trackedTree,
+		commit:          commit,
+		objectFormat:    objectFormat,
+		globalExcludes:  globalExcludes,
+		infoExcludes:    infoExcludes,
+		ignoreFiles:     ignoreFiles,
+		trackedTree:     trackedTree,
+		excludeRunsPath: excludeRunsPath,
 	}, nil
 }
 
 // ValidatePublicationCommit confirms the checked commit is still HEAD and the
 // working tree still contains exactly that commit's code.
 func ValidatePublicationCommit(repoRoot, expectedCommit string, policy ValidationPolicy) error {
+	if policy.commit != expectedCommit {
+		return fmt.Errorf("validation state was captured for commit %s, but inspector checked %s", policy.commit, expectedCommit)
+	}
 	commit, err := validationHeadCommit(repoRoot)
 	if err != nil {
 		return err
@@ -245,6 +280,9 @@ func validationHeadCommit(repoRoot string) (string, error) {
 }
 
 func workingTreeStatusAtCommit(repoRoot, commit string, policy ValidationPolicy) (string, error) {
+	if policy.commit != commit {
+		return "", fmt.Errorf("validation state for %s cannot validate commit %s", policy.commit, commit)
+	}
 	trackedChanges, err := compareTrackedWorktree(repoRoot, policy.trackedTree)
 	if err != nil {
 		return "", err
@@ -279,7 +317,7 @@ func captureTrackedWorktree(repoRoot string) ([]trackedWorktreeEntry, error) {
 		if !ok || len(fields) != 3 || fields[2] != "0" {
 			return nil, fmt.Errorf("cannot snapshot unresolved index entry %q", record)
 		}
-		entry, err := snapshotTrackedPath(repoRoot, path, fields[0] == "160000")
+		entry, err := snapshotTrackedPath(repoRoot, path, fields[0] == "160000", fields[1])
 		if err != nil {
 			return nil, err
 		}
@@ -288,7 +326,26 @@ func captureTrackedWorktree(repoRoot string) ([]trackedWorktreeEntry, error) {
 	return snapshot, nil
 }
 
-func snapshotTrackedPath(repoRoot, path string, gitlink bool) (trackedWorktreeEntry, error) {
+func snapshotTrackedPath(repoRoot, path string, gitlink bool, gitlinkCommit string) (trackedWorktreeEntry, error) {
+	entry, err := readTrackedPath(repoRoot, path, gitlink)
+	if err != nil {
+		return trackedWorktreeEntry{}, err
+	}
+	if !gitlink || entry.missing {
+		return entry, nil
+	}
+	if entry.gitlinkCommit != gitlinkCommit {
+		return trackedWorktreeEntry{}, fmt.Errorf("tracked submodule %s is at %s instead of recorded commit %s", path, entry.gitlinkCommit, gitlinkCommit)
+	}
+	policy, err := captureValidationPolicy(filepath.Join(repoRoot, filepath.FromSlash(path)), false)
+	if err != nil {
+		return trackedWorktreeEntry{}, fmt.Errorf("capturing tracked submodule %s: %w", path, err)
+	}
+	entry.submodulePolicy = &policy
+	return entry, nil
+}
+
+func readTrackedPath(repoRoot, path string, gitlink bool) (trackedWorktreeEntry, error) {
 	entry := trackedWorktreeEntry{path: path, gitlink: gitlink}
 	fullPath := filepath.Join(repoRoot, filepath.FromSlash(path))
 	info, err := os.Lstat(fullPath)
@@ -301,49 +358,126 @@ func snapshotTrackedPath(repoRoot, path string, gitlink bool) (trackedWorktreeEn
 	}
 	entry.mode = info.Mode() & (os.ModeType | 0o111)
 	if gitlink {
+		if !info.IsDir() {
+			return trackedWorktreeEntry{}, fmt.Errorf("tracked submodule %s is not a directory", path)
+		}
 		head, err := runValidationGit(fullPath, "rev-parse", "HEAD")
 		if err != nil {
 			return trackedWorktreeEntry{}, fmt.Errorf("reading tracked submodule %s: %w", path, err)
 		}
-		entry.gitlinkHead = strings.TrimSpace(head)
+		entry.gitlinkCommit = strings.TrimSpace(head)
 		return entry, nil
 	}
-	var contents []byte
+	hash := sha256.New()
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, err := os.Readlink(fullPath)
 		if err != nil {
 			return trackedWorktreeEntry{}, fmt.Errorf("reading tracked symlink %s: %w", path, err)
 		}
-		contents = []byte(target)
+		_, _ = hash.Write([]byte(target))
 	} else {
 		if !info.Mode().IsRegular() {
 			return trackedWorktreeEntry{}, fmt.Errorf("tracked path %s is not a regular file or symlink", path)
 		}
-		contents, err = os.ReadFile(fullPath)
+		file, err := os.Open(fullPath)
 		if err != nil {
 			return trackedWorktreeEntry{}, fmt.Errorf("reading tracked file %s: %w", path, err)
 		}
+		_, copyErr := io.Copy(hash, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return trackedWorktreeEntry{}, fmt.Errorf("reading tracked file %s: %w", path, copyErr)
+		}
+		if closeErr != nil {
+			return trackedWorktreeEntry{}, fmt.Errorf("closing tracked file %s: %w", path, closeErr)
+		}
 	}
-	entry.digest = sha256.Sum256(contents)
+	copy(entry.digest[:], hash.Sum(nil))
 	return entry, nil
 }
 
 func compareTrackedWorktree(repoRoot string, snapshot []trackedWorktreeEntry) (string, error) {
 	var changes strings.Builder
 	for _, expected := range snapshot {
-		actual, err := snapshotTrackedPath(repoRoot, expected.path, expected.gitlink)
+		actual, err := readTrackedPath(repoRoot, expected.path, expected.gitlink)
 		if err != nil {
 			return "", err
 		}
-		if actual != expected {
+		if !sameTrackedPath(actual, expected) {
 			code := " M "
 			if actual.missing {
 				code = " D "
 			}
 			fmt.Fprintf(&changes, "%s%s\n", code, expected.path)
+			continue
+		}
+		if expected.submodulePolicy != nil {
+			submoduleRoot := filepath.Join(repoRoot, filepath.FromSlash(expected.path))
+			submoduleStatus, err := workingTreeStatusAtCommit(submoduleRoot, expected.gitlinkCommit, *expected.submodulePolicy)
+			if err != nil {
+				return "", fmt.Errorf("validating tracked submodule %s: %w", expected.path, err)
+			}
+			changes.WriteString(prefixStatusPaths(submoduleStatus, expected.path+"/"))
 		}
 	}
 	return changes.String(), nil
+}
+
+func sameTrackedPath(actual, expected trackedWorktreeEntry) bool {
+	return actual.path == expected.path &&
+		actual.mode == expected.mode &&
+		actual.digest == expected.digest &&
+		actual.missing == expected.missing &&
+		actual.gitlink == expected.gitlink &&
+		actual.gitlinkCommit == expected.gitlinkCommit
+}
+
+func prefixStatusPaths(status, prefix string) string {
+	var prefixed strings.Builder
+	for _, line := range strings.Split(status, "\n") {
+		if line == "" {
+			continue
+		}
+		switch {
+		case len(line) >= 3 && line[2] == ' ':
+			fmt.Fprintf(&prefixed, "%s%s%s\n", line[:3], prefix, line[3:])
+		case strings.HasPrefix(line, "mutable index flag hides tracked content: "):
+			fmt.Fprintf(&prefixed, "mutable index flag hides tracked content: %s%s\n", prefix, strings.TrimPrefix(line, "mutable index flag hides tracked content: "))
+		case strings.Contains(line, "\t"):
+			before, path, _ := strings.Cut(line, "\t")
+			fmt.Fprintf(&prefixed, "%s\t%s%s\n", before, prefix, path)
+		default:
+			fmt.Fprintf(&prefixed, "%s: %s\n", strings.TrimSuffix(prefix, "/"), line)
+		}
+	}
+	return prefixed.String()
+}
+
+func captureIgnoreFiles(repoRoot string, trackedTree []trackedWorktreeEntry) ([]validationIgnoreFile, error) {
+	paths := make(map[string]bool)
+	for _, entry := range trackedTree {
+		if filepath.Base(filepath.FromSlash(entry.path)) == ".gitignore" && !entry.missing && !entry.gitlink {
+			paths[entry.path] = true
+		}
+	}
+	out, err := runValidationGit(repoRoot, "ls-files", "--others", "-z", "--", ".gitignore", ":(glob)**/.gitignore")
+	if err != nil {
+		return nil, fmt.Errorf("listing untracked exclude files: %w", err)
+	}
+	for _, path := range strings.Split(out, "\x00") {
+		if path != "" {
+			paths[path] = true
+		}
+	}
+	ignoreFiles := make([]validationIgnoreFile, 0, len(paths))
+	for path := range paths {
+		contents, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(path)))
+		if err != nil {
+			return nil, fmt.Errorf("reading exclude file %s: %w", path, err)
+		}
+		ignoreFiles = append(ignoreFiles, validationIgnoreFile{path: path, contents: contents})
+	}
+	return ignoreFiles, nil
 }
 
 func isolatedUntrackedFiles(repoRoot, commit string, policy ValidationPolicy) (string, error) {
@@ -372,26 +506,81 @@ func isolatedUntrackedFiles(repoRoot, commit string, policy ValidationPolicy) (s
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES="+objectDir,
 		"GIT_INDEX_FILE="+filepath.Join(validationRepo, "validation-index"),
 	)
-	args := []string{"--git-dir=" + validationRepo, "--work-tree=" + repoRoot, "-c", "core.bare=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-c", "core.excludesFile=" + globalExcludesPath}
-	readTree := exec.Command("git", append(args, "read-tree", commit)...)
+	baseArgs := []string{"--git-dir=" + validationRepo, "-c", "core.bare=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-c", "core.excludesFile=" + globalExcludesPath}
+	readTree := exec.Command("git", append(baseArgs, "read-tree", commit)...)
 	readTree.Env = env
 	if _, err := gitOutput(readTree, []string{"read-tree", commit}); err != nil {
 		return "", fmt.Errorf("reading checked commit tree: %w", err)
 	}
-	untrackedCmd := exec.Command("git", append(args, "ls-files", "--others", "--exclude-standard", "-z", "--", ".")...)
+	currentArgs := append(append([]string{}, baseArgs...), "--work-tree="+repoRoot)
+	untrackedCmd := exec.Command("git", append(currentArgs, "ls-files", "--others", "-z", "--", ".")...)
 	untrackedCmd.Env = env
-	out, err := gitOutput(untrackedCmd, []string{"ls-files", "--others", "--exclude-standard", "-z"})
+	out, err := gitOutput(untrackedCmd, []string{"ls-files", "--others", "-z"})
 	if err != nil {
-		return "", fmt.Errorf("checking untracked files: %w", err)
+		return "", fmt.Errorf("listing untracked files: %w", err)
+	}
+	candidates := splitNullPaths(out)
+	if len(candidates) == 0 {
+		return "", nil
+	}
+
+	frozenWorktree, err := os.MkdirTemp("", "inspector-validation-worktree-")
+	if err != nil {
+		return "", fmt.Errorf("creating frozen validation worktree: %w", err)
+	}
+	defer os.RemoveAll(frozenWorktree)
+	for _, path := range candidates {
+		if err := writeFrozenValidationFile(frozenWorktree, path, nil); err != nil {
+			return "", err
+		}
+	}
+	for _, ignoreFile := range policy.ignoreFiles {
+		if err := writeFrozenValidationFile(frozenWorktree, ignoreFile.path, ignoreFile.contents); err != nil {
+			return "", err
+		}
+	}
+
+	frozenArgs := append(append([]string{}, baseArgs...), "--work-tree="+frozenWorktree)
+	unignoredCmd := exec.Command("git", append(frozenArgs, "ls-files", "--others", "--exclude-standard", "-z", "--", ".")...)
+	unignoredCmd.Env = env
+	out, err = gitOutput(unignoredCmd, []string{"ls-files", "--others", "--exclude-standard", "-z"})
+	if err != nil {
+		return "", fmt.Errorf("checking untracked files against captured ignore rules: %w", err)
 	}
 	var status strings.Builder
-	for _, path := range strings.Split(out, "\x00") {
-		if path == "" || path == RunsDirName || strings.HasPrefix(path, RunsDirName+"/") {
+	for _, path := range splitNullPaths(out) {
+		if policy.excludeRunsPath && (path == RunsDirName || strings.HasPrefix(path, RunsDirName+"/")) {
 			continue
 		}
 		fmt.Fprintf(&status, "?? %s\n", path)
 	}
 	return status.String(), nil
+}
+
+func splitNullPaths(out string) []string {
+	var paths []string
+	for _, path := range strings.Split(out, "\x00") {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+func writeFrozenValidationFile(root, path string, contents []byte) error {
+	localPath := filepath.FromSlash(path)
+	cleanPath := filepath.Clean(localPath)
+	if filepath.IsAbs(localPath) || cleanPath == "." || cleanPath == ".." || strings.HasPrefix(cleanPath, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("invalid repository path %q while freezing validation rules", path)
+	}
+	fullPath := filepath.Join(root, localPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o700); err != nil {
+		return fmt.Errorf("creating frozen validation directory for %s: %w", path, err)
+	}
+	if err := os.WriteFile(fullPath, contents, 0o600); err != nil {
+		return fmt.Errorf("writing frozen validation path %s: %w", path, err)
+	}
+	return nil
 }
 
 func mutableIndexFlags(repoRoot string) (string, error) {

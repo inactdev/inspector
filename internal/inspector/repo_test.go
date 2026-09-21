@@ -125,6 +125,59 @@ func TestValidatePublicationCommit(t *testing.T) {
 	}
 }
 
+func TestValidatePublicationCommitRejectsPolicyFromDifferentCommit(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{"tracked.txt": "original"})
+	policy, err := CaptureValidationPolicy(dir)
+	if err != nil {
+		t.Fatalf("capturing validation policy: %v", err)
+	}
+	writeFiles(t, dir, map[string]string{"added.txt": "new commit"})
+	runGitT(t, dir, "add", "added.txt")
+	runGitT(t, dir, "commit", "-q", "-m", "move head")
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+
+	err = ValidatePublicationCommit(dir, commit, policy)
+	if err == nil || !strings.Contains(err.Error(), "captured for commit") {
+		t.Fatalf("error = %v, want validation-state commit mismatch", err)
+	}
+}
+
+func TestValidatePublicationCommitRejectsChangedSubmoduleWorktree(t *testing.T) {
+	submodule := newTestRepo(t, map[string]string{"tracked.txt": "original"})
+	dir := newTestRepo(t, nil)
+	runGitT(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", submodule, "modules/child")
+	runGitT(t, dir, "commit", "-q", "-m", "add submodule")
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	policy, err := CaptureValidationPolicy(dir)
+	if err != nil {
+		t.Fatalf("capturing validation policy: %v", err)
+	}
+	writeFiles(t, filepath.Join(dir, "modules", "child"), map[string]string{"tracked.txt": "changed by check"})
+
+	err = ValidatePublicationCommit(dir, commit, policy)
+	if err == nil || !strings.Contains(err.Error(), "modules/child/tracked.txt") {
+		t.Fatalf("error = %v, want changed submodule file to be named", err)
+	}
+}
+
+func TestValidatePublicationCommitUsesFrozenGitignoreFiles(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	policy, err := CaptureValidationPolicy(dir)
+	if err != nil {
+		t.Fatalf("capturing validation policy: %v", err)
+	}
+	writeFiles(t, dir, map[string]string{
+		"generated/.gitignore": "*\n",
+		"generated/input.txt":  "used by check",
+	})
+
+	err = ValidatePublicationCommit(dir, commit, policy)
+	if err == nil || !strings.Contains(err.Error(), "generated/input.txt") {
+		t.Fatalf("error = %v, want check-created ignore rules unable to hide additions", err)
+	}
+}
+
 func TestValidatePublicationCommitRejectsMutableIndexFlags(t *testing.T) {
 	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
 		t.Run(flag, func(t *testing.T) {
