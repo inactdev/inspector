@@ -158,22 +158,21 @@ This runs the configured check command against the repo's current HEAD and
 prints green or red, always naming the exact commit it inspected - that's how
 a caller compares what inspector blessed against what it expects.
 
-Exit codes reserve `0`, `1`, and `2` for verdicts only:
+Exit codes reserve `0`, `1`, and `2` for verdict attempts:
 
 - `0` green
 - `1` red
-- `2` refused - inspector tried to reach a verdict and couldn't: no check
-  command or image configured, no usable container runtime, a dirty working
-  tree, a platform where publication cannot safely terminate a timed-out git
-  process tree, a check command that ran past its timeout or was killed by a
-  signal before it could finish on its own (the OOM killer, an external kill,
-  inspector's own deadline - it never judged the code, so its exit status is
-  not a verdict either way), an infrastructure failure, or a local green that
-  inspector could not publish completely (see "Recording the result" below) -
-  an incomplete result proves nothing to the gate, so it isn't a verdict
-  either. An ordinary refusal makes no remote change; an incomplete green
-  publication may leave the staging ref or status described below. Never treat
-  `2` as red.
+- `2` no verdict, with one of two visibly different causes:
+  - **refused** - inspector could not reach a local verdict because no check
+    command or image was configured, no usable container runtime existed, the
+    working tree was dirty, the check timed out or was killed, or infrastructure
+    failed. A refusal never attempts to push or publish.
+  - **incomplete green publication** - the local check passed, but inspector
+    could not safely start publication on this platform or could not confirm the
+    complete staging, status, and branch sequence. A publication attempt may
+    have left the staging ref, status, or branch state described below.
+
+  Neither cause is red. Never treat `2` as red.
 
   A signal kill is detected two ways, because a compound check command like
   `npm test && npm run lint` doesn't show it the same way a plain one does:
@@ -214,10 +213,9 @@ writes `.inspector/.gitignore` containing `*`, so reports stay out of git withou
 you editing anything; an existing `.inspector/.gitignore` is left alone.
 
 Because the report is notes and not authority, a report that can't be saved
-never changes an answer inspector already has. When the check command reached a
-real green or red and only the save failed, inspector prints a loud warning to
-stderr naming where the save failed, and still exits `0` or `1` with that
-verdict - it does not become a refusal.
+never changes the local check result. Inspector prints a loud warning to stderr
+naming where the save failed, then still returns red or proceeds with green
+publication. A report failure alone does not cause a refusal.
 
 ### Recording the result
 
@@ -233,32 +231,35 @@ on the repo, and `origin`'s push URL must point at the same GitHub repository
 that receives the status. Pushes are non-interactive and time out rather than
 waiting forever for credentials or a stalled transport; a timeout kills git and
 its helper processes together. On platforms where Inspector cannot guarantee
-that complete process-tree termination, it refuses before running checks or
-starting any publication step. Posting is not optional - a missing token, an
-unresolvable remote, a failed staging push, or
-GitHub refusing the request all fail loudly and exit `2`, even when the local
-check passed. A real local green that inspector could not publish in full is
-worth nothing to a reader who can only see GitHub, so it must never look like
-success.
+that complete process-tree termination, it still runs the local check and can
+return red, but refuses a green publication before starting any remote step.
+Posting is not optional - a missing token, an unresolvable remote, a failed
+staging push, or GitHub refusing the request all fail loudly and exit `2`, even
+when the local check passed. A real local green that inspector could not
+publish in full is worth nothing to a reader who can only see GitHub, so it
+must never look like success.
 
 Once publication starts, inspector does not try to erase partial remote state.
 A failed network operation can mean either that GitHub rejected the operation or
 that GitHub completed it but the client lost the response. Inspector therefore
 reports uncertain remote state honestly: a failed staging push may have created
-the staging ref; a failed status post may have recorded the status; and a failed
-final push may have moved the named branch. It does state which later operations
-were never attempted. These incomplete publications are distinct from an
-ordinary refusal and exit `2`. This is the captain's deliberate policy and may
-be overruled: compensation cannot make a partially published sequence atomic.
+the staging ref, and a failed final push may have moved the named branch. An
+explicit GitHub rejection confirms that no status was posted. If the status
+request was written but its response was lost, inspector reports the distinct
+state **stamp sent, outcome unconfirmed** - never green, never silent, and
+separate from both confirmed-posted and not-attempted. It also states which later
+operations were never attempted. These incomplete publications are distinct
+from a refusal and exit `2`. This is the captain's deliberate policy and may be
+overruled: compensation cannot make a partially published sequence atomic.
 
 What a reader should conclude:
 
 - **Green status** - inspector ran this exact commit's checks and they passed.
 - **Red status** - a manually recorded failure. v1 inspector does not publish
   red work or post this status itself.
-- **No status at all** - this commit has not been approved, or inspector
-  reached a verdict locally but could not record its green status. Read the
-  same as red. A status from an earlier commit does not carry forward.
+- **No confirmed status** - this commit has not been approved, or inspector
+  could not confirm its green stamp. Read the same as red. A status from an
+  earlier commit does not carry forward.
 
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -175,9 +177,20 @@ func PostCommitStatus(opts PostStatusOptions) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "inspector")
 
+	var requestWritten atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				requestWritten.Store(true)
+			}
+		},
+	}))
 	resp, err := statusHTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("posting commit status to %s: %w", base, err)
+		if requestWritten.Load() {
+			return fmt.Errorf("posting commit status to %s failed after the request was written: stamp sent, outcome unconfirmed: %w", base, err)
+		}
+		return fmt.Errorf("status stamp not sent; posting commit status to %s: %w", base, err)
 	}
 	defer resp.Body.Close()
 

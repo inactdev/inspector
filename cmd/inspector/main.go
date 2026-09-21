@@ -12,15 +12,14 @@ import (
 	"github.com/inactdev/inspector/internal/inspector"
 )
 
-// Exit codes reserve 0, 1, and 2 for verdicts only: 0 green, 1 red, 2
-// refused (inspector tried to reach a verdict and could not - see
-// inspector.Refused for those causes, plus any infrastructure failure
-// Run reports as an error). A local green that inspector could not
-// publish in full - staging it remotely, recording its status, then
-// moving the branch - also exits 2: an incomplete publication proves
-// nothing to inspector-gate, so it is not a verdict either. exitUsage
-// is for everything that is not a verdict
-// attempt at all - --help, an unrecognized flag, bad usage - so a
+// Exit codes reserve 0, 1, and 2 for verdict attempts: 0 green, 1 red,
+// and 2 no verdict. A refusal uses 2 when inspector could not reach a
+// verdict and never attempts to push or publish. A local green that
+// inspector could not publish in full - staging it remotely, recording
+// its status, then moving the branch - also uses 2, but is reported as
+// an incomplete publication rather than a refusal. exitUsage is for
+// everything that is not a verdict attempt at all - --help, an
+// unrecognized flag, bad usage - so a
 // caller can never mistake a help request for a result. 64 follows the
 // BSD sysexits.h convention for a command-line usage error (EX_USAGE).
 const (
@@ -39,6 +38,7 @@ func main() {
 // the network.
 var githubAPIBaseURL string
 var resolvePublicationTarget = inspector.ResolvePublicationTarget
+var validatePublicationPlatform = inspector.ValidatePublicationPlatform
 
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("inspector", flag.ContinueOnError)
@@ -70,11 +70,6 @@ flags:
 		fmt.Fprintf(stderr, "refused: invalid publication branch: %v\n", err)
 		return exitRefused
 	}
-	if err := inspector.ValidatePublicationPlatform(); err != nil {
-		fmt.Fprintf(stderr, "refused: %v\n", err)
-		return exitRefused
-	}
-
 	opts := inspector.Options{
 		RepoPath: *repoPath,
 		Claim:    strings.Join(fs.Args(), " "),
@@ -122,6 +117,9 @@ flags:
 // checked commit remotely, record its green status, then move the branch.
 // The stage is a non-branch ref and is deleted once the branch moves.
 func publishGreen(repoPath, publicationBranch string, result inspector.Result) (cleanupWarning string, err error) {
+	if err := validatePublicationPlatform(); err != nil {
+		return "", err
+	}
 	if err := inspector.ValidatePublicationBranch(publicationBranch); err != nil {
 		return "", err
 	}
@@ -172,7 +170,7 @@ func publishGreen(repoPath, publicationBranch string, result inspector.Result) (
 		Token:       token,
 		APIBaseURL:  githubAPIBaseURL,
 	}); err != nil {
-		return "", fmt.Errorf("recording the green status failed; whether GitHub accepted it is unknown, temporary staging ref %s was created, and branch %q was not attempted: %w", stagingRef, publicationBranch, err)
+		return "", fmt.Errorf("recording the green status did not complete; temporary staging ref %s was created, and branch %q was not attempted: %w", stagingRef, publicationBranch, err)
 	}
 
 	branchRef := "refs/heads/" + publicationBranch
@@ -191,7 +189,7 @@ func publishGreen(repoPath, publicationBranch string, result inspector.Result) (
 func printPublicationFailure(stderr io.Writer, err error) {
 	fmt.Fprintf(stderr, "\n%s\ninspector: could not complete green publication: %v\n"+
 		"the local check passed, but the pull-request branch was not confirmed published after the required staging and status steps.\n"+
-		"this is an incomplete publication, not a red verdict or an ordinary refusal.\n%s\n\n",
+		"this is an incomplete publication, not a red verdict or a refusal.\n%s\n\n",
 		warningBar, err, warningBar)
 }
 

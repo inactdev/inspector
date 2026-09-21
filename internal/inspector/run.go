@@ -204,14 +204,14 @@ func Run(opts Options) (Result, error) {
 			result.ReportPath = reportPath
 		}
 	case writeErr != nil:
-		// outcome is Green or Red here - a real verdict already reached.
+		// outcome is Green or Red here - a real local check result.
 		// Discarding it because its notes failed to save would lose the
 		// answer over losing the footnote; this file is never authority,
-		// so the verdict stands regardless and the failure is surfaced as
-		// a loud warning instead.
+		// so the result stands and the failure is surfaced as a loud
+		// warning instead.
 		result.Warning = fmt.Sprintf(
-			"the %s verdict above is real, but its local report could not be saved: %v\n"+
-				"the report is notes only, never authority - the verdict stands regardless.",
+			"the local %s check result is real, but its report could not be saved: %v\n"+
+				"the report is notes only, never authority - publication and the final exit code still determine the verdict.",
 			outcome, writeErr,
 		)
 	default:

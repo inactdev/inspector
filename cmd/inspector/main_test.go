@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -204,6 +205,9 @@ func TestCLI_RedDoesNotPublish(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false", "image": "alpine"}`})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	previousValidatePublicationPlatform := validatePublicationPlatform
+	validatePublicationPlatform = func() error { return errors.New("publication unsupported") }
+	t.Cleanup(func() { validatePublicationPlatform = previousValidatePublicationPlatform })
 
 	code, stdout, _ := runCLI(t, dir, "--branch", "feature")
 	if code != exitRed {
@@ -342,6 +346,9 @@ func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	if err := os.WriteFile(filepath.Join(dir, ".inspector"), []byte("occupied"), 0o644); err != nil {
+		t.Fatalf("occupying .inspector: %v", err)
+	}
 	runGitT(t, dir, "remote", "add", "origin", "https://github.com/inactdev/inspector.git")
 	t.Setenv("GITHUB_TOKEN", "")
 
@@ -357,6 +364,12 @@ func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "GITHUB_TOKEN") {
 		t.Fatalf("stderr = %q, want it to name the missing GITHUB_TOKEN requirement", stderr)
+	}
+	if !strings.Contains(stderr, "local green check result") {
+		t.Fatalf("stderr = %q, want the report warning to describe only the local check result", stderr)
+	}
+	if strings.Contains(stderr, "green verdict above is real") {
+		t.Fatalf("stderr = %q, must not claim a verdict before publication succeeds", stderr)
 	}
 }
 
@@ -393,6 +406,9 @@ func TestCLI_StatusAPIRefusalFailsLoudly(t *testing.T) {
 	if !strings.Contains(stderr, warningBar) {
 		t.Fatalf("stderr = %q, want the loud warning bar", stderr)
 	}
+	if strings.Contains(stderr, "stamp sent, outcome unconfirmed") {
+		t.Fatalf("stderr = %q, must not call an explicit API rejection unconfirmed", stderr)
+	}
 	if got, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
 		t.Fatalf("status API refusal published branch %s", got)
 	}
@@ -428,6 +444,69 @@ func TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails(t *testing.T) {
 	}
 	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); !exists || got != commit {
 		t.Fatalf("staging ref after failed move = (%q, %t), want (%q, true)", got, exists, commit)
+	}
+}
+
+func TestPublishGreenReportsLostStatusResponseAsUnconfirmed(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	remote := newBareTestRemote(t)
+	configureTestOrigin(t, dir, remote)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"default_branch":"main"}`))
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		conn, _, hijackErr := w.(http.Hijacker).Hijack()
+		if hijackErr != nil {
+			t.Errorf("hijacking status response: %v", hijackErr)
+			return
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(server.Close)
+	previousBaseURL := githubAPIBaseURL
+	githubAPIBaseURL = server.URL
+	t.Cleanup(func() { githubAPIBaseURL = previousBaseURL })
+	previousResolvePublicationTarget := resolvePublicationTarget
+	resolvePublicationTarget = func(string) (inspector.PublicationTarget, error) {
+		return inspector.PublicationTarget{PushURL: remote, Owner: "inactdev", Repo: "inspector"}, nil
+	}
+	t.Cleanup(func() { resolvePublicationTarget = previousResolvePublicationTarget })
+	t.Setenv("GITHUB_TOKEN", "test-token")
+
+	_, err := publishGreen(dir, "feature", inspector.Result{Outcome: inspector.Green, Commit: commit})
+	if err == nil || !strings.Contains(err.Error(), "stamp sent, outcome unconfirmed") {
+		t.Fatalf("error = %v, want the distinct unconfirmed stamp state", err)
+	}
+	if _, exists := remoteRef(t, remote, "refs/heads/feature"); exists {
+		t.Fatal("lost status response moved the named branch")
+	}
+	if got, exists := remoteRef(t, remote, inspector.StagingRefForCommit(commit)); !exists || got != commit {
+		t.Fatalf("staging ref after lost status response = (%q, %t), want (%q, true)", got, exists, commit)
+	}
+}
+
+func TestPublishGreenRefusesUnsupportedPlatformBeforePublication(t *testing.T) {
+	previousValidatePublicationPlatform := validatePublicationPlatform
+	validatePublicationPlatform = func() error { return errors.New("publication unsupported") }
+	t.Cleanup(func() { validatePublicationPlatform = previousValidatePublicationPlatform })
+	resolved := false
+	previousResolvePublicationTarget := resolvePublicationTarget
+	resolvePublicationTarget = func(string) (inspector.PublicationTarget, error) {
+		resolved = true
+		return inspector.PublicationTarget{}, nil
+	}
+	t.Cleanup(func() { resolvePublicationTarget = previousResolvePublicationTarget })
+
+	_, err := publishGreen(t.TempDir(), "feature", inspector.Result{Outcome: inspector.Green, Commit: "abc"})
+	if err == nil || !strings.Contains(err.Error(), "publication unsupported") {
+		t.Fatalf("error = %v, want unsupported-platform publication refusal", err)
+	}
+	if resolved {
+		t.Fatal("unsupported platform resolved a publication target")
 	}
 }
 

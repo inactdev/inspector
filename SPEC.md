@@ -310,18 +310,20 @@ when named. This is a captain decision that may be overruled: ambient authority
 conflicts with the explicit handoff architecture, and a freshly pulled checkout
 normally points at the default branch. The gate's first run therefore sees the
 result already attached to its exact head commit without risking a direct
-default-branch update. A builder does not publish the branch itself. Inspector
-refuses before inspection on platforms where it cannot guarantee terminating a
-timed-out push's complete process tree, so no remote helper can mutate a ref
-after that refusal.
+default-branch update. A builder does not publish the branch itself. On
+platforms where inspector cannot guarantee terminating a timed-out push's
+complete process tree, it still runs the local check and can return red, but a
+green result exits `2` before any remote publication step starts.
 
 Network failures can lose a successful response, so inspector cannot always
-know whether a failed staging push created its ref, a failed status request was
-accepted, or a failed final push moved the named branch. It reports those states
-as unknown and identifies which later operations were not attempted. These
-incomplete green publications exit `2`; inspector does not compensate or
-pretend they are ordinary refusals. Before publication starts, an ordinary
-refusal still makes no remote change.
+know whether a failed staging push created its ref or a failed final push moved
+the named branch. An explicit GitHub rejection confirms that no status was
+posted. If the status request was written but its response was lost, inspector
+reports the third state **stamp sent, outcome unconfirmed**, distinct from both
+confirmed-posted and not-attempted and never presented as green. It identifies
+which later operations were not attempted. These incomplete green publications
+exit `2`; inspector does not compensate or pretend they are refusals. A refusal
+never attempts to push or publish.
 
 - merging stays blocked until inspector has blessed the exact head commit
 - a later branch update without inspector's sequence goes red on its own,
