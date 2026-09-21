@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -162,12 +163,13 @@ func hasEmbeddedHTTPCredentials(value string) bool {
 	return httpURLCredentialRE.MatchString(value)
 }
 
-// WorkingTreeStatus returns the raw `git status --porcelain` output. It omits
-// untracked files in RunsDirName, inspector's own report directory, but still
-// reports tracked changes there. Without the untracked exclusion, a repo that
-// never gitignores RunsDirName would go dirty after its first report. A
-// non-empty result means the working tree does not match HEAD, so a check run
-// against it cannot honestly be bound to that commit.
+// WorkingTreeStatus returns `git status --porcelain` output plus any mutable
+// index flags that could hide tracked changes. It omits untracked files in
+// RunsDirName, inspector's own report directory, but still reports tracked
+// changes there. Without the untracked exclusion, a repo that never gitignores
+// RunsDirName would go dirty after its first report. A non-empty result means
+// the working tree cannot be proven to match HEAD, so a check run against it
+// cannot honestly be bound to that commit.
 func WorkingTreeStatus(repoRoot string) (string, error) {
 	out, err := runGit(repoRoot, "status", "--porcelain", "--untracked-files=all", "--", ".", ":!"+RunsDirName)
 	if err != nil {
@@ -177,7 +179,28 @@ func WorkingTreeStatus(repoRoot string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("checking tracked report files: %w", err)
 	}
-	return out + trackedRuns, nil
+	mutableIndex, err := mutableIndexFlags(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	return out + trackedRuns + mutableIndex, nil
+}
+
+func mutableIndexFlags(repoRoot string) (string, error) {
+	out, err := runGit(repoRoot, "ls-files", "-v", "-z")
+	if err != nil {
+		return "", fmt.Errorf("checking mutable index flags: %w", err)
+	}
+	var flagged strings.Builder
+	for _, entry := range strings.Split(out, "\x00") {
+		if len(entry) < 3 || entry[1] != ' ' {
+			continue
+		}
+		if entry[0] == 'S' || entry[0] >= 'a' && entry[0] <= 'z' {
+			fmt.Fprintf(&flagged, "mutable index flag hides tracked content: %s\n", entry[2:])
+		}
+	}
+	return flagged.String(), nil
 }
 
 // runGit returns only git's stdout. Its stderr is kept separate and used
@@ -199,20 +222,50 @@ func runGitPush(dir string, args ...string) (string, error) {
 		return "", err
 	}
 
+	objectDir, err := gitObjectDirectory(dir)
+	if err != nil {
+		return "", err
+	}
+	publicationRepo, err := os.MkdirTemp("", "inspector-publication-")
+	if err != nil {
+		return "", fmt.Errorf("creating isolated publication repository: %w", err)
+	}
+	defer os.RemoveAll(publicationRepo)
+
+	env := publicationGitEnv(objectDir)
+	initCmd := exec.Command("git", "init", "--bare", "--quiet", publicationRepo)
+	initCmd.Env = env
+	if _, err := gitOutput(initCmd, []string{"init", "--bare", "--quiet", publicationRepo}); err != nil {
+		return "", fmt.Errorf("creating isolated publication repository: %w", err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), gitPushTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	gitArgs := append([]string{"--git-dir=" + publicationRepo, "-c", "core.hooksPath=/dev/null"}, args...)
+	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	configureProcessGroup(cmd)
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	cmd.WaitDelay = time.Second
-	cmd.Env = nonInteractiveGitEnv()
+	cmd.Env = env
 	out, err := gitOutput(cmd, args)
 	if ctx.Err() == context.DeadlineExceeded {
 		command := redactURLCredentials(strings.Join(args, " "))
 		return "", fmt.Errorf("git %s timed out after %s", command, gitPushTimeout)
 	}
 	return out, err
+}
+
+func gitObjectDirectory(repoRoot string) (string, error) {
+	out, err := runGit(repoRoot, "rev-parse", "--git-path", "objects")
+	if err != nil {
+		return "", fmt.Errorf("resolving repository object directory: %w", err)
+	}
+	path := strings.TrimSpace(out)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(repoRoot, path)
+	}
+	return filepath.Clean(path), nil
 }
 
 func gitOutput(cmd *exec.Cmd, args []string) (string, error) {
@@ -229,15 +282,23 @@ func gitOutput(cmd *exec.Cmd, args []string) (string, error) {
 
 func nonInteractiveGitEnv() []string {
 	blocked := map[string]bool{
-		"GIT_ASKPASS":         true,
-		"GIT_SSH_COMMAND":     true,
-		"GIT_TERMINAL_PROMPT": true,
-		"GCM_INTERACTIVE":     true,
+		"GITHUB_TOKEN":                     true,
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
+		"GIT_ASKPASS":                      true,
+		"GIT_COMMON_DIR":                   true,
+		"GIT_CONFIG_COUNT":                 true,
+		"GIT_CONFIG_PARAMETERS":            true,
+		"GIT_DIR":                          true,
+		"GIT_OBJECT_DIRECTORY":             true,
+		"GIT_SSH_COMMAND":                  true,
+		"GIT_TERMINAL_PROMPT":              true,
+		"GIT_WORK_TREE":                    true,
+		"GCM_INTERACTIVE":                  true,
 	}
 	env := make([]string, 0, len(os.Environ())+4)
 	for _, item := range os.Environ() {
 		name, _, _ := strings.Cut(item, "=")
-		if !blocked[name] {
+		if !blocked[name] && !strings.HasPrefix(name, "GIT_CONFIG_KEY_") && !strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
 			env = append(env, item)
 		}
 	}
@@ -247,4 +308,8 @@ func nonInteractiveGitEnv() []string {
 		"GIT_TERMINAL_PROMPT=0",
 		"GCM_INTERACTIVE=Never",
 	)
+}
+
+func publicationGitEnv(objectDir string) []string {
+	return append(nonInteractiveGitEnv(), "GIT_ALTERNATE_OBJECT_DIRECTORIES="+objectDir)
 }

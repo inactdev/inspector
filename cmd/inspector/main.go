@@ -70,6 +70,7 @@ flags:
 		fmt.Fprintf(stderr, "refused: invalid publication branch: %v\n", err)
 		return exitRefused
 	}
+	publicationTarget := capturePublicationTarget(*repoPath)
 	opts := inspector.Options{
 		RepoPath: *repoPath,
 		Claim:    strings.Join(fs.Args(), " "),
@@ -89,7 +90,7 @@ flags:
 
 	switch result.Outcome {
 	case inspector.Green:
-		cleanupWarning, err := publishGreen(*repoPath, *publicationBranch, result)
+		cleanupWarning, err := publishGreen(publicationTarget, *publicationBranch, result)
 		if err != nil {
 			printPublicationFailure(stderr, err)
 			return exitRefused
@@ -112,11 +113,26 @@ flags:
 	}
 }
 
+type publicationTargetSnapshot struct {
+	repoRoot string
+	target   inspector.PublicationTarget
+	err      error
+}
+
+func capturePublicationTarget(repoPath string) publicationTargetSnapshot {
+	repoRoot, err := inspector.ResolveRepoRoot(repoPath)
+	if err != nil {
+		return publicationTargetSnapshot{err: err}
+	}
+	target, err := resolvePublicationTarget(repoRoot)
+	return publicationTargetSnapshot{repoRoot: repoRoot, target: target, err: err}
+}
+
 // publishGreen performs the publication order that keeps inspector-gate from
 // observing a pull-request branch without an inspector status: stage the
 // checked commit remotely, record its green status, then move the branch.
 // The stage is a non-branch ref and is deleted once the branch moves.
-func publishGreen(repoPath, publicationBranch string, result inspector.Result) (cleanupWarning string, err error) {
+func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, result inspector.Result) (cleanupWarning string, err error) {
 	if err := validatePublicationPlatform(); err != nil {
 		return "", err
 	}
@@ -128,20 +144,22 @@ func publishGreen(repoPath, publicationBranch string, result inspector.Result) (
 		return "", fmt.Errorf("%s is not set - inspector needs a GitHub token with commit-status write access to publish a green result", inspector.GitHubTokenEnvVar)
 	}
 
-	repoRoot, err := inspector.ResolveRepoRoot(repoPath)
-	if err != nil {
+	if snapshot.err != nil {
+		return "", snapshot.err
+	}
+	if err := inspector.ValidatePublicationCommit(snapshot.repoRoot, result.Commit); err != nil {
 		return "", err
 	}
-	if err := inspector.ValidatePublicationCommit(repoRoot, result.Commit); err != nil {
-		return "", err
-	}
-	target, err := resolvePublicationTarget(repoRoot)
+	currentTarget, err := resolvePublicationTarget(snapshot.repoRoot)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("publication target changed during inspection: %w", err)
+	}
+	if currentTarget != snapshot.target {
+		return "", fmt.Errorf("publication target changed during inspection; refusing to publish to either destination")
 	}
 	defaultBranch, err := inspector.RepositoryDefaultBranch(inspector.RepositoryOptions{
-		Owner:      target.Owner,
-		Repo:       target.Repo,
+		Owner:      snapshot.target.Owner,
+		Repo:       snapshot.target.Repo,
 		Token:      token,
 		APIBaseURL: githubAPIBaseURL,
 	})
@@ -153,7 +171,7 @@ func publishGreen(repoPath, publicationBranch string, result inspector.Result) (
 	}
 
 	stagingRef := inspector.StagingRefForCommit(result.Commit)
-	if err := inspector.PushRefToRemote(repoRoot, target.PushURL, result.Commit, stagingRef); err != nil {
+	if err := inspector.PushRefToRemote(snapshot.repoRoot, snapshot.target.PushURL, result.Commit, stagingRef); err != nil {
 		return "", fmt.Errorf("staging push failed; whether temporary staging ref %s was updated is unknown, and no status post or branch move was attempted: %w", stagingRef, err)
 	}
 
@@ -162,8 +180,8 @@ func publishGreen(repoPath, publicationBranch string, result inspector.Result) (
 		description = fmt.Sprintf("inspector: green - see %s/%s locally", inspector.RunsDirName, inspector.LatestReportName)
 	}
 	if err := inspector.PostCommitStatus(inspector.PostStatusOptions{
-		Owner:       target.Owner,
-		Repo:        target.Repo,
+		Owner:       snapshot.target.Owner,
+		Repo:        snapshot.target.Repo,
 		Commit:      result.Commit,
 		State:       inspector.StatusSuccess,
 		Description: description,
@@ -174,10 +192,10 @@ func publishGreen(repoPath, publicationBranch string, result inspector.Result) (
 	}
 
 	branchRef := "refs/heads/" + publicationBranch
-	if err := inspector.PushRefToRemote(repoRoot, target.PushURL, result.Commit, branchRef); err != nil {
+	if err := inspector.PushRefToRemote(snapshot.repoRoot, snapshot.target.PushURL, result.Commit, branchRef); err != nil {
 		return "", fmt.Errorf("moving branch %q failed after the green status was recorded; whether the remote branch moved is unknown, and temporary staging ref %s may remain: %w", publicationBranch, stagingRef, err)
 	}
-	if err := inspector.DeleteRefFromRemote(repoRoot, target.PushURL, stagingRef); err != nil {
+	if err := inspector.DeleteRefFromRemote(snapshot.repoRoot, snapshot.target.PushURL, stagingRef); err != nil {
 		return fmt.Sprintf("inspector published green branch %q, but could not confirm removal of its temporary staging ref: %v", publicationBranch, err), nil
 	}
 	return "", nil

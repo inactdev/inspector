@@ -2,6 +2,7 @@ package inspector
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -106,6 +107,22 @@ func TestValidatePublicationCommit(t *testing.T) {
 	runGitT(t, dir, "commit", "--allow-empty", "-q", "-m", "other")
 	if err := ValidatePublicationCommit(dir, commit); err == nil {
 		t.Fatal("expected changed HEAD to be rejected")
+	}
+}
+
+func TestValidatePublicationCommitRejectsMutableIndexFlags(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			dir := newTestRepo(t, map[string]string{"tracked.txt": "original"})
+			commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+			runGitT(t, dir, "update-index", flag, "tracked.txt")
+			writeFiles(t, dir, map[string]string{"tracked.txt": "changed"})
+
+			err := ValidatePublicationCommit(dir, commit)
+			if err == nil || !strings.Contains(err.Error(), "tracked.txt") || !strings.Contains(err.Error(), "mutable index flag") {
+				t.Fatalf("error = %v, want named mutable-index refusal", err)
+			}
+		})
 	}
 }
 
@@ -308,6 +325,8 @@ func TestPushRefUsesNonInteractiveAuthentication(t *testing.T) {
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
 	script := `#!/bin/sh
+case "$*" in *"rev-parse --git-path objects"*) echo .git/objects; exit 0;; esac
+[ -z "$GITHUB_TOKEN" ] || exit 10
 [ "$GIT_ASKPASS" = "true" ] || exit 11
 [ "$GIT_TERMINAL_PROMPT" = "0" ] || exit 12
 [ "$GCM_INTERACTIVE" = "Never" ] || exit 13
@@ -317,9 +336,43 @@ case "$GIT_SSH_COMMAND" in *BatchMode=yes*) exit 0 ;; *) exit 14 ;; esac
 		t.Fatalf("writing fake git: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(GitHubTokenEnvVar, "must-not-reach-git")
 
 	if err := PushRefToRemote(t.TempDir(), "origin", "abc", "refs/heads/test"); err != nil {
 		t.Fatalf("unexpected push error: %v", err)
+	}
+}
+
+func TestPushRefDoesNotRunRepositoryHooks(t *testing.T) {
+	requirePublicationPlatform(t)
+	dir := newTestRepo(t, map[string]string{"tracked.txt": "content"})
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	if out, err := exec.Command("git", "init", "--bare", "--quiet", remote).CombinedOutput(); err != nil {
+		t.Fatalf("creating bare remote: %v\n%s", err, out)
+	}
+	hooksDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	hook := filepath.Join(hooksDir, "pre-push")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch \"$HOOK_MARKER\"\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("writing pre-push hook: %v", err)
+	}
+	runGitT(t, dir, "config", "core.hooksPath", hooksDir)
+	t.Setenv("HOOK_MARKER", marker)
+	t.Setenv(GitHubTokenEnvVar, "must-not-reach-git")
+
+	if err := PushRefToRemote(dir, remote, commit, "refs/heads/feature"); err != nil {
+		t.Fatalf("push from isolated publication repository failed: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("repository-local pre-push hook ran during inspector publication")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking hook marker: %v", err)
+	}
+	cmd := exec.Command("git", "--git-dir", remote, "rev-parse", "--verify", "refs/heads/feature")
+	out, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(out)) != commit {
+		t.Fatalf("remote branch = %q, %v; want %s", strings.TrimSpace(string(out)), err, commit)
 	}
 }
 
@@ -328,7 +381,7 @@ func TestPushRefTimeoutKillsChildProcesses(t *testing.T) {
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
 	marker := filepath.Join(t.TempDir(), "survived")
-	script := "#!/bin/sh\n(sleep 0.3; touch \"$SURVIVAL_MARKER\") &\nwait\n"
+	script := "#!/bin/sh\ncase \"$*\" in *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\n(sleep 0.3; touch \"$SURVIVAL_MARKER\") &\nwait\n"
 	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake git: %v", err)
 	}
@@ -354,7 +407,8 @@ func TestPushRefRedactsCredentialsFromGitError(t *testing.T) {
 	requirePublicationPlatform(t)
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
-	if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\necho 'fatal: https://user:supersecret@example.com/o/r.git rejected' >&2\nexit 1\n"), 0o755); err != nil {
+	script := "#!/bin/sh\ncase \"$*\" in *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\necho 'fatal: https://user:supersecret@example.com/o/r.git rejected' >&2\nexit 1\n"
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake git: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))

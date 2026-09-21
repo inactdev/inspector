@@ -314,9 +314,12 @@ default-branch update. A builder does not publish the branch itself. On
 platforms where inspector cannot guarantee terminating a timed-out push's
 complete process tree, it still runs the local check and can return red, but a
 green result exits `2` before any remote publication step starts. Before any
-remote operation, inspector also confirms that HEAD and the working tree still
-name exactly the code checked. It refuses and names tracked changes or
-non-ignored additions left by the check, while allowing ignored build output.
+remote operation, inspector also confirms that HEAD, the working tree, and the
+captured publication target still name exactly the code and destination handed
+to the check. It refuses and names tracked changes, non-ignored additions, or
+mutable index flags that can hide tracked content, while allowing ignored build
+output. Publication pushes run without the checked repository's hooks or local
+Git configuration, and Git never receives the status token.
 This is a captain decision that may be overruled: a stamp must name the exact
 code tested; check-written code exists nowhere and could launder a green result
 for a different commit.
