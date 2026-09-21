@@ -456,7 +456,7 @@ func prefixStatusPaths(status, prefix string) string {
 func captureIgnoreFiles(repoRoot string, trackedTree []trackedWorktreeEntry) ([]validationIgnoreFile, error) {
 	paths := make(map[string]bool)
 	for _, entry := range trackedTree {
-		if filepath.Base(filepath.FromSlash(entry.path)) == ".gitignore" && !entry.missing && !entry.gitlink {
+		if filepath.Base(filepath.FromSlash(entry.path)) == ".gitignore" && !entry.missing && !entry.gitlink && entry.mode.IsRegular() {
 			paths[entry.path] = true
 		}
 	}
@@ -471,7 +471,15 @@ func captureIgnoreFiles(repoRoot string, trackedTree []trackedWorktreeEntry) ([]
 	}
 	ignoreFiles := make([]validationIgnoreFile, 0, len(paths))
 	for path := range paths {
-		contents, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(path)))
+		fullPath := filepath.Join(repoRoot, filepath.FromSlash(path))
+		info, err := os.Lstat(fullPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading exclude file %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		contents, err := os.ReadFile(fullPath)
 		if err != nil {
 			return nil, fmt.Errorf("reading exclude file %s: %w", path, err)
 		}

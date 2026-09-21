@@ -322,7 +322,12 @@ output. Publication pushes run without the checked repository's hooks or local
 Git configuration, and Git never receives the status token.
 This is a captain decision that may be overruled: a stamp must name the exact
 code tested; check-written code exists nowhere and could launder a green result
-for a different commit.
+for a different commit. The v1 guard compares only the post-check snapshot,
+however. Because the source mount remains writable, a check can modify a tracked
+file, pass against those modified bytes, and restore it before exiting without
+detection; a resulting green can describe code that was never the commit
+stamped. Issue [#27](https://github.com/inactdev/inspector/issues/27), "Source is
+read-only while the check runs," owns closing that gap.
 
 Network failures can lose a successful response, so inspector cannot always
 know whether a failed staging push created its ref or a failed final push moved

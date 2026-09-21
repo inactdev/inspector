@@ -147,9 +147,18 @@ non-ignored addition, or mutable index flag that could hide tracked content;
 ignored build output does not block publication. This is a captain decision that
 may be overruled: a stamp must name the exact code tested, while a check-written
 change means the passing code exists nowhere and could launder a green result
-for a different commit. The pull request branch never points at C until its
-status already exists, so inspector-gate's first run sees the result instead of
-a stale missing-status failure.
+for a different commit.
+
+This recheck compares only the post-check snapshot. In v1 the source mount is
+writable, so a check can modify a tracked file, pass against those modified
+bytes, and restore the file before exiting without being detected. A resulting
+green can therefore describe code that was never the commit stamped. Issue
+[#27](https://github.com/inactdev/inspector/issues/27), "Source is read-only
+while the check runs," is where that gap is closed.
+
+The pull request branch never points at C until its status already exists, so
+inspector-gate's first run sees the result instead of a stale missing-status
+failure.
 
 **v1 red policy, which the Client may overrule:** a red result stays local.
 inspector writes its report and returns `1`, but neither pushes a branch nor

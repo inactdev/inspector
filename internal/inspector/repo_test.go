@@ -178,6 +178,26 @@ func TestValidatePublicationCommitUsesFrozenGitignoreFiles(t *testing.T) {
 	}
 }
 
+func TestValidatePublicationCommitDoesNotActivateSymlinkedGitignore(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{"rules": "*.secret\n"})
+	if err := os.Symlink("rules", filepath.Join(dir, ".gitignore")); err != nil {
+		t.Skipf("creating symlink: %v", err)
+	}
+	runGitT(t, dir, "add", ".gitignore")
+	runGitT(t, dir, "commit", "-q", "-m", "add symlinked ignore file")
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	policy, err := CaptureValidationPolicy(dir)
+	if err != nil {
+		t.Fatalf("capturing validation policy: %v", err)
+	}
+	writeFiles(t, dir, map[string]string{"untracked.secret": "used by check"})
+
+	err = ValidatePublicationCommit(dir, commit, policy)
+	if err == nil || !strings.Contains(err.Error(), "untracked.secret") {
+		t.Fatalf("error = %v, want symlinked .gitignore unable to hide additions", err)
+	}
+}
+
 func TestValidatePublicationCommitRejectsMutableIndexFlags(t *testing.T) {
 	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
 		t.Run(flag, func(t *testing.T) {
