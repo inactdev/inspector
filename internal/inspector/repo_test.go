@@ -80,24 +80,28 @@ func TestValidatePublicationBranchRejectsCheckoutShorthand(t *testing.T) {
 func TestValidatePublicationCommit(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{"tracked.txt": "original"})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	policy, err := CaptureValidationPolicy(dir)
+	if err != nil {
+		t.Fatalf("capturing validation policy: %v", err)
+	}
 
-	if err := ValidatePublicationCommit(dir, commit); err != nil {
+	if err := ValidatePublicationCommit(dir, commit, policy); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	writeFiles(t, dir, map[string]string{"tracked.txt": "changed"})
-	if err := ValidatePublicationCommit(dir, commit); err == nil || !strings.Contains(err.Error(), "tracked.txt") {
+	if err := ValidatePublicationCommit(dir, commit, policy); err == nil || !strings.Contains(err.Error(), "tracked.txt") {
 		t.Fatalf("error = %v, want changed tracked file to be named", err)
 	}
 	runGitT(t, dir, "reset", "--hard", "-q", "HEAD")
 	writeFiles(t, dir, map[string]string{"tracked.txt": "staged"})
 	runGitT(t, dir, "add", "tracked.txt")
 	writeFiles(t, dir, map[string]string{"tracked.txt": "original"})
-	if err := ValidatePublicationCommit(dir, commit); err == nil || !strings.Contains(err.Error(), "tracked.txt") {
+	if err := ValidatePublicationCommit(dir, commit, policy); err == nil || !strings.Contains(err.Error(), "tracked.txt") {
 		t.Fatalf("error = %v, want staged tracked file to be named", err)
 	}
 	runGitT(t, dir, "reset", "--hard", "-q", "HEAD")
 	writeFiles(t, dir, map[string]string{"untracked.txt": "new"})
-	if err := ValidatePublicationCommit(dir, commit); err == nil || !strings.Contains(err.Error(), "untracked.txt") {
+	if err := ValidatePublicationCommit(dir, commit, policy); err == nil || !strings.Contains(err.Error(), "untracked.txt") {
 		t.Fatalf("error = %v, want non-ignored untracked file to be named", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "untracked.txt")); err != nil {
@@ -108,11 +112,11 @@ func TestValidatePublicationCommit(t *testing.T) {
 	runGitT(t, dir, "commit", "-q", "-m", "ignore build output")
 	commit = strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	writeFiles(t, dir, map[string]string{"ignored.txt": "build output"})
-	if err := ValidatePublicationCommit(dir, commit); err != nil {
+	if err := ValidatePublicationCommit(dir, commit, policy); err != nil {
 		t.Fatalf("ignored build output prevented publication: %v", err)
 	}
 	runGitT(t, dir, "commit", "--allow-empty", "-q", "-m", "other")
-	if err := ValidatePublicationCommit(dir, commit); err == nil {
+	if err := ValidatePublicationCommit(dir, commit, policy); err == nil {
 		t.Fatal("expected changed HEAD to be rejected")
 	}
 }
@@ -122,10 +126,14 @@ func TestValidatePublicationCommitRejectsMutableIndexFlags(t *testing.T) {
 		t.Run(flag, func(t *testing.T) {
 			dir := newTestRepo(t, map[string]string{"tracked.txt": "original"})
 			commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+			policy, err := CaptureValidationPolicy(dir)
+			if err != nil {
+				t.Fatalf("capturing validation policy: %v", err)
+			}
 			runGitT(t, dir, "update-index", flag, "tracked.txt")
 			writeFiles(t, dir, map[string]string{"tracked.txt": "changed"})
 
-			err := ValidatePublicationCommit(dir, commit)
+			err = ValidatePublicationCommit(dir, commit, policy)
 			if err == nil || !strings.Contains(err.Error(), "tracked.txt") || !strings.Contains(err.Error(), "mutable index flag") {
 				t.Fatalf("error = %v, want named mutable-index refusal", err)
 			}
@@ -136,6 +144,10 @@ func TestValidatePublicationCommitRejectsMutableIndexFlags(t *testing.T) {
 func TestValidatePublicationCommitDoesNotRunConfiguredFSMonitor(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{"tracked.txt": "original"})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	policy, err := CaptureValidationPolicy(dir)
+	if err != nil {
+		t.Fatalf("capturing validation policy: %v", err)
+	}
 	marker := filepath.Join(t.TempDir(), "fsmonitor-ran")
 	fsmonitor := filepath.Join(dir, ".git", "malicious-fsmonitor")
 	script := "#!/bin/sh\nprintf '%s' \"$GITHUB_TOKEN\" > \"$FSMONITOR_MARKER\"\nprintf '2\\n'\n"
@@ -147,7 +159,7 @@ func TestValidatePublicationCommitDoesNotRunConfiguredFSMonitor(t *testing.T) {
 	t.Setenv("FSMONITOR_MARKER", marker)
 	writeFiles(t, dir, map[string]string{"tracked.txt": "changed"})
 
-	err := ValidatePublicationCommit(dir, commit)
+	err = ValidatePublicationCommit(dir, commit, policy)
 	if err == nil || !strings.Contains(err.Error(), "tracked.txt") {
 		t.Fatalf("error = %v, want independently detected tracked change", err)
 	}
@@ -155,6 +167,57 @@ func TestValidatePublicationCommitDoesNotRunConfiguredFSMonitor(t *testing.T) {
 		t.Fatal("repository-configured fsmonitor ran during publication validation")
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("checking fsmonitor marker: %v", err)
+	}
+}
+
+func TestValidatePublicationCommitPreservesCapturedIgnorePolicy(t *testing.T) {
+	dir := newTestRepo(t, nil)
+	infoExclude := filepath.Join(dir, ".git", "info", "exclude")
+	if err := os.WriteFile(infoExclude, []byte("from-info.txt\n"), 0o644); err != nil {
+		t.Fatalf("writing info exclude: %v", err)
+	}
+	globalExclude := filepath.Join(t.TempDir(), "global-ignore")
+	if err := os.WriteFile(globalExclude, []byte("from-global.txt\n"), 0o644); err != nil {
+		t.Fatalf("writing global exclude: %v", err)
+	}
+	runGitT(t, dir, "config", "core.excludesFile", globalExclude)
+
+	policy, err := CaptureValidationPolicy(dir)
+	if err != nil {
+		t.Fatalf("capturing validation policy: %v", err)
+	}
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	if err := os.WriteFile(infoExclude, []byte("changed-after-capture.txt\n"), 0o644); err != nil {
+		t.Fatalf("changing info exclude: %v", err)
+	}
+	if err := os.WriteFile(globalExclude, []byte("changed-after-capture.txt\n"), 0o644); err != nil {
+		t.Fatalf("changing global exclude: %v", err)
+	}
+	writeFiles(t, dir, map[string]string{
+		"from-info.txt":             "ignored",
+		"from-global.txt":           "ignored",
+		"changed-after-capture.txt": "must remain visible",
+	})
+
+	err = ValidatePublicationCommit(dir, commit, policy)
+	if err == nil || !strings.Contains(err.Error(), "changed-after-capture.txt") {
+		t.Fatalf("error = %v, want post-capture ignore change to remain visible", err)
+	}
+	if strings.Contains(err.Error(), "from-info.txt") || strings.Contains(err.Error(), "from-global.txt") {
+		t.Fatalf("error = %v, want captured ignore rules preserved", err)
+	}
+}
+
+func TestWorkingTreeStatusUsesRepositoryObjectFormat(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{"tracked.txt": "content"})
+	t.Setenv("GIT_DEFAULT_HASH", "sha256")
+
+	status, err := WorkingTreeStatus(dir)
+	if err != nil {
+		t.Fatalf("checking SHA-1 repository with ambient SHA-256 default: %v", err)
+	}
+	if status != "" {
+		t.Fatalf("expected clean status, got %q", status)
 	}
 }
 
@@ -357,7 +420,7 @@ func TestPushRefUsesNonInteractiveAuthentication(t *testing.T) {
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
 	script := `#!/bin/sh
-case "$*" in *"rev-parse --git-path objects"*) echo .git/objects; exit 0;; esac
+case "$*" in *"rev-parse --git-path objects"*) echo .git/objects; exit 0;; *"rev-parse --show-object-format=storage"*) echo sha1; exit 0;; esac
 [ -z "$GITHUB_TOKEN" ] || exit 10
 [ "$GIT_ASKPASS" = "true" ] || exit 11
 [ "$GIT_TERMINAL_PROMPT" = "0" ] || exit 12
@@ -408,12 +471,32 @@ func TestPushRefDoesNotRunRepositoryHooks(t *testing.T) {
 	}
 }
 
+func TestPushRefUsesRepositoryObjectFormat(t *testing.T) {
+	requirePublicationPlatform(t)
+	dir := newTestRepo(t, map[string]string{"tracked.txt": "content"})
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	if out, err := exec.Command("git", "init", "--bare", "--quiet", remote).CombinedOutput(); err != nil {
+		t.Fatalf("creating bare remote: %v\n%s", err, out)
+	}
+	t.Setenv("GIT_DEFAULT_HASH", "sha256")
+
+	if err := PushRefToRemote(dir, remote, commit, "refs/heads/feature"); err != nil {
+		t.Fatalf("pushing SHA-1 repository with ambient SHA-256 default: %v", err)
+	}
+	cmd := exec.Command("git", "--git-dir", remote, "rev-parse", "--verify", "refs/heads/feature")
+	out, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(out)) != commit {
+		t.Fatalf("remote branch = %q, %v; want %s", strings.TrimSpace(string(out)), err, commit)
+	}
+}
+
 func TestPushRefTimeoutKillsChildProcesses(t *testing.T) {
 	requirePublicationPlatform(t)
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
 	marker := filepath.Join(t.TempDir(), "survived")
-	script := "#!/bin/sh\ncase \"$*\" in *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\n(sleep 0.3; touch \"$SURVIVAL_MARKER\") &\nwait\n"
+	script := "#!/bin/sh\ncase \"$*\" in *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"rev-parse --show-object-format=storage\"*) echo sha1; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\n(sleep 0.3; touch \"$SURVIVAL_MARKER\") &\nwait\n"
 	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake git: %v", err)
 	}
@@ -439,7 +522,7 @@ func TestPushRefRedactsCredentialsFromGitError(t *testing.T) {
 	requirePublicationPlatform(t)
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
-	script := "#!/bin/sh\ncase \"$*\" in *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\necho 'fatal: https://user:supersecret@example.com/o/r.git rejected' >&2\nexit 1\n"
+	script := "#!/bin/sh\ncase \"$*\" in *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"rev-parse --show-object-format=storage\"*) echo sha1; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\necho 'fatal: https://user:supersecret@example.com/o/r.git rejected' >&2\nexit 1\n"
 	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake git: %v", err)
 	}

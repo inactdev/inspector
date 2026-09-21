@@ -114,18 +114,27 @@ flags:
 }
 
 type publicationTargetSnapshot struct {
-	repoRoot string
-	target   inspector.PublicationTarget
-	err      error
+	repoRoot        string
+	target          inspector.PublicationTarget
+	validation      inspector.ValidationPolicy
+	targetErr       error
+	validationError error
 }
 
 func capturePublicationTarget(repoPath string) publicationTargetSnapshot {
 	repoRoot, err := inspector.ResolveRepoRoot(repoPath)
 	if err != nil {
-		return publicationTargetSnapshot{err: err}
+		return publicationTargetSnapshot{targetErr: err}
 	}
-	target, err := resolvePublicationTarget(repoRoot)
-	return publicationTargetSnapshot{repoRoot: repoRoot, target: target, err: err}
+	target, targetErr := resolvePublicationTarget(repoRoot)
+	validation, validationError := inspector.CaptureValidationPolicy(repoRoot)
+	return publicationTargetSnapshot{
+		repoRoot:        repoRoot,
+		target:          target,
+		validation:      validation,
+		targetErr:       targetErr,
+		validationError: validationError,
+	}
 }
 
 // publishGreen performs the publication order that keeps inspector-gate from
@@ -144,10 +153,13 @@ func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, 
 		return "", fmt.Errorf("%s is not set - inspector needs a GitHub token with commit-status write access to publish a green result", inspector.GitHubTokenEnvVar)
 	}
 
-	if snapshot.err != nil {
-		return "", snapshot.err
+	if snapshot.targetErr != nil {
+		return "", snapshot.targetErr
 	}
-	if err := inspector.ValidatePublicationCommit(snapshot.repoRoot, result.Commit); err != nil {
+	if snapshot.validationError != nil {
+		return "", snapshot.validationError
+	}
+	if err := inspector.ValidatePublicationCommit(snapshot.repoRoot, result.Commit, snapshot.validation); err != nil {
 		return "", err
 	}
 	currentTarget, err := resolvePublicationTarget(snapshot.repoRoot)

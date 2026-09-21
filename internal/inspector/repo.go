@@ -3,6 +3,7 @@ package inspector
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,9 +57,43 @@ func ValidatePublicationBranch(branch string) error {
 	return nil
 }
 
+type ValidationPolicy struct {
+	objectFormat   string
+	globalExcludes []byte
+	infoExcludes   []byte
+}
+
+func CaptureValidationPolicy(repoRoot string) (ValidationPolicy, error) {
+	objectFormat, err := gitObjectFormat(repoRoot)
+	if err != nil {
+		return ValidationPolicy{}, err
+	}
+	infoExcludePath, err := gitPath(repoRoot, "info/exclude")
+	if err != nil {
+		return ValidationPolicy{}, err
+	}
+	infoExcludes, err := readOptionalFile(infoExcludePath)
+	if err != nil {
+		return ValidationPolicy{}, fmt.Errorf("reading repository exclude rules: %w", err)
+	}
+	globalExcludePath, err := effectiveGlobalExcludePath(repoRoot)
+	if err != nil {
+		return ValidationPolicy{}, err
+	}
+	globalExcludes, err := readOptionalFile(globalExcludePath)
+	if err != nil {
+		return ValidationPolicy{}, fmt.Errorf("reading global exclude rules: %w", err)
+	}
+	return ValidationPolicy{
+		objectFormat:   objectFormat,
+		globalExcludes: globalExcludes,
+		infoExcludes:   infoExcludes,
+	}, nil
+}
+
 // ValidatePublicationCommit confirms the checked commit is still HEAD and the
 // working tree still contains exactly that commit's code.
-func ValidatePublicationCommit(repoRoot, expectedCommit string) error {
+func ValidatePublicationCommit(repoRoot, expectedCommit string, policy ValidationPolicy) error {
 	commit, err := validationHeadCommit(repoRoot)
 	if err != nil {
 		return err
@@ -66,7 +101,7 @@ func ValidatePublicationCommit(repoRoot, expectedCommit string) error {
 	if commit != expectedCommit {
 		return fmt.Errorf("HEAD changed during inspection: checked %s, now at %s", expectedCommit, commit)
 	}
-	status, err := workingTreeStatusAtCommit(repoRoot, expectedCommit)
+	status, err := workingTreeStatusAtCommit(repoRoot, expectedCommit, policy)
 	if err != nil {
 		return err
 	}
@@ -175,7 +210,11 @@ func WorkingTreeStatus(repoRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return workingTreeStatusAtCommit(repoRoot, commit)
+	policy, err := CaptureValidationPolicy(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	return workingTreeStatusAtCommit(repoRoot, commit, policy)
 }
 
 func validationHeadCommit(repoRoot string) (string, error) {
@@ -186,7 +225,7 @@ func validationHeadCommit(repoRoot string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-func workingTreeStatusAtCommit(repoRoot, commit string) (string, error) {
+func workingTreeStatusAtCommit(repoRoot, commit string, policy ValidationPolicy) (string, error) {
 	objectDir, err := gitObjectDirectory(repoRoot)
 	if err != nil {
 		return "", err
@@ -198,17 +237,22 @@ func workingTreeStatusAtCommit(repoRoot, commit string) (string, error) {
 	defer os.RemoveAll(validationRepo)
 
 	env := validationGitEnv()
-	initCmd := exec.Command("git", "init", "--bare", "--quiet", validationRepo)
-	initCmd.Env = env
-	if _, err := gitOutput(initCmd, []string{"init", "--bare", "--quiet", validationRepo}); err != nil {
+	if err := initBareRepository(validationRepo, policy.objectFormat, env); err != nil {
 		return "", fmt.Errorf("creating isolated validation repository: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(validationRepo, "info", "exclude"), policy.infoExcludes, 0o600); err != nil {
+		return "", fmt.Errorf("installing repository exclude rules: %w", err)
+	}
+	globalExcludesPath := filepath.Join(validationRepo, "global-excludes")
+	if err := os.WriteFile(globalExcludesPath, policy.globalExcludes, 0o600); err != nil {
+		return "", fmt.Errorf("installing global exclude rules: %w", err)
 	}
 
 	env = append(env,
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES="+objectDir,
 		"GIT_INDEX_FILE="+filepath.Join(validationRepo, "validation-index"),
 	)
-	args := []string{"--git-dir=" + validationRepo, "--work-tree=" + repoRoot, "-c", "core.bare=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull}
+	args := []string{"--git-dir=" + validationRepo, "--work-tree=" + repoRoot, "-c", "core.bare=false", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-c", "core.excludesFile=" + globalExcludesPath}
 	readTree := exec.Command("git", append(args, "read-tree", commit)...)
 	readTree.Env = env
 	if _, err := gitOutput(readTree, []string{"read-tree", commit}); err != nil {
@@ -296,10 +340,12 @@ func runGitPush(dir string, args ...string) (string, error) {
 	}
 	defer os.RemoveAll(publicationRepo)
 
+	objectFormat, err := gitObjectFormat(dir)
+	if err != nil {
+		return "", err
+	}
 	env := publicationGitEnv(objectDir)
-	initCmd := exec.Command("git", "init", "--bare", "--quiet", publicationRepo)
-	initCmd.Env = env
-	if _, err := gitOutput(initCmd, []string{"init", "--bare", "--quiet", publicationRepo}); err != nil {
+	if err := initBareRepository(publicationRepo, objectFormat, env); err != nil {
 		return "", fmt.Errorf("creating isolated publication repository: %w", err)
 	}
 
@@ -321,15 +367,82 @@ func runGitPush(dir string, args ...string) (string, error) {
 }
 
 func gitObjectDirectory(repoRoot string) (string, error) {
-	out, err := runValidationGit(repoRoot, "rev-parse", "--git-path", "objects")
+	return gitPath(repoRoot, "objects")
+}
+
+func gitPath(repoRoot, name string) (string, error) {
+	out, err := runValidationGit(repoRoot, "rev-parse", "--git-path", name)
 	if err != nil {
-		return "", fmt.Errorf("resolving repository object directory: %w", err)
+		return "", fmt.Errorf("resolving repository git path %s: %w", name, err)
 	}
 	path := strings.TrimSpace(out)
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(repoRoot, path)
 	}
 	return filepath.Clean(path), nil
+}
+
+func gitObjectFormat(repoRoot string) (string, error) {
+	out, err := runValidationGit(repoRoot, "rev-parse", "--show-object-format=storage")
+	if err != nil {
+		return "", fmt.Errorf("resolving repository object format: %w", err)
+	}
+	format := strings.TrimSpace(out)
+	if format != "sha1" && format != "sha256" {
+		return "", fmt.Errorf("repository uses unsupported object format %q", format)
+	}
+	return format, nil
+}
+
+func initBareRepository(path, objectFormat string, env []string) error {
+	args := []string{"init", "--bare", "--quiet", "--object-format=" + objectFormat, path}
+	cmd := exec.Command("git", args...)
+	cmd.Env = env
+	_, err := gitOutput(cmd, args)
+	return err
+}
+
+func effectiveGlobalExcludePath(repoRoot string) (string, error) {
+	args := []string{"config", "--path", "--get", "core.excludesFile"}
+	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	out, err := cmd.Output()
+	if err == nil {
+		path := strings.TrimSpace(string(out))
+		if path == "" {
+			return "", nil
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(repoRoot, path)
+		}
+		return filepath.Clean(path), nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		xdgConfigHome := os.Getenv("XDG_CONFIG_HOME")
+		if filepath.IsAbs(xdgConfigHome) {
+			return filepath.Join(xdgConfigHome, "git", "ignore"), nil
+		}
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return "", nil
+		}
+		return filepath.Join(home, ".config", "git", "ignore"), nil
+	}
+	detail := redactURLCredentials(strings.TrimSpace(errBuf.String()))
+	return "", fmt.Errorf("resolving global exclude file: git %s: %w: %s", strings.Join(args, " "), err, detail)
+}
+
+func readOptionalFile(path string) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	contents, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return contents, err
 }
 
 func gitOutput(cmd *exec.Cmd, args []string) (string, error) {
