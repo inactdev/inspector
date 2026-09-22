@@ -131,6 +131,24 @@ Name that destination on every invocation:
 inspector --branch my-feature
 ```
 
+This command is the publication handoff, not a check to run after another tool
+has pushed. A builder must leave C local and must not push C or open its pull
+request first. On exit `0`, Inspector has moved the named branch. Pull request
+creation remains part of Inspector's publication flow, never work the builder
+may perform on Inspector's behalf. On any other exit, nothing else may publish
+that commit.
+
+When changing Inspector's publication protocol itself, run the command from the
+clean checkout being tested instead of an older installed binary:
+
+```
+GITHUB_TOKEN="$(gh auth token)" go run ./cmd/inspector --branch my-feature
+```
+
+That self-hosting handoff is required for this repository too. A general build
+or delivery pipeline that pushes its commit directly will create a pull request
+head with no `inspector` status, and `inspector-gate` will correctly reject it.
+
 `--branch` is required. Inspector never derives publication authority from the
 checkout, HEAD, tracking configuration, or any other ambient state, and it
 refuses the remote default branch even when explicitly named. This is a captain
