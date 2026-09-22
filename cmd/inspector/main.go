@@ -219,6 +219,15 @@ func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, 
 		return "", publicationRefusal(fmt.Errorf("publication branch %q is the remote default branch; inspector may update only a pull request branch", publicationBranch))
 	}
 
+	branchRef := "refs/heads/" + publicationBranch
+	remoteCommit, exists, err := inspector.RemoteRefCommit(snapshot.repoRoot, snapshot.target.PushURL, branchRef)
+	if err != nil {
+		return "", publicationRefusal(fmt.Errorf("checking publication branch %q before staging: %w", publicationBranch, err))
+	}
+	if exists && remoteCommit == result.Commit {
+		return "", publicationRefusal(fmt.Errorf("publication branch %q already points at checked commit %s; inspector will not retroactively stamp a commit published before its required staging, status, and branch-update sequence", publicationBranch, result.Commit))
+	}
+
 	stagingRef := inspector.StagingRefForCommit(result.Commit)
 	if err := inspector.PushRefToRemote(snapshot.repoRoot, snapshot.target.PushURL, result.Commit, stagingRef); err != nil {
 		return "", incompletePublication(fmt.Errorf("staging push failed; whether temporary staging ref %s was updated is unknown, and no status post or branch move was attempted: %w", stagingRef, err))
@@ -240,7 +249,6 @@ func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, 
 		return "", incompletePublication(fmt.Errorf("recording the green status did not complete; temporary staging ref %s was created, and branch %q was not attempted: %w", stagingRef, publicationBranch, err))
 	}
 
-	branchRef := "refs/heads/" + publicationBranch
 	if err := inspector.PushRefToRemote(snapshot.repoRoot, snapshot.target.PushURL, result.Commit, branchRef); err != nil {
 		return "", incompletePublication(fmt.Errorf("moving branch %q failed after the green status was recorded; whether the remote branch moved is unknown, and temporary staging ref %s may remain: %w", publicationBranch, stagingRef, err))
 	}

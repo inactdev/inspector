@@ -180,6 +180,23 @@ func PushRefToRemote(repoRoot, remote, source, destination string) error {
 	return nil
 }
 
+// RemoteRefCommit reports the commit currently named by an exact remote ref.
+func RemoteRefCommit(repoRoot, remote, ref string) (string, bool, error) {
+	out, err := runGitPush(repoRoot, "ls-remote", "--refs", remote, ref)
+	if err != nil {
+		return "", false, fmt.Errorf("reading remote ref %s: %w", ref, err)
+	}
+	line := strings.TrimSpace(out)
+	if line == "" {
+		return "", false, nil
+	}
+	fields := strings.Fields(line)
+	if len(fields) != 2 || fields[1] != ref {
+		return "", false, fmt.Errorf("reading remote ref %s: git returned an unexpected response", ref)
+	}
+	return fields[0], true, nil
+}
+
 // DeleteRefFromRemote removes ref from the resolved publication remote.
 func DeleteRefFromRemote(repoRoot, remote, ref string) error {
 	if _, err := runGitPush(repoRoot, "push", "--porcelain", remote, ":"+ref); err != nil {

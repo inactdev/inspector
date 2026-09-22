@@ -136,7 +136,9 @@ has pushed. A builder must leave C local and must not push C or open its pull
 request first. On exit `0`, Inspector has moved the named branch. Pull request
 creation remains part of Inspector's publication flow, never work the builder
 may perform on Inspector's behalf. On any other exit, nothing else may publish
-that commit.
+that commit. The named branch may contain earlier work, but it must not already
+point at C. Inspector refuses to stamp C retroactively because that cannot prove
+the required stage, status, then branch-update order.
 
 When changing Inspector's publication protocol itself, run the command from the
 clean checkout being tested instead of an older installed binary:
@@ -148,6 +150,8 @@ GITHUB_TOKEN="$(gh auth token)" go run ./cmd/inspector --branch my-feature
 That self-hosting handoff is required for this repository too. A general build
 or delivery pipeline that pushes its commit directly will create a pull request
 head with no `inspector` status, and `inspector-gate` will correctly reject it.
+Running Inspector afterward is not a recovery path: Inspector refuses to
+retroactively approve a commit that the named branch already exposes.
 
 `--branch` is required. Inspector never derives publication authority from the
 checkout, HEAD, tracking configuration, or any other ambient state, and it

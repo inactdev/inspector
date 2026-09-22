@@ -208,6 +208,37 @@ func TestCLI_GreenPublishesStatusBeforeBranch(t *testing.T) {
 	}
 }
 
+func TestCLI_RefusesCommitAlreadyOnPublicationBranch(t *testing.T) {
+	requirePublicationPlatform(t)
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	publicationBranch := "feature"
+	branchRef := "refs/heads/" + publicationBranch
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	runGitT(t, dir, "push", "-q", "origin", commit+":"+branchRef)
+
+	code, stdout, stderr := runCLI(t, dir, "--branch", publicationBranch)
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	}
+	if strings.Contains(stdout, "green -") {
+		t.Fatalf("stdout = %q, must not approve a commit that reached the branch before its status", stdout)
+	}
+	if !strings.Contains(stderr, "already points at checked commit") || !strings.Contains(stderr, "will not retroactively stamp") {
+		t.Fatalf("stderr = %q, want it to explain the ordering refusal", stderr)
+	}
+	if stub.Request.State != "" {
+		t.Fatalf("prematurely published commit posted status state %q", stub.Request.State)
+	}
+	if got, exists := remoteRef(t, stub.Remote, branchRef); !exists || got != commit {
+		t.Fatalf("publication branch after refusal = (%q, %t), want (%q, true)", got, exists, commit)
+	}
+	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatal("prematurely published commit created a staging ref")
+	}
+}
+
 func TestCLI_RedDoesNotPublish(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false", "image": "alpine"}`})
