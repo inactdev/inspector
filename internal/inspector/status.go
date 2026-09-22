@@ -32,6 +32,8 @@ const GitHubTokenEnvVar = "GITHUB_TOKEN"
 // defaultStatusAPIBaseURL is GitHub's REST API.
 const defaultStatusAPIBaseURL = "https://api.github.com"
 
+const repositoryResponseBodyLimit = 1 << 20
+
 // statusPostTimeout bounds the whole post. inspector runs unattended
 // (SPEC.md section 3), so a blackholed api.github.com must become a loud
 // failure rather than a hang that outlives the check timeout the verdict
@@ -104,7 +106,7 @@ func RepositoryDefaultBranch(opts RepositoryOptions) (string, error) {
 	var repository struct {
 		DefaultBranch string `json:"default_branch"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&repository); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, repositoryResponseBodyLimit)).Decode(&repository); err != nil {
 		return "", fmt.Errorf("decoding GitHub repository response: %w", err)
 	}
 	if repository.DefaultBranch == "" {

@@ -9,6 +9,29 @@ import (
 	"testing"
 )
 
+func TestRepositoryDefaultBranch_LargeResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"description":    strings.Repeat("x", 8192),
+			"default_branch": "main",
+		})
+	}))
+	defer server.Close()
+
+	branch, err := RepositoryDefaultBranch(RepositoryOptions{
+		Owner:      "inactdev",
+		Repo:       "inspector",
+		Token:      "test-token",
+		APIBaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if branch != "main" {
+		t.Fatalf("branch = %q, want main", branch)
+	}
+}
+
 func TestPostCommitStatus_Success(t *testing.T) {
 	var gotMethod, gotPath, gotAuth string
 	var gotBody struct {
