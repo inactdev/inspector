@@ -317,7 +317,7 @@ main() {
   local verdict reason
   IFS=$'\t' read -r verdict reason <<< "$(status_verdict "$state" "$STATUS_CONTEXT")"
   if [ "$verdict" = "red" ]; then
-    echo "::error::inspector status check failed - $reason. Absent and failing are treated the same: run inspector locally and let it stage, record, then publish a green \"$STATUS_CONTEXT\" status on this exact commit before merging."
+    echo "::error::inspector status check failed - $reason. Absent and failing are treated the same: run inspector locally and let it push a green \"$STATUS_CONTEXT\" status to this exact commit before merging."
     failed=1
   else
     echo "inspector status: green."
