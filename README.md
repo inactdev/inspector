@@ -179,14 +179,16 @@ Exit codes reserve `0`, `1`, and `2` for verdict attempts:
 - `0` green
 - `1` red
 - `2` no verdict, with one of two visibly different causes:
-  - **refused** - inspector could not reach a local verdict because no check
-    command or image was configured, no usable container runtime existed, the
-    working tree was dirty, the check timed out or was killed, or infrastructure
-    failed. A refusal never attempts to push or publish.
-  - **incomplete green publication** - the local check passed, but inspector
-    could not safely start publication on this platform or could not confirm the
-    complete staging, status, and branch sequence. A publication attempt may
-    have left the staging ref, status, or branch state described below.
+  - **refused** - inspector stopped before attempting any remote publication.
+    This includes local-check failures such as missing configuration, an unusable
+    container runtime, a dirty working tree, a timeout, or infrastructure
+    failure, and green-publication preflight failures such as an unsupported
+    platform, missing token, invalid remote, or default-branch target. A refusal
+    never attempts a staging push, status publication, or branch update.
+  - **incomplete green publication** - the local check passed and publication
+    began with the staging push, but inspector could not confirm the complete
+    staging, status, and branch sequence. The attempt may have left the staging
+    ref, status, or branch state described below.
 
   Neither cause is red. Never treat `2` as red.
 

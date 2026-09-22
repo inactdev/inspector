@@ -14,11 +14,12 @@ import (
 )
 
 // Exit codes reserve 0, 1, and 2 for verdict attempts: 0 green, 1 red,
-// and 2 no verdict. A refusal uses 2 when inspector could not reach a
-// verdict and never attempts to push or publish. A local green that
-// inspector could not publish in full - staging it remotely, recording
-// its status, then moving the branch - also uses 2, but is reported as
-// an incomplete publication rather than a refusal. exitUsage is for
+// and 2 no verdict. A refusal uses 2 for any failure before remote
+// publication starts and never attempts to push or publish. Once the
+// staging push begins, a local green that inspector cannot publish in
+// full - recording its status, then moving the branch - also uses 2,
+// but is reported as an incomplete publication rather than a refusal.
+// exitUsage is for
 // everything that is not a verdict attempt at all - --help, an
 // unrecognized flag, bad usage - so a
 // caller can never mistake a help request for a result. 64 follows the
