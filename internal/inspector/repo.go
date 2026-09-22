@@ -157,7 +157,7 @@ func ValidatePublicationCommit(repoRoot, expectedCommit string, policy Validatio
 		return err
 	}
 	if status != "" {
-		return fmt.Errorf("working tree changed during inspection, so the passing check was not run against commit %s exactly; commit or stash these files before retrying:\n\n%s", expectedCommit, status)
+		return fmt.Errorf("working tree changed during inspection, so the check result is not bound to commit %s exactly; commit or stash these files before retrying:\n\n%s", expectedCommit, status)
 	}
 	return nil
 }

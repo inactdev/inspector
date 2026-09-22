@@ -382,6 +382,12 @@ func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 	if strings.Contains(stderr, "green verdict above is real") {
 		t.Fatalf("stderr = %q, must not claim a verdict before publication succeeds", stderr)
 	}
+	if !strings.Contains(stderr, "refused:") || !strings.Contains(stderr, "no staging push, status publication, or branch update was attempted") {
+		t.Fatalf("stderr = %q, want a no-publication-attempt refusal", stderr)
+	}
+	if strings.Contains(stderr, "this is an incomplete publication") {
+		t.Fatalf("stderr = %q, must not label a prepublication refusal as incomplete publication", stderr)
+	}
 }
 
 func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
@@ -394,8 +400,11 @@ func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d - no origin remote must never exit as a success", code, exitRefused)
 	}
-	if !strings.Contains(stderr, "could not complete green publication") {
-		t.Fatalf("stderr = %q, want it to say the green result could not be published", stderr)
+	if !strings.Contains(stderr, "refused:") || !strings.Contains(stderr, "no staging push, status publication, or branch update was attempted") {
+		t.Fatalf("stderr = %q, want a no-publication-attempt refusal", stderr)
+	}
+	if strings.Contains(stderr, "this is an incomplete publication") {
+		t.Fatalf("stderr = %q, must not label a prepublication refusal as incomplete publication", stderr)
 	}
 }
 
@@ -562,6 +571,39 @@ func TestCLI_RefusesGreenCheckThatChangesTrackedCode(t *testing.T) {
 	}
 	if strings.Contains(stdout, "green -") {
 		t.Fatalf("stdout = %q, must not bless code changed by the check", stdout)
+	}
+	if !strings.Contains(stderr, "tracked.txt") {
+		t.Fatalf("stderr = %q, want it to name the file changed by the check", stderr)
+	}
+	if stub.Request.State != "" {
+		t.Fatalf("check-written change posted status state %q", stub.Request.State)
+	}
+	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatal("check-written change published a staging ref")
+	}
+	if _, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
+		t.Fatal("check-written change published the named branch")
+	}
+}
+
+func TestCLI_RefusesRedCheckThatChangesTrackedCode(t *testing.T) {
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{
+		".inspector.json": `{"check": "printf changed > tracked.txt; false", "image": "alpine"}`,
+		"tracked.txt":     "original",
+	})
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	previousValidatePublicationPlatform := validatePublicationPlatform
+	validatePublicationPlatform = func() error { return errors.New("publication unsupported") }
+	t.Cleanup(func() { validatePublicationPlatform = previousValidatePublicationPlatform })
+
+	code, stdout, stderr := runCLI(t, dir, "--branch", "feature")
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	}
+	if strings.Contains(stdout, "red -") {
+		t.Fatalf("stdout = %q, must refuse rather than report red after the check changed code", stdout)
 	}
 	if !strings.Contains(stderr, "tracked.txt") {
 		t.Fatalf("stderr = %q, want it to name the file changed by the check", stderr)
