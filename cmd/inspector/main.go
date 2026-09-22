@@ -225,7 +225,7 @@ func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, 
 		return "", publicationRefusal(fmt.Errorf("checking publication branch %q before staging: %w", publicationBranch, err))
 	}
 	if exists && remoteCommit == result.Commit {
-		return "", publicationRefusal(fmt.Errorf("publication branch %q already points at checked commit %s; inspector will not retroactively stamp a commit published before its required staging, status, and branch-update sequence", publicationBranch, result.Commit))
+		return "", publicationRefusal(fmt.Errorf("publication branch %q already points at checked commit %s; inspector will not retroactively stamp a commit published before its required staging, status, and branch-update sequence; make the correction as a new local commit and hand that commit to inspector before anything publishes it", publicationBranch, result.Commit))
 	}
 
 	stagingRef := inspector.StagingRefForCommit(result.Commit)

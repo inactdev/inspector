@@ -151,7 +151,9 @@ That self-hosting handoff is required for this repository too. A general build
 or delivery pipeline that pushes its commit directly will create a pull request
 head with no `inspector` status, and `inspector-gate` will correctly reject it.
 Running Inspector afterward is not a recovery path: Inspector refuses to
-retroactively approve a commit that the named branch already exposes.
+retroactively approve a commit that the named branch already exposes. Recovery
+requires a new local correction commit, handed to Inspector before any tool
+publishes it.
 
 `--branch` is required. Inspector never derives publication authority from the
 checkout, HEAD, tracking configuration, or any other ambient state, and it

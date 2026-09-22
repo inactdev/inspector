@@ -225,8 +225,8 @@ func TestCLI_RefusesCommitAlreadyOnPublicationBranch(t *testing.T) {
 	if strings.Contains(stdout, "green -") {
 		t.Fatalf("stdout = %q, must not approve a commit that reached the branch before its status", stdout)
 	}
-	if !strings.Contains(stderr, "already points at checked commit") || !strings.Contains(stderr, "will not retroactively stamp") {
-		t.Fatalf("stderr = %q, want it to explain the ordering refusal", stderr)
+	if !strings.Contains(stderr, "already points at checked commit") || !strings.Contains(stderr, "will not retroactively stamp") || !strings.Contains(stderr, "new local commit") || !strings.Contains(stderr, "before anything publishes it") {
+		t.Fatalf("stderr = %q, want it to explain the ordering refusal and recovery", stderr)
 	}
 	if stub.Request.State != "" {
 		t.Fatalf("prematurely published commit posted status state %q", stub.Request.State)
