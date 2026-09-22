@@ -138,10 +138,11 @@ decision that may be overruled: ambient destination authority conflicts with
 the architecture's explicit handoff, and a freshly pulled checkout is normally
 on the default branch, where an inferred push would bypass the pull request.
 
-The staging ref exists only so GitHub has C when it receives the status. It is
-removed after the named branch moves. Inspector captures `origin`'s publication
-target before the check and confirms repository metadata still names that exact
-target afterward. It also confirms C is still HEAD and rechecks the working tree
+The staging ref exists only so GitHub has C when it receives the status. After
+the named branch moves, Inspector attempts to remove the staging ref and warns
+if it cannot confirm removal. Inspector captures `origin`'s publication target
+before the check and confirms repository metadata still names that exact target
+afterward. It also confirms C is still HEAD and rechecks the working tree
 before any remote operation. It refuses and names every tracked change,
 non-ignored addition, or mutable index flag that could hide tracked content;
 ignored build output does not block publication. This is a captain decision that
@@ -252,9 +253,10 @@ or SSH instead. Inspector pushes from a temporary bare repository that can read
 C's objects but cannot inherit the checked repository's hooks or local Git
 configuration, and it does not pass `GITHUB_TOKEN` to Git. Pushes are
 non-interactive and time out rather than waiting forever for credentials or a
-stalled transport; a timeout kills git and its helper processes together. On platforms where Inspector cannot guarantee
-that complete process-tree termination, it still runs the local check and can
-return red, but refuses a green publication before starting any remote step.
+stalled transport; a timeout kills git and its helper processes together. On
+platforms where Inspector cannot guarantee that complete process-tree
+termination, it still runs the local check and can return red, but refuses a
+green publication before starting any remote step.
 Posting is not optional - a missing token, an unresolvable remote, a failed
 staging push, or GitHub refusing the request all fail loudly and exit `2`, even
 when the local check passed. A real local green that inspector could not

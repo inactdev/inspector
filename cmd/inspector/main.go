@@ -177,7 +177,7 @@ func incompletePublication(err error) error {
 // publishGreen performs the publication order that keeps inspector-gate from
 // observing a pull-request branch without an inspector status: stage the
 // checked commit remotely, record its green status, then move the branch.
-// The stage is a non-branch ref and is deleted once the branch moves.
+// The stage is a non-branch ref; its deletion is attempted once the branch moves.
 func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, result inspector.Result) (cleanupWarning string, err error) {
 	if err := validatePublicationPlatform(); err != nil {
 		return "", publicationRefusal(err)
