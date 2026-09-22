@@ -541,20 +541,38 @@ func TestPushRefRejectsEmbeddedHTTPCredentialsBeforeStartingGit(t *testing.T) {
 
 func TestPushRefUsesNonInteractiveAuthentication(t *testing.T) {
 	requirePublicationPlatform(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("finding git: %v", err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	globalConfig := filepath.Join(home, ".gitconfig")
+	configCmd := exec.Command(realGit, "config", "--file", globalConfig, "credential.helper", "test-helper")
+	if out, err := configCmd.CombinedOutput(); err != nil {
+		t.Fatalf("configuring credential helper: %v\n%s", err, out)
+	}
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
 	script := `#!/bin/sh
-case "$*" in *"rev-parse --git-path objects"*) echo .git/objects; exit 0;; *"rev-parse --show-object-format=storage"*) echo sha1; exit 0;; esac
+case "$*" in
+  *"config --includes"*) exec "$REAL_GIT" "$@";;
+  *"rev-parse --git-path objects"*) echo .git/objects; exit 0;;
+  *"rev-parse --show-object-format=storage"*) echo sha1; exit 0;;
+esac
 [ -z "$GITHUB_TOKEN" ] || exit 10
 [ "$GIT_ASKPASS" = "true" ] || exit 11
 [ "$GIT_TERMINAL_PROMPT" = "0" ] || exit 12
 [ "$GCM_INTERACTIVE" = "Never" ] || exit 13
+[ "$("$REAL_GIT" config --global --get credential.helper)" = "test-helper" ] || exit 15
 case "$GIT_SSH_COMMAND" in *BatchMode=yes*) exit 0 ;; *) exit 14 ;; esac
 `
 	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake git: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("REAL_GIT", realGit)
 	t.Setenv(GitHubTokenEnvVar, "must-not-reach-git")
 
 	if err := PushRefToRemote(t.TempDir(), "origin", "abc", "refs/heads/test"); err != nil {
@@ -595,6 +613,37 @@ func TestPushRefDoesNotRunRepositoryHooks(t *testing.T) {
 	}
 }
 
+func TestPushRefCannotRewriteResolvedRemote(t *testing.T) {
+	requirePublicationPlatform(t)
+	dir := newTestRepo(t, map[string]string{"tracked.txt": "content"})
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	intended := filepath.Join(t.TempDir(), "intended.git")
+	wrong := filepath.Join(t.TempDir(), "wrong.git")
+	for _, remote := range []string{intended, wrong} {
+		if out, err := exec.Command("git", "init", "--bare", "--quiet", remote).CombinedOutput(); err != nil {
+			t.Fatalf("creating bare remote: %v\n%s", err, out)
+		}
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	configCmd := exec.Command("git", "config", "--file", filepath.Join(home, ".gitconfig"), "url."+wrong+".insteadOf", intended)
+	if out, err := configCmd.CombinedOutput(); err != nil {
+		t.Fatalf("configuring URL rewrite: %v\n%s", err, out)
+	}
+
+	if err := PushRefToRemote(dir, intended, commit, "refs/heads/feature"); err != nil {
+		t.Fatalf("push to resolved remote failed: %v", err)
+	}
+	out, err := exec.Command("git", "--git-dir", intended, "rev-parse", "--verify", "refs/heads/feature").Output()
+	if err != nil || strings.TrimSpace(string(out)) != commit {
+		t.Fatalf("intended remote branch = %q, %v; want %s", strings.TrimSpace(string(out)), err, commit)
+	}
+	if err := exec.Command("git", "--git-dir", wrong, "rev-parse", "--verify", "refs/heads/feature").Run(); err == nil {
+		t.Fatal("URL rewrite moved the branch in the wrong repository")
+	}
+}
+
 func TestPushRefUsesRepositoryObjectFormat(t *testing.T) {
 	requirePublicationPlatform(t)
 	dir := newTestRepo(t, map[string]string{"tracked.txt": "content"})
@@ -620,7 +669,7 @@ func TestPushRefTimeoutKillsChildProcesses(t *testing.T) {
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
 	marker := filepath.Join(t.TempDir(), "survived")
-	script := "#!/bin/sh\ncase \"$*\" in *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"rev-parse --show-object-format=storage\"*) echo sha1; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\n(sleep 0.3; touch \"$SURVIVAL_MARKER\") &\nwait\n"
+	script := "#!/bin/sh\ncase \"$*\" in *\"config --includes\"*) exit 0;; *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"rev-parse --show-object-format=storage\"*) echo sha1; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\n(sleep 0.3; touch \"$SURVIVAL_MARKER\") &\nwait\n"
 	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake git: %v", err)
 	}
@@ -646,7 +695,7 @@ func TestPushRefRedactsCredentialsFromGitError(t *testing.T) {
 	requirePublicationPlatform(t)
 	binDir := t.TempDir()
 	fakeGit := filepath.Join(binDir, "git")
-	script := "#!/bin/sh\ncase \"$*\" in *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"rev-parse --show-object-format=storage\"*) echo sha1; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\necho 'fatal: https://user:supersecret@example.com/o/r.git rejected' >&2\nexit 1\n"
+	script := "#!/bin/sh\ncase \"$*\" in *\"config --includes\"*) exit 0;; *\"rev-parse --git-path objects\"*) echo .git/objects; exit 0;; *\"rev-parse --show-object-format=storage\"*) echo sha1; exit 0;; *\"init --bare --quiet\"*) exit 0;; esac\necho 'fatal: https://user:supersecret@example.com/o/r.git rejected' >&2\nexit 1\n"
 	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake git: %v", err)
 	}

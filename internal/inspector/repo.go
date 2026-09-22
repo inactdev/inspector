@@ -655,7 +655,15 @@ func runGitPush(dir string, args ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	env := publicationGitEnv(objectDir)
+	authConfig, err := publicationAuthenticationConfig(publicationRepo)
+	if err != nil {
+		return "", err
+	}
+	authConfigPath := filepath.Join(publicationRepo, "authentication.config")
+	if err := writePublicationAuthenticationConfig(authConfigPath, authConfig); err != nil {
+		return "", err
+	}
+	env := publicationGitEnv(objectDir, authConfigPath)
 	if err := initBareRepository(publicationRepo, objectFormat, env); err != nil {
 		return "", fmt.Errorf("creating isolated publication repository: %w", err)
 	}
@@ -814,6 +822,85 @@ func validationGitEnv() []string {
 	)
 }
 
-func publicationGitEnv(objectDir string) []string {
-	return append(nonInteractiveGitEnv(), "GIT_ALTERNATE_OBJECT_DIRECTORIES="+objectDir)
+type gitConfigEntry struct {
+	key   string
+	value string
+}
+
+func publicationAuthenticationConfig(dir string) ([]gitConfigEntry, error) {
+	args := []string{"config", "--includes", "--null", "--show-scope", "--list"}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = nonInteractiveGitEnv()
+	out, err := gitOutput(cmd, args)
+	if err != nil {
+		return nil, fmt.Errorf("reading Git authentication configuration: %w", err)
+	}
+	fields := strings.Split(out, "\x00")
+	var entries []gitConfigEntry
+	for i := 0; i+1 < len(fields); i += 2 {
+		scope, record := fields[i], fields[i+1]
+		if scope != "system" && scope != "global" {
+			continue
+		}
+		key, value, _ := strings.Cut(record, "\n")
+		lowerKey := strings.ToLower(key)
+		if strings.HasPrefix(lowerKey, "credential.") || strings.HasPrefix(lowerKey, "http.") {
+			entries = append(entries, gitConfigEntry{key: key, value: value})
+		}
+	}
+	return entries, nil
+}
+
+func writePublicationAuthenticationConfig(path string, entries []gitConfigEntry) error {
+	var config strings.Builder
+	for _, entry := range entries {
+		firstDot := strings.IndexByte(entry.key, '.')
+		lastDot := strings.LastIndexByte(entry.key, '.')
+		if firstDot <= 0 || lastDot == len(entry.key)-1 {
+			return fmt.Errorf("invalid Git authentication configuration key %q", entry.key)
+		}
+		section := entry.key[:firstDot]
+		name := entry.key[lastDot+1:]
+		if firstDot == lastDot {
+			fmt.Fprintf(&config, "[%s]\n\t%s = %s\n", section, name, quoteGitConfigValue(entry.value))
+			continue
+		}
+		subsection := entry.key[firstDot+1 : lastDot]
+		fmt.Fprintf(&config, "[%s %s]\n\t%s = %s\n", section, quoteGitConfigValue(subsection), name, quoteGitConfigValue(entry.value))
+	}
+	if err := os.WriteFile(path, []byte(config.String()), 0o600); err != nil {
+		return fmt.Errorf("writing isolated Git authentication configuration: %w", err)
+	}
+	return nil
+}
+
+func quoteGitConfigValue(value string) string {
+	var quoted strings.Builder
+	quoted.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '\\', '"':
+			quoted.WriteByte('\\')
+			quoted.WriteRune(r)
+		case '\n':
+			quoted.WriteString(`\n`)
+		case '\t':
+			quoted.WriteString(`\t`)
+		case '\b':
+			quoted.WriteString(`\b`)
+		default:
+			quoted.WriteRune(r)
+		}
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
+}
+
+func publicationGitEnv(objectDir, authConfigPath string) []string {
+	return append(nonInteractiveGitEnv(),
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES="+objectDir,
+		"GIT_CONFIG_GLOBAL="+authConfigPath,
+		"GIT_CONFIG_NOSYSTEM=1",
+	)
 }
