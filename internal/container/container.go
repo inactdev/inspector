@@ -97,13 +97,7 @@ type Cmd struct {
 // 128+N convention a directly-killed shell command already used, so
 // classifyResult needed no container-specific case.
 func New(ctx context.Context, r Run) *Cmd {
-	name := "inspector-check-" + randomHex(8)
-	cidFile := filepath.Join(os.TempDir(), name+".cid")
-
 	args := []string{
-		"run", "--rm",
-		"--name", name,
-		"--cidfile", cidFile,
 		"-v", r.RepoRoot + ":" + WorkspaceDir,
 		"-w", WorkspaceDir,
 	}
@@ -111,8 +105,19 @@ func New(ctx context.Context, r Run) *Cmd {
 		args = append(args, "--network", "none")
 	}
 	args = append(args, r.Image, "sh", "-c", r.Command)
+	return NewCommand(ctx, "inspector-check-", args...)
+}
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+// NewCommand builds a managed Docker run from the supplied arguments. Context
+// cancellation kills the container and every process inside it, not only the
+// attached Docker client.
+func NewCommand(ctx context.Context, namePrefix string, args ...string) *Cmd {
+	name := namePrefix + randomHex(8)
+	cidFile := filepath.Join(os.TempDir(), name+".cid")
+	dockerArgs := []string{"run", "--rm", "--name", name, "--cidfile", cidFile}
+	dockerArgs = append(dockerArgs, args...)
+
+	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
 	cmd.WaitDelay = 5 * time.Second
 
 	c := &Cmd{Cmd: cmd, cidFile: cidFile}

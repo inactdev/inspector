@@ -8,4 +8,4 @@ The test-change list is the one source exception. Its strict format admits only 
 
 The outer command starts the app. The examiner only receives its URL, so it cannot build the app or read the code used to start it. The first version drives HTTP backends. It does not claim to drive native iOS screens.
 
-The sealed agent calls Anthropic's Messages API with `ANTHROPIC_API_KEY`. Its only runtime tool is an HTTP request constrained to the supplied app URL. A generic Alpine runtime carries the static Inspector executable; do not replace it with a project image, because the image must not contain the judged application's source.
+The sealed agent calls Anthropic's Messages API with `ANTHROPIC_API_KEY`. Its only runtime tool is an HTTP request constrained to the supplied app URL and redirects cannot leave that app's origin. Inspector pins the Alpine runtime by digest and forces its own executable as the container entrypoint; callers cannot substitute a project image that may contain application source.

@@ -97,7 +97,7 @@ func RunAgent(ctx context.Context, opts AgentOptions) error {
 
 	initial := fmt.Sprintf("REQUEST (the only source of claimed outcomes):\n%s\n\nGUIDEBOOK (how to drive the running app):\n%s\n\nTEST CHANGES (the only source-code exception):\n%s", request, guidebook, testChanges)
 	messages := []anthropicMessage{{Role: "user", Content: initial}}
-	droveApp := false
+	observedDriveResult := false
 	for turn := 0; turn < maxAgentTurns; turn++ {
 		response, err := askModel(ctx, opts, messages)
 		if err != nil {
@@ -109,21 +109,23 @@ func RunAgent(ctx context.Context, opts AgentOptions) error {
 		messages = append(messages, anthropicMessage{Role: "assistant", Content: response.Content})
 
 		toolResults := make([]map[string]any, 0, len(response.Content))
+		driveSucceeded := false
 		for _, block := range response.Content {
 			if block.Type != "tool_use" {
 				continue
 			}
 			switch block.Name {
 			case "drive_app":
-				droveApp = true
 				answer, err := driveApp(ctx, baseURL, block.Input)
 				if err != nil {
 					answer = "driver error: " + err.Error()
+				} else {
+					driveSucceeded = true
 				}
 				toolResults = append(toolResults, toolResult(block.ID, answer))
 			case "submit_verdict":
-				if !droveApp {
-					return errors.New("model submitted a verdict without driving the app")
+				if !observedDriveResult {
+					return errors.New("model submitted a verdict before observing a successful app response")
 				}
 				var verdict Verdict
 				if err := json.Unmarshal(block.Input, &verdict); err != nil {
@@ -150,6 +152,9 @@ func RunAgent(ctx context.Context, opts AgentOptions) error {
 			return errors.New("model did not drive the app or submit a verdict")
 		}
 		messages = append(messages, anthropicMessage{Role: "user", Content: toolResults})
+		if driveSucceeded {
+			observedDriveResult = true
+		}
 	}
 	return fmt.Errorf("model did not submit a verdict within %d turns", maxAgentTurns)
 }
@@ -288,7 +293,16 @@ func driveApp(ctx context.Context, base *url.URL, input json.RawMessage) (string
 	for name, value := range call.Headers {
 		req.Header.Set(name, value)
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			if req.URL.Scheme != base.Scheme || req.URL.Host != base.Host {
+				return fmt.Errorf("redirect escapes the configured app origin to %s", req.URL.Redacted())
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("calling app: %w", err)
 	}

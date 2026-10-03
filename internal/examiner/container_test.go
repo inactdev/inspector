@@ -23,8 +23,9 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 	}
 	cmd := NewContainerCommand(context.Background(), ContainerOptions{
 		InputDir: inputDir, OutputDir: outputDir, Executable: executable,
-		AppURL: "http://app:8080", Model: "test-model", Image: "alpine:3.20", Network: "examiner-test",
+		AppURL: "http://app:8080", Model: "test-model", Network: "examiner-test",
 	})
+	defer cmd.Cleanup()
 
 	mounts := dockerMountSources(t, cmd.Args)
 	if mounts[applicationSource] {
@@ -39,8 +40,12 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 			t.Fatalf("container does not mount expected examiner resource %q: %#v", source, mounts)
 		}
 	}
-	if !strings.Contains(strings.Join(cmd.Args, " "), "--read-only") {
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "--read-only") {
 		t.Fatalf("docker command must keep the examiner filesystem read-only: %q", cmd.Args)
+	}
+	if !strings.Contains(args, "--entrypoint /examiner/inspector "+RuntimeImage) {
+		t.Fatalf("docker command must force Inspector as the entrypoint in the pinned runtime: %q", cmd.Args)
 	}
 }
 
@@ -57,12 +62,20 @@ func TestSealedContainerMountsExcludeApplicationSource(t *testing.T) {
 	}
 	cmd := NewContainerCommand(context.Background(), ContainerOptions{
 		InputDir: inputDir, OutputDir: outputDir, Executable: executable,
-		AppURL: "http://app:8080", Model: "test-model", Image: "alpine:3.20", Network: "none",
+		AppURL: "http://app:8080", Model: "test-model", Network: "none",
 	})
-	args := append([]string(nil), cmd.Args[1:]...)
-	args[0] = "create"
+	defer cmd.Cleanup()
 	name := fmt.Sprintf("inspector-examiner-mount-test-%d", time.Now().UnixNano())
-	args = append([]string{"create", "--name", name}, args[1:]...)
+	args := []string{"create", "--name", name}
+	for n := 2; n < len(cmd.Args); n++ {
+		switch cmd.Args[n] {
+		case "--rm":
+		case "--name", "--cidfile":
+			n++
+		default:
+			args = append(args, cmd.Args[n])
+		}
+	}
 	if output, err := runDocker(args...); err != nil {
 		t.Skipf("could not create alpine examiner container: %v: %s", err, output)
 	}
@@ -79,6 +92,40 @@ func TestSealedContainerMountsExcludeApplicationSource(t *testing.T) {
 	}
 	if strings.Contains(mountOutput, applicationSource) {
 		t.Fatalf("Docker mount configuration leaks application source %q: %s", applicationSource, mountOutput)
+	}
+}
+
+func TestNewContainerCommand_TimeoutKillsContainerAndDescendants(t *testing.T) {
+	if err := container.EnsureAvailable(); err != nil {
+		t.Skipf("no usable container runtime, skipping: %v", err)
+	}
+	inputDir := t.TempDir()
+	outputDir := t.TempDir()
+	executable := filepath.Join(t.TempDir(), "agent")
+	script := "#!/bin/sh\n(sleep 2; echo survived > /examiner/output/survived) &\nwait\n"
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing agent: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	cmd := NewContainerCommand(ctx, ContainerOptions{
+		InputDir: inputDir, OutputDir: outputDir, Executable: executable,
+		AppURL: "http://app:8080", Model: "test-model", Network: "none",
+	})
+	defer cmd.Cleanup()
+	start := time.Now()
+	_ = cmd.Run()
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("container returned %s after its timeout", elapsed)
+	}
+	if err := cmd.KillError(); err != nil {
+		t.Fatalf("stopping timed-out examiner container: %v", err)
+	}
+
+	time.Sleep(2200 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(outputDir, "survived")); !os.IsNotExist(err) {
+		t.Fatal("examiner child survived the timed-out container")
 	}
 }
 

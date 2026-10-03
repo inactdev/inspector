@@ -361,9 +361,10 @@ Use the architecture Docker reports for its Linux server (`arm64` is common on
 Apple Silicon; `amd64` is common elsewhere). The container receives read-only copies of exactly
 those three files, a static Inspector executable, and a writable temporary
 output directory. It has no repository mount, implementation diff, shell, or
-arbitrary HTTP tool. The model can call only the supplied app URL. The generic
-Alpine image is intentional - do not substitute the project image, which could
-contain application source.
+arbitrary HTTP tool. The model can call only the supplied app URL, and redirects
+cannot leave that app's origin. Inspector pins the Alpine runtime by digest,
+forces its own executable as the entrypoint, and does not allow callers to
+substitute a project image that could contain application source.
 
 The examiner derives claimed capabilities from the request, drives the app, and
 prints a JSON verdict per capability: `confirmed`, `not_confirmed`, or

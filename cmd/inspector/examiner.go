@@ -26,7 +26,6 @@ func runExaminer(args []string, stdout, stderr io.Writer) int {
 	owner := fs.String("owner", "", "GitHub repository owner (required)")
 	repo := fs.String("repo", "", "GitHub repository name (required)")
 	model := fs.String("model", "", "Anthropic model for deriving and driving scenarios (required)")
-	image := fs.String("image", examiner.DefaultImage, "generic runtime image for the sealed examiner")
 	agentBinary := fs.String("agent-binary", "", "Linux Inspector binary used inside the sealed container")
 	network := fs.String("network", examiner.DefaultNetwork, "Docker network that reaches the running app")
 	timeout := fs.Duration("timeout", examiner.DefaultTimeout, "maximum examination duration")
@@ -67,7 +66,6 @@ a sealed container; it never mounts the judged repository or implementation.
 		AppURL:     *appURL,
 		Model:      *model,
 		APIBaseURL: *apiBaseURL,
-		Image:      *image,
 		Network:    *network,
 		Executable: *agentBinary,
 		Timeout:    *timeout,
@@ -78,11 +76,11 @@ a sealed container; it never mounts the judged repository or implementation.
 		fmt.Fprintf(stderr, "refused: examiner could not start: %v\n", err)
 		return exitRefused
 	}
+	printExaminerResult(stdout, stderr, result)
 	if err := postExaminerStatus(*owner, *repo, *commit, result); err != nil {
 		fmt.Fprintf(stderr, "refused: examiner reached a %s result but could not post its separate status: %v\n", result.Kind, err)
 		return exitRefused
 	}
-	printExaminerResult(stdout, stderr, result)
 	switch result.Kind {
 	case examiner.Green:
 		return exitGreen

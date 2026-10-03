@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -17,7 +16,7 @@ import (
 )
 
 const (
-	DefaultImage   = "alpine:3.20"
+	RuntimeImage   = "alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
 	DefaultNetwork = "bridge"
 	DefaultTimeout = 10 * time.Minute
 )
@@ -29,7 +28,6 @@ type RunOptions struct {
 	AppURL     string
 	Model      string
 	APIBaseURL string
-	Image      string
 	Network    string
 	Timeout    time.Duration
 	Executable string
@@ -86,10 +84,6 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	image := opts.Image
-	if image == "" {
-		image = DefaultImage
-	}
 	network := opts.Network
 	if network == "" {
 		network = DefaultNetwork
@@ -104,16 +98,20 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		AppURL:     opts.AppURL,
 		Model:      opts.Model,
 		APIBaseURL: opts.APIBaseURL,
-		Image:      image,
 		Network:    network,
 	})
+	defer cmd.Cleanup()
 	cmd.Stdout = opts.Stdout
 	cmd.Stderr = opts.Stderr
-	if err := cmd.Run(); err != nil {
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return Result{Kind: Refused, Message: fmt.Sprintf("examiner ran past its %s timeout; it could not be tested, not judged wrong", timeout)}, nil
-		}
-		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent did not complete: %v", err)}, nil
+	runErr := cmd.Run()
+	if killErr := cmd.KillError(); killErr != nil {
+		return Result{Kind: Refused, Message: fmt.Sprintf("examiner container could not be stopped: %v; it may still be running", killErr)}, nil
+	}
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return Result{Kind: Refused, Message: fmt.Sprintf("examiner ran past its %s timeout; it could not be tested, not judged wrong", timeout)}, nil
+	}
+	if runErr != nil {
+		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent did not complete: %v", runErr)}, nil
 	}
 	data, err := os.ReadFile(filepath.Join(outputDir, VerdictName))
 	if err != nil {
@@ -138,7 +136,7 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 type ContainerOptions struct {
 	InputDir, OutputDir, Executable string
 	AppURL, Model, APIBaseURL       string
-	Image, Network                  string
+	Network                         string
 }
 
 func jsonUnmarshalStrict(data []byte, target any) error {
@@ -159,9 +157,8 @@ func jsonUnmarshalStrict(data []byte, target any) error {
 // NewContainerCommand builds the sealed Docker invocation. The input directory
 // is read-only, the output directory is the sole writable host mount, and the
 // static Inspector executable is the only program copied in.
-func NewContainerCommand(ctx context.Context, opts ContainerOptions) *exec.Cmd {
+func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.Cmd {
 	args := []string{
-		"run", "--rm",
 		"--read-only",
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
@@ -172,8 +169,9 @@ func NewContainerCommand(ctx context.Context, opts ContainerOptions) *exec.Cmd {
 		"--workdir", "/examiner",
 		"--network", opts.Network,
 		"--env", AnthropicAPIKeyEnvVar,
-		opts.Image,
-		"/examiner/inspector", "examiner-agent",
+		"--entrypoint", "/examiner/inspector",
+		RuntimeImage,
+		"examiner-agent",
 		"--input-dir", "/examiner/input",
 		"--output-dir", "/examiner/output",
 		"--app-url", opts.AppURL,
@@ -182,5 +180,5 @@ func NewContainerCommand(ctx context.Context, opts ContainerOptions) *exec.Cmd {
 	if opts.APIBaseURL != "" {
 		args = append(args, "--api-base-url", opts.APIBaseURL)
 	}
-	return exec.CommandContext(ctx, "docker", args...)
+	return container.NewCommand(ctx, "inspector-examiner-", args...)
 }

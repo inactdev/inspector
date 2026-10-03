@@ -85,6 +85,36 @@ func TestExaminer_RefusalPostsErrorNotFailure(t *testing.T) {
 	}
 }
 
+func TestExaminer_StatusFailurePreservesLocalFindings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "status unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	withExaminerRun(t, examiner.Result{
+		Kind: examiner.Red,
+		Verdict: examiner.Verdict{Outcomes: []examiner.Outcome{{
+			Claim: "duplicate captures update the existing inkling", Verdict: examiner.NotConfirmed,
+			Scenario: "POST twice", Evidence: "two entries returned", ProposedRegression: "add an HTTP upsert regression",
+		}}},
+	})
+	previousAPIBaseURL := githubAPIBaseURL
+	githubAPIBaseURL = server.URL
+	t.Cleanup(func() { githubAPIBaseURL = previousAPIBaseURL })
+	t.Setenv("GITHUB_TOKEN", "test-token")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", "deadbeef", "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte("add an HTTP upsert regression")) {
+		t.Fatalf("stdout = %q, want the completed finding despite status failure", stdout.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("could not post its separate status")) {
+		t.Fatalf("stderr = %q, want publication refusal", stderr.String())
+	}
+}
+
 func withExaminerRun(t *testing.T, result examiner.Result) {
 	t.Helper()
 	previous := runExamination

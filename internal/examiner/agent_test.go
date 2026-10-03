@@ -85,6 +85,75 @@ func TestRunAgent_RequiresDrivingTheAppBeforeSubmitting(t *testing.T) {
 	}
 }
 
+func TestRunAgent_RequiresObservingSuccessfulDriveResult(t *testing.T) {
+	modelCalls := 0
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelCalls++
+		if modelCalls == 1 {
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"drive-1","name":"drive_app","input":{"method":"GET","path":"http://other.example"}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"verdict-1","name":"submit_verdict","input":{"outcomes":[{"claim":"capture saves","verdict":"confirmed","scenario":"GET /inklings","evidence":"claimed"}]}}]}`))
+	}))
+	defer model.Close()
+
+	inputDir, outputDir := agentDirectories(t)
+	t.Setenv(AnthropicAPIKeyEnvVar, "test-key")
+	err := RunAgent(context.Background(), AgentOptions{
+		InputDir: inputDir, OutputDir: outputDir, AppURL: "http://127.0.0.1:8080", Model: "test-model", APIBaseURL: model.URL,
+	})
+	if err == nil {
+		t.Fatal("RunAgent() accepted a verdict after only a failed driver call")
+	}
+}
+
+func TestRunAgent_RejectsVerdictAlongsideFirstDrive(t *testing.T) {
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer app.Close()
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"drive-1","name":"drive_app","input":{"method":"GET","path":"/inklings"}},{"type":"tool_use","id":"verdict-1","name":"submit_verdict","input":{"outcomes":[{"claim":"saved inklings can be listed","verdict":"confirmed","scenario":"GET /inklings","evidence":"claimed"}]}}]}`))
+	}))
+	defer model.Close()
+
+	inputDir, outputDir := agentDirectories(t)
+	t.Setenv(AnthropicAPIKeyEnvVar, "test-key")
+	err := RunAgent(context.Background(), AgentOptions{
+		InputDir: inputDir, OutputDir: outputDir, AppURL: app.URL, Model: "test-model", APIBaseURL: model.URL,
+	})
+	if err == nil {
+		t.Fatal("RunAgent() accepted a verdict before the model observed the driver result")
+	}
+}
+
+func TestDriveApp_RejectsRedirectToAnotherOrigin(t *testing.T) {
+	destinationCalls := 0
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		destinationCalls++
+	}))
+	defer destination.Close()
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL+"/private", http.StatusFound)
+	}))
+	defer app.Close()
+	base, err := validAppURL(app.URL)
+	if err != nil {
+		t.Fatalf("validAppURL() error = %v", err)
+	}
+	input, err := json.Marshal(appRequest{Method: http.MethodGet, Path: "/redirect"})
+	if err != nil {
+		t.Fatalf("encoding driver call: %v", err)
+	}
+
+	if _, err := driveApp(context.Background(), base, input); err == nil {
+		t.Fatal("driveApp() followed a redirect outside the configured app origin")
+	}
+	if destinationCalls != 0 {
+		t.Fatalf("redirect destination received %d calls, want none", destinationCalls)
+	}
+}
+
 func agentDirectories(t *testing.T) (string, string) {
 	t.Helper()
 	inputDir := t.TempDir()
