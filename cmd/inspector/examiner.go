@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -55,6 +56,10 @@ a sealed container; it never mounts the judged repository or implementation.
 			return exitRefused
 		}
 	}
+	if !isFullCommitSHA(*commit) {
+		fmt.Fprintln(stderr, "refused: --commit must be a full 40-character commit SHA")
+		return exitRefused
+	}
 
 	result, err := runExamination(context.Background(), examiner.RunOptions{
 		Inputs: examiner.Inputs{
@@ -86,6 +91,14 @@ a sealed container; it never mounts the judged repository or implementation.
 	default:
 		return exitRefused
 	}
+}
+
+func isFullCommitSHA(commit string) bool {
+	if len(commit) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(commit)
+	return err == nil
 }
 
 func postExaminerStatus(owner, repo, commit string, result examiner.Result) error {

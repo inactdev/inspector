@@ -70,11 +70,11 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 	defer cleanupAgent()
 
-	outputDir, err := os.MkdirTemp("", "inspector-examiner-output-")
+	outputDir, verdictPath, cleanupOutput, err := prepareOutput()
 	if err != nil {
-		return Result{}, fmt.Errorf("creating examiner output directory: %w", err)
+		return Result{}, err
 	}
-	defer os.RemoveAll(outputDir)
+	defer cleanupOutput()
 
 	network := opts.Network
 	if network == "" {
@@ -104,7 +104,7 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	if runErr != nil {
 		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent did not complete: %v", runErr)}, nil
 	}
-	data, err := os.ReadFile(filepath.Join(outputDir, VerdictName))
+	data, err := os.ReadFile(verdictPath)
 	if err != nil {
 		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent completed without a verdict: %v", err)}, nil
 	}
@@ -120,6 +120,25 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		return Result{Kind: Refused, Message: "examiner agent verdict did not match its per-outcome results"}, nil
 	}
 	return checked, nil
+}
+
+func prepareOutput() (string, string, func(), error) {
+	dir, err := os.MkdirTemp("", "inspector-examiner-output-")
+	if err != nil {
+		return "", "", nil, fmt.Errorf("creating examiner output directory: %w", err)
+	}
+	cleanup := func() { os.RemoveAll(dir) }
+	path := filepath.Join(dir, VerdictName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		cleanup()
+		return "", "", nil, fmt.Errorf("creating examiner verdict: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", "", nil, fmt.Errorf("creating examiner verdict: %w", err)
+	}
+	return dir, path, cleanup, nil
 }
 
 // ContainerOptions names the only filesystem objects mounted into the examiner

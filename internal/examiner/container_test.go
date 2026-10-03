@@ -97,6 +97,42 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 	}
 }
 
+func TestPreparedVerdictRemainsReadableAfterContainerWrite(t *testing.T) {
+	if err := container.EnsureAvailable(); err != nil {
+		t.Skipf("no usable container runtime, skipping: %v", err)
+	}
+	outputDir, verdictPath, cleanupOutput, err := prepareOutput()
+	if err != nil {
+		t.Fatalf("prepareOutput() error = %v", err)
+	}
+	defer cleanupOutput()
+	if _, err := os.Stat(verdictPath); err != nil {
+		t.Fatalf("verdict was not pre-created on the host: %v", err)
+	}
+
+	agentExecutable := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(agentExecutable, []byte("#!/bin/sh\nprintf container-verdict > /examiner/output/verdict.json\n"), 0o700); err != nil {
+		t.Fatalf("writing agent: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := NewContainerCommand(ctx, ContainerOptions{
+		InputDir: t.TempDir(), OutputDir: outputDir, AgentExecutable: agentExecutable,
+		AppURL: "http://app:8080", Model: "test-model", Network: "none",
+	})
+	defer cmd.Cleanup()
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("container write failed: %v", err)
+	}
+	data, err := os.ReadFile(verdictPath)
+	if err != nil {
+		t.Fatalf("host could not read container-written verdict: %v", err)
+	}
+	if string(data) != "container-verdict" {
+		t.Fatalf("verdict = %q, want container-verdict", data)
+	}
+}
+
 func TestSealedContainerMountsExcludeApplicationSource(t *testing.T) {
 	if err := container.EnsureAvailable(); err != nil {
 		t.Skipf("no usable container runtime, skipping: %v", err)

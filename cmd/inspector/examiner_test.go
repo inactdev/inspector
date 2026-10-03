@@ -14,6 +14,8 @@ import (
 	"github.com/inactdev/inspector/internal/examiner"
 )
 
+const testExaminerCommit = "0123456789abcdef0123456789abcdef01234567"
+
 func TestExaminer_RedPostsItsOwnFailureStatusAndNamesTheCapability(t *testing.T) {
 	var got struct {
 		State   string `json:"state"`
@@ -42,7 +44,7 @@ func TestExaminer_RedPostsItsOwnFailureStatusAndNamesTheCapability(t *testing.T)
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", "deadbeef", "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
+	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", testExaminerCommit, "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
 	if code != exitRed {
 		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitRed, stderr.String())
 	}
@@ -76,7 +78,7 @@ func TestExaminer_RefusalPostsErrorNotFailure(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", "deadbeef", "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
+	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", testExaminerCommit, "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d", code, exitRefused)
 	}
@@ -96,6 +98,28 @@ func TestExaminer_RejectsCallerSuppliedAgentBinary(t *testing.T) {
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte("flag provided but not defined")) {
 		t.Fatalf("stderr = %q, want rejected agent override", stderr.String())
+	}
+}
+
+func TestExaminer_RejectsMutableStatusTarget(t *testing.T) {
+	runCalled := false
+	previousRun := runExamination
+	runExamination = func(context.Context, examiner.RunOptions) (examiner.Result, error) {
+		runCalled = true
+		return examiner.Result{Kind: examiner.Green}, nil
+	}
+	t.Cleanup(func() { runExamination = previousRun })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", "pull-request-branch", "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	}
+	if runCalled {
+		t.Fatal("examination ran for a mutable status target")
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("full 40-character commit SHA")) {
+		t.Fatalf("stderr = %q, want immutable commit refusal", stderr.String())
 	}
 }
 
@@ -122,7 +146,7 @@ func TestExaminer_StartFailurePostsErrorStatus(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", "deadbeef", "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
+	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", testExaminerCommit, "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d", code, exitRefused)
 	}
@@ -183,7 +207,7 @@ func TestExaminer_StatusFailurePreservesLocalFindings(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", "deadbeef", "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
+	code := run([]string{"examine", "--request", "request", "--guidebook", "guidebook", "--test-changes", "changes", "--app-url", "http://app", "--commit", testExaminerCommit, "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
 	if code != exitRefused {
 		t.Fatalf("exit code = %d, want %d", code, exitRefused)
 	}
