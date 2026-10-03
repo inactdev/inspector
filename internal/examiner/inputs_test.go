@@ -1,6 +1,7 @@
 package examiner
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,5 +63,49 @@ func TestParseTestChanges_RejectsUnrecognizedChannels(t *testing.T) {
 	}`))
 	if err == nil {
 		t.Fatal("ParseTestChanges() accepted an implementation-diff field")
+	}
+}
+
+func TestParseTestChanges_RejectsDuplicateSourceChannel(t *testing.T) {
+	_, err := ParseTestChanges([]byte(`{
+		"baseCommit":"abc123",
+		"files":[{"path":"backend/server.go","change":"modified","before":"old","after":"new"}],
+		"files":[]
+	}`))
+	if err == nil {
+		t.Fatal("ParseTestChanges() accepted a duplicate field hiding application source")
+	}
+}
+
+func TestPrepareInputs_WritesCanonicalTestChanges(t *testing.T) {
+	dir := t.TempDir()
+	request := filepath.Join(dir, "request.md")
+	guidebook := filepath.Join(dir, "guidebook.md")
+	testChanges := filepath.Join(dir, "changes.json")
+	for path, content := range map[string]string{
+		request:     "Add capture.",
+		guidebook:   "POST /inklings creates a capture.",
+		testChanges: "{\n  \"files\": [],\n  \"baseCommit\": \"abc123\"\n}\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+	}
+
+	prepared, err := PrepareInputs(Inputs{RequestPath: request, GuidebookPath: guidebook, TestChangesPath: testChanges})
+	if err != nil {
+		t.Fatalf("PrepareInputs() error = %v", err)
+	}
+	defer prepared.Cleanup()
+	data, err := os.ReadFile(filepath.Join(prepared.Dir, InputTestChangesName))
+	if err != nil {
+		t.Fatalf("reading prepared test changes: %v", err)
+	}
+	want, err := json.Marshal(prepared.TestChanges)
+	if err != nil {
+		t.Fatalf("marshaling parsed test changes: %v", err)
+	}
+	if string(data) != string(want) {
+		t.Fatalf("prepared test changes = %q, want canonical validated JSON %q", data, want)
 	}
 }

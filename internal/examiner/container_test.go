@@ -2,6 +2,7 @@ package examiner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,16 +14,40 @@ import (
 	"github.com/inactdev/inspector/internal/container"
 )
 
+func TestBundledAgentRunsOnDockerServerPlatform(t *testing.T) {
+	if err := container.EnsureAvailable(); err != nil {
+		t.Skipf("no usable container runtime, skipping: %v", err)
+	}
+	agentExecutable, cleanup, err := prepareAgentExecutable()
+	if err != nil {
+		t.Fatalf("prepareAgentExecutable() error = %v", err)
+	}
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--read-only", "--network", "none",
+		"--mount", "type=bind,src="+agentExecutable+",dst=/examiner/agent,readonly",
+		"--entrypoint", "/examiner/agent", RuntimeImage, "--help").CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 64 {
+		t.Fatalf("bundled examiner agent --help error = %v, output = %s", err, output)
+	}
+	if !strings.Contains(string(output), "Usage of examiner-agent") {
+		t.Fatalf("bundled examiner agent did not emit its CLI help: %s", output)
+	}
+}
+
 func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 	applicationSource := t.TempDir()
 	inputDir := t.TempDir()
 	outputDir := t.TempDir()
-	executable := filepath.Join(t.TempDir(), "inspector")
-	if err := os.WriteFile(executable, []byte("placeholder"), 0o700); err != nil {
-		t.Fatalf("writing executable placeholder: %v", err)
+	agentExecutable := filepath.Join(t.TempDir(), "examiner-agent")
+	if err := os.WriteFile(agentExecutable, []byte("placeholder"), 0o700); err != nil {
+		t.Fatalf("writing agent placeholder: %v", err)
 	}
 	cmd := NewContainerCommand(context.Background(), ContainerOptions{
-		InputDir: inputDir, OutputDir: outputDir, Executable: executable,
+		InputDir: inputDir, OutputDir: outputDir, AgentExecutable: agentExecutable,
 		AppURL: "http://app:8080", Model: "test-model", Network: "examiner-test", Timeout: 23 * time.Minute,
 	})
 	defer cmd.Cleanup()
@@ -31,7 +56,7 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 	if mounts[applicationSource] {
 		t.Fatalf("application source %q is reachable from the examiner container", applicationSource)
 	}
-	want := map[string]bool{inputDir: true, outputDir: true, executable: true}
+	want := map[string]bool{inputDir: true, outputDir: true, agentExecutable: true}
 	if len(mounts) != len(want) {
 		t.Fatalf("container mount sources = %#v, want only %#v", mounts, want)
 	}
@@ -44,7 +69,7 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 	if !strings.Contains(args, "--read-only") {
 		t.Fatalf("docker command must keep the examiner filesystem read-only: %q", cmd.Args)
 	}
-	if !strings.Contains(args, "--entrypoint /examiner/inspector "+RuntimeImage) {
+	if !strings.Contains(args, "--entrypoint /examiner/agent "+RuntimeImage) {
 		t.Fatalf("docker command must force Inspector as the entrypoint in the pinned runtime: %q", cmd.Args)
 	}
 	if !strings.Contains(args, "--timeout 23m0s") {
@@ -59,12 +84,12 @@ func TestSealedContainerMountsExcludeApplicationSource(t *testing.T) {
 	applicationSource := t.TempDir()
 	inputDir := t.TempDir()
 	outputDir := t.TempDir()
-	executable := filepath.Join(t.TempDir(), "inspector")
-	if err := os.WriteFile(executable, []byte("placeholder"), 0o700); err != nil {
-		t.Fatalf("writing executable placeholder: %v", err)
+	agentExecutable := filepath.Join(t.TempDir(), "examiner-agent")
+	if err := os.WriteFile(agentExecutable, []byte("placeholder"), 0o700); err != nil {
+		t.Fatalf("writing agent placeholder: %v", err)
 	}
 	cmd := NewContainerCommand(context.Background(), ContainerOptions{
-		InputDir: inputDir, OutputDir: outputDir, Executable: executable,
+		InputDir: inputDir, OutputDir: outputDir, AgentExecutable: agentExecutable,
 		AppURL: "http://app:8080", Model: "test-model", Network: "none",
 	})
 	defer cmd.Cleanup()
@@ -104,16 +129,16 @@ func TestNewContainerCommand_TimeoutKillsContainerAndDescendants(t *testing.T) {
 	}
 	inputDir := t.TempDir()
 	outputDir := t.TempDir()
-	executable := filepath.Join(t.TempDir(), "agent")
+	agentExecutable := filepath.Join(t.TempDir(), "agent")
 	script := "#!/bin/sh\n(sleep 2; echo survived > /examiner/output/survived) &\nwait\n"
-	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(agentExecutable, []byte(script), 0o700); err != nil {
 		t.Fatalf("writing agent: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	cmd := NewContainerCommand(ctx, ContainerOptions{
-		InputDir: inputDir, OutputDir: outputDir, Executable: executable,
+		InputDir: inputDir, OutputDir: outputDir, AgentExecutable: agentExecutable,
 		AppURL: "http://app:8080", Model: "test-model", Network: "none",
 	})
 	defer cmd.Cleanup()

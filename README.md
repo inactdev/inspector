@@ -349,17 +349,16 @@ file with the relevant before and after test content. Non-test paths and extra
 fields are refused rather than becoming an implementation-source channel.
 
 The caller, not the examiner, starts the app and gives the sealed container a
-network that reaches it. The current Inspector executable is mounted as the
-agent and must therefore be a static Linux binary matching Docker's server
-architecture. Examiner runs from non-Linux hosts are refused rather than
-accepting a caller-supplied executable whose contents Inspector cannot trust.
-The container receives read-only copies of exactly those three files, that
-Inspector executable, and a writable temporary output directory. It has no
-repository mount, implementation diff, shell, or arbitrary HTTP tool. The model
-can call only the supplied app URL, and redirects cannot leave that app's
-origin. Inspector pins the Alpine runtime by digest, forces its own executable
-as the entrypoint, and does not allow callers to substitute a project image or
-agent binary that could contain application source.
+network that reaches it. Inspector carries integrity-pinned static Linux agents
+for AMD64 and ARM64 Docker servers, so the host installation may run on Linux,
+macOS, or Windows without supplying executable code to the container. The
+container receives read-only copies of exactly those three files, the matching
+bundled agent, and a writable temporary output directory. It has no repository
+mount, implementation diff, shell, or arbitrary HTTP tool. The model can call
+only the supplied app URL, and redirects cannot leave that app's origin.
+Inspector pins the Alpine runtime by digest, forces the bundled agent as its
+entrypoint, and does not allow callers to substitute a project image or agent
+binary that could contain application source.
 
 The examiner derives claimed capabilities from the request, drives the app, and
 prints a JSON verdict per capability: `confirmed`, `not_confirmed`, or

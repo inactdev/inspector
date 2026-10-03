@@ -1,3 +1,5 @@
+//go:build !examiner_agent
+
 package examiner
 
 import (
@@ -55,20 +57,11 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		return Result{Kind: Refused, Message: fmt.Sprintf("no usable container runtime: %v", err)}, nil
 	}
 
-	executable, err := os.Executable()
+	agentExecutable, cleanupAgent, err := prepareAgentExecutable()
 	if err != nil {
-		return Result{}, fmt.Errorf("locating inspector executable: %w", err)
+		return Result{Kind: Refused, Message: fmt.Sprintf("preparing trusted examiner agent: %v", err)}, nil
 	}
-	executable, err = filepath.Abs(executable)
-	if err != nil {
-		return Result{}, fmt.Errorf("resolving inspector executable: %w", err)
-	}
-	if info, err := os.Stat(executable); err != nil || info.IsDir() {
-		if err == nil {
-			err = errors.New("is a directory")
-		}
-		return Result{Kind: Refused, Message: fmt.Sprintf("examiner executable %q: %v", executable, err)}, nil
-	}
+	defer cleanupAgent()
 
 	outputDir, err := os.MkdirTemp("", "inspector-examiner-output-")
 	if err != nil {
@@ -88,14 +81,14 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := NewContainerCommand(runCtx, ContainerOptions{
-		InputDir:   prepared.Dir,
-		OutputDir:  outputDir,
-		Executable: executable,
-		AppURL:     opts.AppURL,
-		Model:      opts.Model,
-		APIBaseURL: opts.APIBaseURL,
-		Network:    network,
-		Timeout:    timeout,
+		InputDir:        prepared.Dir,
+		OutputDir:       outputDir,
+		AgentExecutable: agentExecutable,
+		AppURL:          opts.AppURL,
+		Model:           opts.Model,
+		APIBaseURL:      opts.APIBaseURL,
+		Network:         network,
+		Timeout:         timeout,
 	})
 	defer cmd.Cleanup()
 	cmd.Stdout = opts.Stdout
@@ -131,10 +124,10 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 // ContainerOptions names the only filesystem objects mounted into the examiner
 // container. It intentionally has no application-source field.
 type ContainerOptions struct {
-	InputDir, OutputDir, Executable string
-	AppURL, Model, APIBaseURL       string
-	Network                         string
-	Timeout                         time.Duration
+	InputDir, OutputDir, AgentExecutable string
+	AppURL, Model, APIBaseURL            string
+	Network                              string
+	Timeout                              time.Duration
 }
 
 func jsonUnmarshalStrict(data []byte, target any) error {
@@ -154,7 +147,7 @@ func jsonUnmarshalStrict(data []byte, target any) error {
 
 // NewContainerCommand builds the sealed Docker invocation. The input directory
 // is read-only, the output directory is the sole writable host mount, and the
-// static Inspector executable is the only program copied in.
+// bundled Linux examiner agent is the only program copied in.
 func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.Cmd {
 	timeout := opts.Timeout
 	if timeout <= 0 {
@@ -167,13 +160,12 @@ func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
 		"--mount", "type=bind,src=" + opts.InputDir + ",dst=/examiner/input,readonly",
 		"--mount", "type=bind,src=" + opts.OutputDir + ",dst=/examiner/output",
-		"--mount", "type=bind,src=" + opts.Executable + ",dst=/examiner/inspector,readonly",
+		"--mount", "type=bind,src=" + opts.AgentExecutable + ",dst=/examiner/agent,readonly",
 		"--workdir", "/examiner",
 		"--network", opts.Network,
 		"--env", AnthropicAPIKeyEnvVar,
-		"--entrypoint", "/examiner/inspector",
+		"--entrypoint", "/examiner/agent",
 		RuntimeImage,
-		"examiner-agent",
 		"--input-dir", "/examiner/input",
 		"--output-dir", "/examiner/output",
 		"--app-url", opts.AppURL,

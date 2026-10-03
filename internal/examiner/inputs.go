@@ -3,6 +3,7 @@ package examiner
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -52,6 +53,10 @@ func PrepareInputs(inputs Inputs) (PreparedInputs, error) {
 	if err != nil {
 		return PreparedInputs{}, err
 	}
+	canonicalTestChanges, err := json.Marshal(list)
+	if err != nil {
+		return PreparedInputs{}, fmt.Errorf("serializing validated test-change list: %w", err)
+	}
 
 	dir, err := os.MkdirTemp("", "inspector-examiner-")
 	if err != nil {
@@ -59,7 +64,7 @@ func PrepareInputs(inputs Inputs) (PreparedInputs, error) {
 	}
 	prepared := PreparedInputs{Dir: dir, TestChanges: list}
 	for name, data := range map[string][]byte{
-		InputRequestName: request, InputGuidebookName: guidebook, InputTestChangesName: testChanges,
+		InputRequestName: request, InputGuidebookName: guidebook, InputTestChangesName: canonicalTestChanges,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o400); err != nil {
 			prepared.Cleanup()
@@ -99,6 +104,9 @@ func readInput(path, name string) ([]byte, error) {
 // ParseTestChanges accepts only test files shaped like *_test.*. This keeps the
 // deliberate test-diff exception from becoming a channel for app source.
 func ParseTestChanges(data []byte) (TestChangeList, error) {
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return TestChangeList{}, fmt.Errorf("parsing test-change list: %w", err)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var list TestChangeList
@@ -140,6 +148,64 @@ func ParseTestChanges(data []byte) (TestChangeList, error) {
 		}
 	}
 	return list, nil
+}
+
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var readValue func() error
+	readValue = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			keys := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("object key is not a string")
+				}
+				if _, exists := keys[key]; exists {
+					return fmt.Errorf("duplicate field %q", key)
+				}
+				keys[key] = struct{}{}
+				if err := readValue(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		case '[':
+			for decoder.More() {
+				if err := readValue(); err != nil {
+					return err
+				}
+			}
+			_, err = decoder.Token()
+			return err
+		default:
+			return fmt.Errorf("unexpected delimiter %q", delim)
+		}
+	}
+	if err := readValue(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return errors.New("contains more than one JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func isTestPath(path string) bool {
