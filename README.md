@@ -349,22 +349,17 @@ file with the relevant before and after test content. Non-test paths and extra
 fields are refused rather than becoming an implementation-source channel.
 
 The caller, not the examiner, starts the app and gives the sealed container a
-network that reaches it. Docker containers run Linux binaries. On a non-Linux
-host, build a static Linux copy of this Inspector checkout and pass it with
-`--agent-binary`:
-
-```
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/inspector-examiner ./cmd/inspector
-```
-
-Use the architecture Docker reports for its Linux server (`arm64` is common on
-Apple Silicon; `amd64` is common elsewhere). The container receives read-only copies of exactly
-those three files, a static Inspector executable, and a writable temporary
-output directory. It has no repository mount, implementation diff, shell, or
-arbitrary HTTP tool. The model can call only the supplied app URL, and redirects
-cannot leave that app's origin. Inspector pins the Alpine runtime by digest,
-forces its own executable as the entrypoint, and does not allow callers to
-substitute a project image that could contain application source.
+network that reaches it. The current Inspector executable is mounted as the
+agent and must therefore be a static Linux binary matching Docker's server
+architecture. Examiner runs from non-Linux hosts are refused rather than
+accepting a caller-supplied executable whose contents Inspector cannot trust.
+The container receives read-only copies of exactly those three files, that
+Inspector executable, and a writable temporary output directory. It has no
+repository mount, implementation diff, shell, or arbitrary HTTP tool. The model
+can call only the supplied app URL, and redirects cannot leave that app's
+origin. Inspector pins the Alpine runtime by digest, forces its own executable
+as the entrypoint, and does not allow callers to substitute a project image or
+agent binary that could contain application source.
 
 The examiner derives claimed capabilities from the request, drives the app, and
 prints a JSON verdict per capability: `confirmed`, `not_confirmed`, or

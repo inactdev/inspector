@@ -30,7 +30,6 @@ type RunOptions struct {
 	APIBaseURL string
 	Network    string
 	Timeout    time.Duration
-	Executable string
 	Stdout     io.Writer
 	Stderr     io.Writer
 }
@@ -56,12 +55,9 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		return Result{Kind: Refused, Message: fmt.Sprintf("no usable container runtime: %v", err)}, nil
 	}
 
-	executable := opts.Executable
-	if executable == "" {
-		executable, err = os.Executable()
-		if err != nil {
-			return Result{}, fmt.Errorf("locating inspector executable: %w", err)
-		}
+	executable, err := os.Executable()
+	if err != nil {
+		return Result{}, fmt.Errorf("locating inspector executable: %w", err)
 	}
 	executable, err = filepath.Abs(executable)
 	if err != nil {
@@ -99,6 +95,7 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		Model:      opts.Model,
 		APIBaseURL: opts.APIBaseURL,
 		Network:    network,
+		Timeout:    timeout,
 	})
 	defer cmd.Cleanup()
 	cmd.Stdout = opts.Stdout
@@ -137,6 +134,7 @@ type ContainerOptions struct {
 	InputDir, OutputDir, Executable string
 	AppURL, Model, APIBaseURL       string
 	Network                         string
+	Timeout                         time.Duration
 }
 
 func jsonUnmarshalStrict(data []byte, target any) error {
@@ -158,6 +156,10 @@ func jsonUnmarshalStrict(data []byte, target any) error {
 // is read-only, the output directory is the sole writable host mount, and the
 // static Inspector executable is the only program copied in.
 func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.Cmd {
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
 	args := []string{
 		"--read-only",
 		"--cap-drop", "ALL",
@@ -176,6 +178,7 @@ func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.
 		"--output-dir", "/examiner/output",
 		"--app-url", opts.AppURL,
 		"--model", opts.Model,
+		"--timeout", timeout.String(),
 	}
 	if opts.APIBaseURL != "" {
 		args = append(args, "--api-base-url", opts.APIBaseURL)

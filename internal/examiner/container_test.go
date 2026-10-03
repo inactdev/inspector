@@ -23,7 +23,7 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 	}
 	cmd := NewContainerCommand(context.Background(), ContainerOptions{
 		InputDir: inputDir, OutputDir: outputDir, Executable: executable,
-		AppURL: "http://app:8080", Model: "test-model", Network: "examiner-test",
+		AppURL: "http://app:8080", Model: "test-model", Network: "examiner-test", Timeout: 23 * time.Minute,
 	})
 	defer cmd.Cleanup()
 
@@ -46,6 +46,9 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 	}
 	if !strings.Contains(args, "--entrypoint /examiner/inspector "+RuntimeImage) {
 		t.Fatalf("docker command must force Inspector as the entrypoint in the pinned runtime: %q", cmd.Args)
+	}
+	if !strings.Contains(args, "--timeout 23m0s") {
+		t.Fatalf("docker command must forward the examination timeout to the agent: %q", cmd.Args)
 	}
 }
 

@@ -26,7 +26,6 @@ func runExaminer(args []string, stdout, stderr io.Writer) int {
 	owner := fs.String("owner", "", "GitHub repository owner (required)")
 	repo := fs.String("repo", "", "GitHub repository name (required)")
 	model := fs.String("model", "", "Anthropic model for deriving and driving scenarios (required)")
-	agentBinary := fs.String("agent-binary", "", "Linux Inspector binary used inside the sealed container")
 	network := fs.String("network", examiner.DefaultNetwork, "Docker network that reaches the running app")
 	timeout := fs.Duration("timeout", examiner.DefaultTimeout, "maximum examination duration")
 	apiBaseURL := fs.String("api-base-url", "", "Anthropic Messages API URL (testing only)")
@@ -67,14 +66,12 @@ a sealed container; it never mounts the judged repository or implementation.
 		Model:      *model,
 		APIBaseURL: *apiBaseURL,
 		Network:    *network,
-		Executable: *agentBinary,
 		Timeout:    *timeout,
 		Stdout:     stdout,
 		Stderr:     stderr,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "refused: examiner could not start: %v\n", err)
-		return exitRefused
+		result = examiner.Result{Kind: examiner.Refused, Message: fmt.Sprintf("examiner could not start: %v", err)}
 	}
 	printExaminerResult(stdout, stderr, result)
 	if err := postExaminerStatus(*owner, *repo, *commit, result); err != nil {
@@ -170,6 +167,7 @@ func runExaminerAgent(args []string, stdout, stderr io.Writer) int {
 	appURL := fs.String("app-url", "", "running app URL")
 	model := fs.String("model", "", "Anthropic model")
 	apiBaseURL := fs.String("api-base-url", "", "Anthropic Messages API URL")
+	timeout := fs.Duration("timeout", examiner.DefaultTimeout, "maximum examination duration")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -181,7 +179,7 @@ func runExaminerAgent(args []string, stdout, stderr io.Writer) int {
 			return exitUsage
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), examiner.DefaultTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	if err := examiner.RunAgent(ctx, examiner.AgentOptions{
 		InputDir: *inputDir, OutputDir: *outputDir, AppURL: *appURL, Model: *model, APIBaseURL: *apiBaseURL,
