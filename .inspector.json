@@ -1,5 +1,6 @@
 {
   "check": "script/check",
   "image": "cimg/go:1.22",
-  "protectedPaths": ["script/check"]
+  "protectedPaths": ["script/check", "*_test.go"],
+  "protectedPathsNote": "Temporary test protection until inspector#7 lands; remove it then. Tracked by https://github.com/inactdev/fabrica/issues/96."
 }
