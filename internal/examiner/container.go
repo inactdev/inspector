@@ -46,7 +46,7 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	prepared, err := PrepareInputs(opts.Inputs)
+	prepared, err := PrepareInputsContext(runCtx, opts.Inputs)
 	if err != nil {
 		return Result{Kind: Refused, Message: err.Error()}, nil
 	}

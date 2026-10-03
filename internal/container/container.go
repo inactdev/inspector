@@ -83,9 +83,12 @@ type Run struct {
 type Cmd struct {
 	*exec.Cmd
 	cidFile string
+	name    string
 
-	mu      sync.Mutex
-	killErr error
+	mu          sync.Mutex
+	cancelled   bool
+	cleanupDone bool
+	killErr     error
 }
 
 // New builds the *exec.Cmd for running r inside a fresh, single-use,
@@ -129,15 +132,19 @@ func NewCommand(ctx context.Context, namePrefix string, args ...string) *Cmd {
 	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
 	cmd.WaitDelay = 5 * time.Second
 
-	c := &Cmd{Cmd: cmd, cidFile: cidFile}
-	cmd.Cancel = func() error { return c.kill(name) }
+	c := &Cmd{Cmd: cmd, cidFile: cidFile, name: name}
+	cmd.Cancel = c.kill
 	return c
 }
 
-func (c *Cmd) kill(name string) error {
+func (c *Cmd) kill() error {
+	c.mu.Lock()
+	c.cancelled = true
+	c.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := killContainer(ctx, name)
+	err := killContainer(ctx, c.name)
 	if err != nil && !errors.Is(err, os.ErrProcessDone) {
 		c.mu.Lock()
 		c.killErr = err
@@ -146,14 +153,45 @@ func (c *Cmd) kill(name string) error {
 	return err
 }
 
+func (c *Cmd) Run() error {
+	if err := c.Start(); err != nil {
+		return err
+	}
+	return c.Wait()
+}
+
+func (c *Cmd) Wait() error {
+	err := c.Cmd.Wait()
+	c.finalizeCleanup()
+	return err
+}
+
+func (c *Cmd) finalizeCleanup() {
+	c.mu.Lock()
+	if !c.cancelled || c.cleanupDone {
+		c.mu.Unlock()
+		return
+	}
+	c.cleanupDone = true
+	c.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := removeContainer(ctx, c.name)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil || errors.Is(err, os.ErrProcessDone) {
+		c.killErr = nil
+	} else {
+		c.killErr = err
+	}
+}
+
 // KillError reports docker's own refusal to stop the container after
 // ctx's deadline fired, carrying docker's message, and nil when no kill
-// was needed or the kill worked. It is the authoritative answer to "did
-// this container actually get stopped": what Run returns is not, because
-// exec.Cmd.Wait prefers the `docker run` client's own exit status and
-// only falls back to Cancel's error when that status is clean - so
-// precisely when the container is left running and the client had to be
-// SIGKILLed, Wait discards the reason. Read it after Run/Wait returns.
+// was needed or cleanup was confirmed after the Docker client exited.
+// Read it after Run/Wait returns.
 func (c *Cmd) KillError() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -218,7 +256,15 @@ func randomHex(n int) string {
 // being waited on, and classifyResult reads any *exec.ExitError it can
 // find as the check container's own verdict.
 func killContainer(ctx context.Context, name string) error {
-	out, err := exec.CommandContext(ctx, "docker", "kill", name).CombinedOutput()
+	return runDockerCleanup(ctx, name, "kill", name)
+}
+
+func removeContainer(ctx context.Context, name string) error {
+	return runDockerCleanup(ctx, name, "rm", "--force", name)
+}
+
+func runDockerCleanup(ctx context.Context, name string, args ...string) error {
+	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err == nil {
 		return nil
 	}
@@ -231,5 +277,5 @@ func killContainer(ctx context.Context, name string) error {
 	if strings.Contains(strings.ToLower(message), "no such container") {
 		return os.ErrProcessDone
 	}
-	return fmt.Errorf("docker kill %s: %s", name, message)
+	return fmt.Errorf("docker %s %s: %s", args[0], name, message)
 }

@@ -2,6 +2,7 @@ package examiner
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,21 +32,25 @@ type PreparedInputs struct {
 // PrepareInputs reads and validates all three inputs, then copies only their
 // bytes to a new directory. Call Cleanup after the examiner exits.
 func PrepareInputs(inputs Inputs) (PreparedInputs, error) {
-	request, err := readInput(inputs.RequestPath, "request")
+	return PrepareInputsContext(context.Background(), inputs)
+}
+
+func PrepareInputsContext(ctx context.Context, inputs Inputs) (PreparedInputs, error) {
+	request, err := readInput(ctx, inputs.RequestPath, "request")
 	if err != nil {
 		return PreparedInputs{}, err
 	}
 	if strings.TrimSpace(string(request)) == "" {
 		return PreparedInputs{}, fmt.Errorf("reading request: file is empty")
 	}
-	guidebook, err := readInput(inputs.GuidebookPath, "guidebook")
+	guidebook, err := readInput(ctx, inputs.GuidebookPath, "guidebook")
 	if err != nil {
 		return PreparedInputs{}, err
 	}
 	if strings.TrimSpace(string(guidebook)) == "" {
 		return PreparedInputs{}, fmt.Errorf("reading guidebook: file is empty")
 	}
-	testChanges, err := readInput(inputs.TestChangesPath, "test-change list")
+	testChanges, err := readInput(ctx, inputs.TestChangesPath, "test-change list")
 	if err != nil {
 		return PreparedInputs{}, err
 	}
@@ -81,11 +86,14 @@ func (p PreparedInputs) Cleanup() {
 	}
 }
 
-func readInput(path, name string) ([]byte, error) {
+func readInput(ctx context.Context, path, name string) ([]byte, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("reading %s: no path was provided", name)
 	}
-	file, err := os.Open(path)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("reading %s %q: %w", name, path, err)
+	}
+	file, err := openRegularInput(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s %q: %w", name, path, err)
 	}
@@ -93,6 +101,9 @@ func readInput(path, name string) ([]byte, error) {
 
 	data, err := io.ReadAll(io.LimitReader(file, maxInputBytes+1))
 	if err != nil {
+		return nil, fmt.Errorf("reading %s %q: %w", name, path, err)
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("reading %s %q: %w", name, path, err)
 	}
 	if len(data) > maxInputBytes {
