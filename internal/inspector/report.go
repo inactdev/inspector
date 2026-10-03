@@ -10,8 +10,8 @@ import (
 )
 
 // RunsDirName holds one JSON report per run. It is gitignored - these are
-// notes for a human chasing down a red result, never authority. The
-// commit status (issue #3) is the record that gates anything.
+// notes for a human chasing down a red result, never authority. inspector-gate
+// reads only the green commit status, not these reports.
 const RunsDirName = ".inspector"
 
 // LatestReportName is a copy of the most recent report, so a red run is

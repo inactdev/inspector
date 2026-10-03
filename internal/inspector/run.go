@@ -58,10 +58,9 @@ type Result struct {
 	ReportPath string
 	// Warning is set when the check reached a real verdict (Green or
 	// Red) but something worth loudly flagging happened alongside it -
-	// currently, only that the local report could not be saved. The
-	// commit status, not this local report, is the authority (SPEC.md),
-	// so a save failure must never downgrade or discard the verdict
-	// itself.
+	// currently, only that the local report could not be saved. Green
+	// publication and the exit code, not this local report, carry the
+	// verdict, so a save failure must never downgrade or discard it.
 	Warning string
 }
 
@@ -205,15 +204,14 @@ func Run(opts Options) (Result, error) {
 			result.ReportPath = reportPath
 		}
 	case writeErr != nil:
-		// outcome is Green or Red here - a real verdict already reached.
+		// outcome is Green or Red here - a real local check result.
 		// Discarding it because its notes failed to save would lose the
-		// answer over losing the footnote; the commit status, not this
-		// file, is authoritative (SPEC.md), so the verdict stands
-		// regardless and the failure is surfaced as a loud warning
-		// instead.
+		// answer over losing the footnote; this file is never authority,
+		// so the result stands and the failure is surfaced as a loud
+		// warning instead.
 		result.Warning = fmt.Sprintf(
-			"the %s verdict above is real, but its local report could not be saved: %v\n"+
-				"the report is notes only, never authority - the verdict stands regardless.",
+			"the local %s check result is real, but its report could not be saved: %v\n"+
+				"the report is notes only, never authority - publication and the final exit code still determine the verdict.",
 			outcome, writeErr,
 		)
 	default:

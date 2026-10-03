@@ -14,7 +14,8 @@ project's own checks rather than anyone's description of them.
 It has two halves:
 
 - **inspector** runs on your machine. It runs the project's checks, repairs what it
-  can, re-verifies, and records the result against the exact commit it checked.
+  can, re-verifies, records a green result against the exact commit it checked, and
+  only then publishes the explicitly named pull request branch.
 - **inspector-gate** runs on GitHub. Small and dumb on purpose: does this commit
   carry a green inspector result, and were any protected files touched.
 
@@ -114,33 +115,107 @@ your own:
 A third field, `protectedPaths`, is read only by inspector-gate, never by
 inspector itself - see the "inspector-gate" section below.
 
-The order is commit, push, then inspect. inspector refuses to run against an
+The order is commit, then inspect. inspector refuses to run against an
 uncommitted working tree - it can only be honest about a commit that actually
-matches what's on disk - and the result it records is a commit status on that
-exact commit (see "Recording the result" below), which GitHub can only attach to
-a commit it already has. Inspecting a commit that exists only locally fails.
+matches what's on disk. For a green commit C, inspector owns the remaining
+publication steps, in this exact order:
+
+1. It runs the check locally on C.
+2. It transfers C to a temporary non-branch staging ref on `origin`.
+3. It records C's green commit status.
+4. It updates the explicitly named pull request branch on `origin`.
+
+Name that destination on every invocation:
 
 ```
-inspector
+inspector --branch my-feature
+```
+
+This command is the publication handoff, not a check to run after another tool
+has pushed. A builder must leave C local and must not push C or open its pull
+request first. On exit `0`, Inspector has moved the named branch. Pull request
+creation remains part of Inspector's publication flow, never work the builder
+may perform on Inspector's behalf. On any other exit, nothing else may publish
+that commit. The named branch may contain earlier work, but it must not already
+point at C. Inspector refuses to stamp C retroactively because that cannot prove
+the required stage, status, then branch-update order.
+
+When changing Inspector's publication protocol itself, run the command from the
+clean checkout being tested instead of an older installed binary:
+
+```
+GITHUB_TOKEN="$(gh auth token)" go run ./cmd/inspector --branch my-feature
+```
+
+That self-hosting handoff is required for this repository too. A general build
+or delivery pipeline that pushes its commit directly will create a pull request
+head with no `inspector` status, and `inspector-gate` will correctly reject it.
+Running Inspector afterward is not a recovery path: Inspector refuses to
+retroactively approve a commit that the named branch already exposes. Recovery
+requires a new local correction commit, handed to Inspector before any tool
+publishes it.
+
+`--branch` is required. Inspector never derives publication authority from the
+checkout, HEAD, tracking configuration, or any other ambient state, and it
+refuses the remote default branch even when explicitly named. This is a captain
+decision that may be overruled: ambient destination authority conflicts with
+the architecture's explicit handoff, and a freshly pulled checkout is normally
+on the default branch, where an inferred push would bypass the pull request.
+
+The staging ref exists only so GitHub has C when it receives the status. After
+the named branch moves, Inspector attempts to remove the staging ref and warns
+if it cannot confirm removal. Inspector captures `origin`'s publication target
+before the check and confirms repository metadata still names that exact target
+afterward. It also confirms C is still HEAD and rechecks the working tree
+before any remote operation. It refuses and names every tracked change,
+non-ignored addition, or mutable index flag that could hide tracked content;
+ignored build output does not block publication. This is a captain decision that
+may be overruled: a stamp must name the exact code tested, while a check-written
+change means the passing code exists nowhere and could launder a green result
+for a different commit.
+
+This recheck compares only the post-check snapshot. In v1 the source mount is
+writable, so a check can modify a tracked file, pass against those modified
+bytes, and restore the file before exiting without being detected. A resulting
+green can therefore describe code that was never the commit stamped. Issue
+[#27](https://github.com/inactdev/inspector/issues/27), "Source is read-only
+while the check runs," is where that gap is closed.
+
+The pull request branch never points at C until its status already exists, so
+inspector-gate's first run sees the result instead of a stale missing-status
+failure.
+
+**v1 red policy, which the Client may overrule:** a red result stays local.
+inspector writes its report and returns `1`, but neither pushes a branch nor
+posts a status for work it did not approve. This preserves the boundary that
+unverified work does not become a GitHub branch. The local report is the record
+for deciding what to do next.
+
+```
+inspector --branch my-feature
 ```
 
 This runs the configured check command against the repo's current HEAD and
 prints green or red, always naming the exact commit it inspected - that's how
 a caller compares what inspector blessed against what it expects.
 
-Exit codes reserve `0`, `1`, and `2` for verdicts only:
+Exit codes reserve `0`, `1`, and `2` for verdict attempts:
 
 - `0` green
 - `1` red
-- `2` refused - inspector tried to reach a verdict and couldn't: no check
-  command or image configured, no usable container runtime, a dirty working
-  tree, a check command that ran past its timeout or was killed by a signal
-  before it could finish on its own (the OOM killer, an external kill,
-  inspector's own deadline - it never judged the code, so its exit status is
-  not a verdict either way), an infrastructure failure, or a real local
-  green/red that could not be posted as a commit status (see "Recording the
-  result" below) - an unrecorded result proves nothing to the gate, so it
-  isn't a verdict either. Never treat `2` as red.
+- `2` no verdict, with one of two visibly different causes:
+  - **refused** - inspector stopped before attempting any remote publication.
+    This includes local-check failures such as missing configuration, an unusable
+    container runtime, a dirty working tree, a timeout, or infrastructure
+    failure, and green-publication preflight failures such as an unsupported
+    platform, missing token, invalid remote, or default-branch target. A refusal
+    never attempts a staging push, status publication, or branch update.
+  - **incomplete green publication** - the local check passed and publication
+    began with the staging push, but inspector could not confirm the complete
+    staging, status, and branch sequence. The attempt may have left the staging
+    ref, status, or branch state described below.
+
+  Neither cause is red. Never treat `2` as red.
 
   A signal kill is detected two ways, because a compound check command like
   `npm test && npm run lint` doesn't show it the same way a plain one does:
@@ -162,13 +237,14 @@ Exit codes reserve `0`, `1`, and `2` for verdicts only:
 
 Flags:
 
+- `--branch <name>` - required pull request branch to publish after green
 - `--repo <path>` - inspect a repo other than the current directory
 
 Anything after the flags is a free-text claim, recorded for context and not acted
 on:
 
 ```
-inspector implemented the login flow
+inspector --branch my-feature implemented the login flow
 ```
 
 Each run writes a small JSON report to `.inspector/runs/`, and copies it to
@@ -180,38 +256,58 @@ writes `.inspector/.gitignore` containing `*`, so reports stay out of git withou
 you editing anything; an existing `.inspector/.gitignore` is left alone.
 
 Because the report is notes and not authority, a report that can't be saved
-never changes an answer inspector already has. When the check command reached a
-real green or red and only the save failed, inspector prints a loud warning to
-stderr naming where the save failed, and still exits `0` or `1` with that
-verdict - it does not become a refusal.
+never changes the local check result. Inspector prints a loud warning to stderr
+naming where the save failed, then still returns red or proceeds with green
+publication. A report failure alone does not cause a refusal.
 
 ### Recording the result
 
-A real green or red also gets posted to GitHub as a **commit status** on the
-exact commit inspected, under the status context `inspector` - a small
-record attached to that commit, not a comment or a checklist, because text
-can be typed by anyone and a status cannot. It carries pass or fail and a
-short description pointing at `.inspector/latest.json`; the report holds the
-detail, the status just says whether to trust it.
+A green result gets posted to GitHub as a **commit status** on the exact
+commit inspected, under the status context `inspector` - a small record
+attached to that commit, not a comment or a checklist, because text can be
+typed by anyone and a status cannot. It carries pass and a short description
+pointing at `.inspector/latest.json`; the report holds the detail, the status
+just says whether to trust it.
 
 This needs a token: set `GITHUB_TOKEN` to one with commit-status write access
-on the repo, and the repo's `origin` remote must point at GitHub. Posting is
-not optional - a missing token, an unresolvable remote, or GitHub refusing
-the request all fail loudly and exit `2`, the same as a refusal, even when
-the check itself passed. A real local green that never made it onto the
-commit is worth nothing to a reader who can only see GitHub, so it must never
-look like success.
+on the repo, and `origin`'s push URL must point at the same GitHub repository
+that receives the status. HTTP push URLs must not contain embedded credentials,
+which would expose them in the push process arguments; use a credential helper
+or SSH instead. Inspector pushes from a temporary bare repository that can read
+C's objects but cannot inherit the checked repository's hooks or local Git
+configuration, and it does not pass `GITHUB_TOKEN` to Git. Pushes are
+non-interactive and time out rather than waiting forever for credentials or a
+stalled transport; a timeout kills git and its helper processes together. On
+platforms where Inspector cannot guarantee that complete process-tree
+termination, it still runs the local check and can return red, but refuses a
+green publication before starting any remote step.
+Posting is not optional - a missing token, an unresolvable remote, a failed
+staging push, or GitHub refusing the request all fail loudly and exit `2`, even
+when the local check passed. A real local green that inspector could not
+publish in full is worth nothing to a reader who can only see GitHub, so it
+must never look like success.
+
+Once publication starts, inspector does not try to erase partial remote state.
+A failed network operation can mean either that GitHub rejected the operation or
+that GitHub completed it but the client lost the response. Inspector therefore
+reports uncertain remote state honestly: a failed staging push may have created
+the staging ref, and a failed final push may have moved the named branch. An
+explicit GitHub rejection confirms that no status was posted. If the status
+request was written but its response was lost, inspector reports the distinct
+state **stamp sent, outcome unconfirmed** - never green, never silent, and
+separate from both confirmed-posted and not-attempted. It also states which later
+operations were never attempted. These incomplete publications are distinct
+from a refusal and exit `2`. This is the captain's deliberate policy and may be
+overruled: compensation cannot make a partially published sequence atomic.
 
 What a reader should conclude:
 
 - **Green status** - inspector ran this exact commit's checks and they passed.
-- **Red status** - inspector ran this exact commit's checks and they failed.
-- **No status at all** - this commit has not been inspected, or inspector
-  reached a verdict locally and could not record it (a failed post writes
-  nothing, so it leaves no status either; the local run's stderr is where
-  that distinction lives). Read the same as red: push whenever you like,
-  nothing runs on its own, and a status from an earlier commit does not
-  carry forward.
+- **Red status** - a manually recorded failure. v1 inspector does not publish
+  red work or post this status itself.
+- **No confirmed status** - this commit has not been approved, or inspector
+  could not confirm its green stamp. Read the same as red. A status from an
+  earlier commit does not carry forward.
 
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.
@@ -272,18 +368,13 @@ closed and says which of those it hit, rather than quietly judging against a
 shorter list. Only a genuinely absent `.inspector.json` (HTTP 404) is a safe
 absence; that project still gets the always-protected floor.
 
-**Known limit: the check can go stale-red.** A commit status can only be posted
-to a commit that is already pushed, so inspector's green status lands *after*
-the push whose gate run correctly reported "no status posted at all". Nothing
-re-runs the gate when the status arrives, so that red stands until someone
-re-runs the workflow by hand. An `on: status` trigger was built for this and
-removed again: GitHub attaches a status-triggered run to the default branch's
-last commit rather than to the commit the status was posted to, so it never
-flipped the pull request's own check, and a status event cannot be filtered by
-context, so every unrelated third party's status re-ran the gate and landed
-failures on the default branch's tip. The real fix is inspector#18 - inspector
-owns the push, so a green status exists before a pull request is ever opened -
-not a retry bolted onto the gate.
+**The first gate run does not go stale-red.** inspector stages a green commit,
+posts its status, and only then updates the pull request branch. The gate
+therefore sees the status on the push that wakes it. An `on: status` trigger is
+not a replacement for that ordering: GitHub attaches a status-triggered run to
+the default branch's last commit rather than to the commit the status was
+posted to, so it cannot flip the pull request's own check. The gate only reads
+statuses and needs `statuses: read`, not `statuses: write`.
 
 **Copying this workflow into a repo does not, by itself, block a merge.** GitHub
 only enforces a check once it is a *required* status check:
@@ -300,9 +391,9 @@ there is no API call or workflow step that does it from here.
 The check (issue #1) is built: locally, `inspector` runs a project's own check
 command against HEAD, inside a container (issue #13), and reports green or
 red, refusing loudly when no check command or image is configured, or no
-usable container runtime is found. Recording the result (issue #3) is also
-built: a green or red run posts a commit status to GitHub, and a missing token
-or a rejected post fails loudly rather than exiting as if it had succeeded.
-The gate workflow (issue #4, above) is built too, reading that commit status
-under the context `inspector`. Still to come: the fixer and the installer -
-see [SPEC.md](SPEC.md) and the repo's issues.
+usable container runtime is found. Inspector-owned publication (issue #18) is
+also built: it stages a green commit, posts its status, then moves an explicitly
+named non-default branch; a red result remains local by v1 policy. The gate
+workflow (issue #4, above) reads that status under the context `inspector`.
+Still to come: the fixer and
+the installer - see [SPEC.md](SPEC.md) and the repo's issues.
