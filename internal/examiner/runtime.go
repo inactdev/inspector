@@ -5,6 +5,7 @@ package examiner
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -27,8 +28,8 @@ var agentLinuxAMD64 []byte
 //go:embed runtime/examiner-agent-linux-arm64.gz
 var agentLinuxARM64 []byte
 
-func prepareAgentExecutable() (string, func(), error) {
-	target, err := dockerServerTarget()
+func prepareAgentExecutable(ctx context.Context) (string, func(), error) {
+	target, err := dockerServerTarget(ctx)
 	if err != nil {
 		return "", func() {}, err
 	}
@@ -78,9 +79,12 @@ func prepareAgentExecutable() (string, func(), error) {
 	return path, cleanup, nil
 }
 
-func dockerServerTarget() (string, error) {
-	output, err := exec.Command("docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}").CombinedOutput()
+func dockerServerTarget(ctx context.Context) (string, error) {
+	output, err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}").CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("reading Docker server platform: %w", ctx.Err())
+		}
 		return "", fmt.Errorf("reading Docker server platform: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	target := strings.TrimSpace(string(output))

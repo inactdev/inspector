@@ -354,11 +354,11 @@ for AMD64 and ARM64 Docker servers, so the host installation may run on Linux,
 macOS, or Windows without supplying executable code to the container. The
 container receives read-only copies of exactly those three files, the matching
 bundled agent, and a writable temporary output directory. It has no repository
-mount, implementation diff, shell, or arbitrary HTTP tool. The model can call
-only the supplied app URL, and redirects cannot leave that app's origin.
-Inspector pins the Alpine runtime by digest, forces the bundled agent as its
-entrypoint, and does not allow callers to substitute a project image or agent
-binary that could contain application source.
+mount or implementation diff. The forced agent gives the model no shell or
+arbitrary HTTP tool: it can call only the supplied app URL, and redirects cannot
+leave that app's origin. Inspector pins the Alpine runtime by digest, forces the
+bundled agent as its entrypoint, and does not allow callers to substitute a
+project image or agent binary that could contain application source.
 
 The examiner derives claimed capabilities from the request, drives the app, and
 prints a JSON verdict per capability: `confirmed`, `not_confirmed`, or

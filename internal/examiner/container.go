@@ -39,6 +39,13 @@ type RunOptions struct {
 // Run starts the sealed agent and returns its verdict. It writes only to
 // temporary directories owned by Inspector, never to the project being judged.
 func Run(ctx context.Context, opts RunOptions) (Result, error) {
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	prepared, err := PrepareInputs(opts.Inputs)
 	if err != nil {
 		return Result{Kind: Refused, Message: err.Error()}, nil
@@ -53,11 +60,11 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	if _, ok := os.LookupEnv(AnthropicAPIKeyEnvVar); !ok {
 		return Result{Kind: Refused, Message: fmt.Sprintf("%s is not set", AnthropicAPIKeyEnvVar)}, nil
 	}
-	if err := container.EnsureAvailable(); err != nil {
+	if err := container.EnsureAvailableContext(runCtx); err != nil {
 		return Result{Kind: Refused, Message: fmt.Sprintf("no usable container runtime: %v", err)}, nil
 	}
 
-	agentExecutable, cleanupAgent, err := prepareAgentExecutable()
+	agentExecutable, cleanupAgent, err := prepareAgentExecutable(runCtx)
 	if err != nil {
 		return Result{Kind: Refused, Message: fmt.Sprintf("preparing trusted examiner agent: %v", err)}, nil
 	}
@@ -69,17 +76,11 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 	defer os.RemoveAll(outputDir)
 
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = DefaultTimeout
-	}
 	network := opts.Network
 	if network == "" {
 		network = DefaultNetwork
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	cmd := NewContainerCommand(runCtx, ContainerOptions{
 		InputDir:        prepared.Dir,
 		OutputDir:       outputDir,

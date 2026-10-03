@@ -39,6 +39,26 @@ func TestEnsureAvailable_Live(t *testing.T) {
 	}
 }
 
+func TestEnsureAvailableContext_DeadlineStopsDockerProbe(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := EnsureAvailableContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("EnsureAvailableContext() = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("EnsureAvailableContext() returned after %s, want it bounded by the context", elapsed)
+	}
+}
+
 func TestNew_BuildsExpectedArgs(t *testing.T) {
 	// Pure argument construction - doesn't touch docker, so it runs
 	// without a runtime present.
@@ -100,9 +120,29 @@ func TestCmd_Started(t *testing.T) {
 func TestKillContainer_AlreadyGone(t *testing.T) {
 	requireDocker(t)
 
-	err := killContainer("inspector-container-test-does-not-exist")
+	err := killContainer(context.Background(), "inspector-container-test-does-not-exist")
 	if !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("killContainer(nonexistent) = %v, want os.ErrProcessDone", err)
+	}
+}
+
+func TestKillContainer_DeadlineStopsDockerKill(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := killContainer(ctx, "stalled")
+	if !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("killContainer() = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("killContainer() returned after %s, want it bounded by the context", elapsed)
 	}
 }
 

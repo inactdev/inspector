@@ -18,7 +18,7 @@ func TestBundledAgentRunsOnDockerServerPlatform(t *testing.T) {
 	if err := container.EnsureAvailable(); err != nil {
 		t.Skipf("no usable container runtime, skipping: %v", err)
 	}
-	agentExecutable, cleanup, err := prepareAgentExecutable()
+	agentExecutable, cleanup, err := prepareAgentExecutable(context.Background())
 	if err != nil {
 		t.Fatalf("prepareAgentExecutable() error = %v", err)
 	}
@@ -35,6 +35,26 @@ func TestBundledAgentRunsOnDockerServerPlatform(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "Usage of examiner-agent") {
 		t.Fatalf("bundled examiner agent did not emit its CLI help: %s", output)
+	}
+}
+
+func TestDockerServerTarget_DeadlineStopsPlatformProbe(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := dockerServerTarget(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dockerServerTarget() = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("dockerServerTarget() returned after %s, want it bounded by the context", elapsed)
 	}
 }
 

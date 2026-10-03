@@ -37,12 +37,21 @@ var ErrDaemonUnreachable = errors.New("docker is installed but its daemon is not
 // inspector quietly running the check command on the host - the one
 // thing this package exists to prevent.
 func EnsureAvailable() error {
+	return EnsureAvailableContext(context.Background())
+}
+
+// EnsureAvailableContext confirms a usable container runtime while respecting
+// the caller's cancellation or deadline.
+func EnsureAvailableContext(ctx context.Context) error {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return ErrNotInstalled
 	}
 	// `docker info` talks to the daemon and fails clearly (nonzero exit)
 	// when there isn't one to talk to, without side effects.
-	if err := exec.Command("docker", "info").Run(); err != nil {
+	if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("checking Docker availability: %w", ctx.Err())
+		}
 		return ErrDaemonUnreachable
 	}
 	return nil
@@ -126,7 +135,9 @@ func NewCommand(ctx context.Context, namePrefix string, args ...string) *Cmd {
 }
 
 func (c *Cmd) kill(name string) error {
-	err := killContainer(name)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := killContainer(ctx, name)
 	if err != nil && !errors.Is(err, os.ErrProcessDone) {
 		c.mu.Lock()
 		c.killErr = err
@@ -206,13 +217,15 @@ func randomHex(n int) string {
 // from `docker kill` itself: that is a different process from the one
 // being waited on, and classifyResult reads any *exec.ExitError it can
 // find as the check container's own verdict.
-func killContainer(name string) error {
-	out, err := exec.Command("docker", "kill", name).CombinedOutput()
+func killContainer(ctx context.Context, name string) error {
+	out, err := exec.CommandContext(ctx, "docker", "kill", name).CombinedOutput()
 	if err == nil {
 		return nil
 	}
 	message := strings.TrimSpace(string(out))
-	if message == "" {
+	if ctx.Err() != nil {
+		message = ctx.Err().Error()
+	} else if message == "" {
 		message = err.Error()
 	}
 	if strings.Contains(strings.ToLower(message), "no such container") {
