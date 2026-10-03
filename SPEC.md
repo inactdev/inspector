@@ -1,10 +1,29 @@
 # inspector
 
-The shipping gate. It checks that finished work is actually finished, repairs what
-it can, and blocks the merge when it can't.
+The shipping gate. It checks that finished work is actually finished and blocks
+the merge when it cannot judge it.
 
 This is the design of record, not a build report - see the Status section of
 [README.md](README.md) for what exists today.
+
+## Current Client rulings
+
+The sections below preserve the original roadmap's reasoning. The following
+later rulings override every contrary statement in them:
+
+- Inspector never edits a judged project. It returns findings and proposed
+  regression lines to Fabrica's handback loop (fabrica#95).
+- The examiner judges the request, not an implementation or worker-authored
+  outcome list. It receives only request text, a running app driven through a
+  real driver, and Fabrica's base-diffed test-change list. It derives scenarios
+  from the request itself.
+- The examiner container never receives application source or an implementation
+  diff. Test changes are its narrow `*_test.*` exception. It posts the separate
+  `examiner` commit status, where a refusal is `error` and not a red `failure`.
+
+Issue #7 and README's Examiner section are the current operational design for
+that examiner. The older outcome-list and fixer descriptions in this document
+are superseded.
 
 ---
 

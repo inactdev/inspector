@@ -1,0 +1,66 @@
+package examiner
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestPrepareInputs_CopiesOnlyTheThreeAllowedInputs(t *testing.T) {
+	dir := t.TempDir()
+	request := filepath.Join(dir, "request.md")
+	guidebook := filepath.Join(dir, "guidebook.md")
+	testChanges := filepath.Join(dir, "changes.json")
+	for path, content := range map[string]string{
+		request:     "Add capture.",
+		guidebook:   "POST /inklings creates a capture.",
+		testChanges: `{"baseCommit":"abc123","files":[]}`,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+	}
+
+	prepared, err := PrepareInputs(Inputs{RequestPath: request, GuidebookPath: guidebook, TestChangesPath: testChanges})
+	if err != nil {
+		t.Fatalf("PrepareInputs() error = %v", err)
+	}
+	defer prepared.Cleanup()
+	entries, err := os.ReadDir(prepared.Dir)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("input directory has %d entries, want exactly the three permitted inputs", len(entries))
+	}
+	want := map[string]bool{InputRequestName: true, InputGuidebookName: true, InputTestChangesName: true}
+	for _, entry := range entries {
+		if !want[entry.Name()] {
+			t.Fatalf("input directory unexpectedly contains %q", entry.Name())
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			t.Fatalf("input %q is a symlink instead of a copied file", entry.Name())
+		}
+	}
+}
+
+func TestParseTestChanges_RejectsApplicationSource(t *testing.T) {
+	_, err := ParseTestChanges([]byte(`{
+		"baseCommit":"abc123",
+		"files":[{"path":"backend/server.go","change":"modified","before":"old","after":"new"}]
+	}`))
+	if err == nil {
+		t.Fatal("ParseTestChanges() accepted application source in the test-change exception")
+	}
+}
+
+func TestParseTestChanges_RejectsUnrecognizedChannels(t *testing.T) {
+	_, err := ParseTestChanges([]byte(`{
+		"baseCommit":"abc123",
+		"files":[],
+		"implementationDiff":"not allowed"
+	}`))
+	if err == nil {
+		t.Fatal("ParseTestChanges() accepted an implementation-diff field")
+	}
+}

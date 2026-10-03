@@ -2,8 +2,9 @@
 
 # inspector
 
-The shipping gate. It checks that finished work is actually finished, repairs what
-it can, and blocks the merge when it can't.
+The shipping gate. It checks that finished work is actually finished, returns
+findings without editing the judged project, and blocks the merge when it can't
+judge the work.
 
 Read [SPEC.md](SPEC.md) first - it explains why this exists, which is the part that
 matters. The short version: a tool that reports on its own work can tell you what it
@@ -13,14 +14,15 @@ project's own checks rather than anyone's description of them.
 
 It has two halves:
 
-- **inspector** runs on your machine. It runs the project's checks, repairs what it
-  can, re-verifies, records a green result against the exact commit it checked, and
-  only then publishes the explicitly named pull request branch.
+- **inspector** runs on your machine. It runs the project's checks, returns
+  findings without editing the judged project, records a green result against the
+  exact commit it checked, and only then publishes the explicitly named pull request
+  branch.
 - **inspector-gate** runs on GitHub. Small and dumb on purpose: does this commit
   carry a green inspector result, and were any protected files touched.
 
-It runs when something claims to be finished, never on push - a fixer let loose on
-half-written work repairs code that was mid-change.
+It runs when something claims to be finished, never on push - a judgment on
+half-written work would be premature.
 
 It never merges. Green means ready for a verdict, not merged.
 
@@ -312,6 +314,74 @@ What a reader should conclude:
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.
 
+## Examiner
+
+`inspector examine` is the independent outcome judge. It answers whether the
+request came true by deriving scenarios from the request and operating an
+already-running HTTP app. It does not rerun the project's check command or use
+a worker-authored outcome checklist.
+
+The first version drives HTTP backends. It does not drive native iOS screens,
+so an Inkwell examination covers its backend only. The hand-written first
+[Inkwell guidebook](examples/inkwell/EXAMINER_GUIDEBOOK.md) is the worked
+example. Issue #22 will generate confirmed guidebooks for other projects.
+
+Start the app outside the examiner, then provide each input explicitly:
+
+```
+ANTHROPIC_API_KEY=... GITHUB_TOKEN=... inspector examine \
+  --request /path/to/request.md \
+  --guidebook /path/to/guidebook.md \
+  --test-changes /path/to/test-changes.json \
+  --app-url http://host.docker.internal:8080 \
+  --network bridge \
+  --commit <commit-sha> \
+  --owner inactdev \
+  --repo inkwell \
+  --model claude-sonnet-4-5
+```
+
+`--request` is the issue or pull request text. `--guidebook` teaches the
+examiner how to drive the app. `--test-changes` is Fabrica's list diffed from
+the task's starting commit, never a worker's claim. Its JSON has a `baseCommit`
+and `files`; each file is an added, modified, deleted, or renamed `*_test.*`
+file with the relevant before and after test content. Non-test paths and extra
+fields are refused rather than becoming an implementation-source channel.
+
+The caller, not the examiner, starts the app and gives the sealed container a
+network that reaches it. Docker containers run Linux binaries. On a non-Linux
+host, build a static Linux copy of this Inspector checkout and pass it with
+`--agent-binary`:
+
+```
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/inspector-examiner ./cmd/inspector
+```
+
+Use the architecture Docker reports for its Linux server (`arm64` is common on
+Apple Silicon; `amd64` is common elsewhere). The container receives read-only copies of exactly
+those three files, a static Inspector executable, and a writable temporary
+output directory. It has no repository mount, implementation diff, shell, or
+arbitrary HTTP tool. The model can call only the supplied app URL. The generic
+Alpine image is intentional - do not substitute the project image, which could
+contain application source.
+
+The examiner derives claimed capabilities from the request, drives the app, and
+prints a JSON verdict per capability: `confirmed`, `not_confirmed`, or
+`could_not_be_tested`. A missing capability and a confirmed test weakening are
+red and name the capability or test protection that is missing. Every confirmed
+finding includes a proposed regression line for the project's own check suite;
+Inspector never writes it. A guidebook failure, app-start failure, model failure,
+or timeout exits `2` and posts GitHub status state `error` with context
+`examiner`, not a red `failure` result.
+
+A completed examination posts its own status under the stable context
+`examiner`: `success` for green, `failure` for red, and `error` for a refusal.
+Require it alongside `gate`: **Settings -> Branches -> main -> Require status
+checks -> add `gate` and `examiner`**. The existing `gate` job continues to
+require the separate `inspector` status. Red and error both block a normal
+merge; an owner can use GitHub's visible admin override when that is the right
+human decision.
+
 ## inspector-gate
 
 `.github/workflows/inspector-gate.yml` is the cloud half (SPEC.md sections 2, 4,
@@ -395,5 +465,4 @@ usable container runtime is found. Inspector-owned publication (issue #18) is
 also built: it stages a green commit, posts its status, then moves an explicitly
 named non-default branch; a red result remains local by v1 policy. The gate
 workflow (issue #4, above) reads that status under the context `inspector`.
-Still to come: the fixer and
-the installer - see [SPEC.md](SPEC.md) and the repo's issues.
+Still to come: the installer - see [SPEC.md](SPEC.md) and the repo's issues.
