@@ -55,6 +55,23 @@ func TestClassify_CouldNotBeTestedIsRefusedNotRed(t *testing.T) {
 	}
 }
 
+func TestClassify_CouldNotBeTestedMakesMixedVerdictRefusedNotRed(t *testing.T) {
+	result, err := Classify(Verdict{Outcomes: []Outcome{
+		{
+			Claim: "capture saves an inkling", Verdict: NotConfirmed, Scenario: "POST /inklings", Evidence: "500 response", ProposedRegression: "keep an HTTP capture regression",
+		},
+		{
+			Claim: "capture can be listed", Verdict: CouldNotBeTested, Scenario: "GET /inklings", Evidence: "the app stopped responding",
+		},
+	}}, TestChangeList{BaseCommit: "abc123"})
+	if err != nil {
+		t.Fatalf("Classify() error = %v", err)
+	}
+	if result.Kind != Refused {
+		t.Fatalf("Kind = %q, want refused because the examination did not finish", result.Kind)
+	}
+}
+
 func TestClassify_RejectsFindingForUnlistedTest(t *testing.T) {
 	_, err := Classify(Verdict{
 		Outcomes: []Outcome{{Claim: "capture saves an inkling", Verdict: Confirmed, Scenario: "POST /inklings", Evidence: "201 Created"}},

@@ -347,6 +347,8 @@ the task's starting commit, never a worker's claim. Its JSON has a `baseCommit`
 and `files`; each file is an added, modified, deleted, or renamed `*_test.*`
 file with the relevant before and after test content. Non-test paths and extra
 fields are refused rather than becoming an implementation-source channel.
+Fabrica issue #101 will generate this list; until then, the caller must supply
+it explicitly.
 
 The caller, not the examiner, starts the app and gives the sealed container a
 network that reaches it. Inspector carries integrity-pinned static Linux agents
@@ -366,20 +368,20 @@ project image or agent binary that could contain application source.
 
 The examiner derives claimed capabilities from the request, drives the app, and
 prints a JSON verdict per capability: `confirmed`, `not_confirmed`, or
-`could_not_be_tested`. A missing capability and a confirmed test weakening are
-red and name the capability or test protection that is missing. Every confirmed
-finding includes a proposed regression line for the project's own check suite;
-Inspector never writes it. A guidebook failure, app-start failure, model failure,
-or timeout exits `2` and posts GitHub status state `error` with context
-`examiner`, not a red `failure` result.
+`could_not_be_tested`. A completed judgment is red when a capability or test
+protection is not confirmed, and names what is missing. If any capability could
+not be tested, the whole examination is instead a refusal, even if another
+capability was not confirmed, because the judgment did not finish. Every
+confirmed finding includes a proposed regression line for the project's own
+check suite; Inspector never writes it. A guidebook failure, unreachable app,
+model failure, or timeout exits `2` and posts GitHub status state `error` with
+context `examiner`, not a red `failure` result.
 
-A completed examination posts its own status under the stable context
-`examiner`: `success` for green, `failure` for red, and `error` for a refusal.
-Require it alongside `gate`: **Settings -> Branches -> main -> Require status
-checks -> add `gate` and `examiner`**. The existing `gate` job continues to
-require the separate `inspector` status. Red and error both block a normal
-merge; an owner can use GitHub's visible admin override when that is the right
-human decision.
+The examiner posts its own status under the stable context `examiner`: `success`
+for green, `failure` for red, and `error` for a refusal. Red and error both block
+a normal merge; an owner can use GitHub's visible admin override when that is
+the right human decision. The branch-protection setup is documented under
+inspector-gate below.
 
 ## inspector-gate
 
@@ -449,11 +451,13 @@ statuses and needs `statuses: read`, not `statuses: write`.
 only enforces a check once it is a *required* status check:
 
 > Settings -> Branches -> add (or edit) a branch protection rule for the default
-> branch -> enable "Require status checks to pass before merging" -> add **gate**
-> (the job's name) to the list.
+> branch (`main` in this repository) -> enable "Require status checks to pass
+> before merging" -> add **gate** (the job's name) and **examiner** (the separate
+> commit status) to the list.
 
-That is a one-click repository setting this workflow cannot turn on for itself -
-there is no API call or workflow step that does it from here.
+The existing `gate` job continues to require the separate `inspector` status.
+This is a repository setting the workflow cannot turn on for itself - there is
+no API call or workflow step that does it from here.
 
 ## Status
 
@@ -462,6 +466,7 @@ command against HEAD, inside a container (issue #13), and reports green or
 red, refusing loudly when no check command or image is configured, or no
 usable container runtime is found. Inspector-owned publication (issue #18) is
 also built: it stages a green commit, posts its status, then moves an explicitly
-named non-default branch; a red result remains local by v1 policy. The gate
-workflow (issue #4, above) reads that status under the context `inspector`.
-Still to come: the installer - see [SPEC.md](SPEC.md) and the repo's issues.
+named non-default branch; a red result remains local by v1 policy. The HTTP
+examiner (issue #7, above) and the gate workflow (issue #4) are also built. The
+gate reads the project-check status under the context `inspector`. Still to
+come: the installer - see [SPEC.md](SPEC.md) and the repo's issues.

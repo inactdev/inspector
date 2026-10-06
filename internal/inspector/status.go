@@ -57,11 +57,10 @@ var statusHTTPClient = &http.Client{
 	},
 }
 
-// StatusState is the state GitHub records for a commit status. v1
-// publishes only success: a red result and a Refused outcome publish
-// neither a branch nor a status, so their absence fails inspector-gate.
-// StatusFailure remains available for a future Client-approved red
-// publication policy.
+// StatusState is the state GitHub records for a commit status. The project
+// check publishes only success under StatusContext. The examiner uses success,
+// failure, or error under ExaminerStatusContext so its judgment and refusals
+// remain separate and visible.
 type StatusState string
 
 const (

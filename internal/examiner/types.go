@@ -82,8 +82,9 @@ type TestChange struct {
 }
 
 // Classify verifies the verdict's evidence references and determines its
-// overall result. A test weakening or missing capability is red. An outcome
-// that could not be tested is a refusal, never a red judgment.
+// overall result. A test weakening or missing capability is red only when the
+// judgment finishes. Any outcome that could not be tested makes the whole
+// examination a refusal, never a red judgment.
 func Classify(v Verdict, tests TestChangeList) (Result, error) {
 	if len(v.Outcomes) == 0 {
 		return Result{}, errors.New("examiner submitted no outcomes derived from the request")
@@ -134,7 +135,7 @@ func Classify(v Verdict, tests TestChangeList) (Result, error) {
 		}
 		result.Kind = Red
 	}
-	if result.Kind != Red && couldNotTest {
+	if couldNotTest {
 		result.Kind = Refused
 		result.Message = "one or more claimed capabilities could not be tested; this is not a finding that the work is wrong"
 	}

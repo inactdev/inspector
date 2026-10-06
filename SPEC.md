@@ -14,9 +14,9 @@ later rulings override every contrary statement in them:
 - Inspector never edits a judged project. It returns findings and proposed
   regression lines to Fabrica's handback loop (fabrica#95).
 - The examiner judges the request, not an implementation or worker-authored
-  outcome list. It receives only request text, a running app driven through a
-  real driver, and Fabrica's base-diffed test-change list. It derives scenarios
-  from the request itself.
+  outcome list. It receives only request text, an operating guidebook,
+  Fabrica's base-diffed test-change list, and the URL of a running app driven
+  through a real driver. It derives scenarios from the request itself.
 - The examiner container never receives application source or an implementation
   diff. Test changes are its narrow `*_test.*` exception. It posts the separate
   `examiner` commit status, where a refusal is `error` and not a red `failure`.

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/../../.." && pwd)
 output="$root/internal/examiner/runtime"
 builder_image='cimg/go@sha256:a3b66b5f01291de5d4ddcaaf7916f1eabdb3c990da628f766a6d28f978a6928e'
 builder_go_version='go1.22.12'
