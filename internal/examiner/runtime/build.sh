@@ -29,7 +29,19 @@ case "$mode" in
         echo "building the examiner agent requires $builder_go_version or Docker" >&2
         exit 1
       }
-      docker run --rm --userns host --user "$(id -u):$(id -g)" \
+      docker_endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}')
+      case "$docker_endpoint" in
+        unix://*|npipe://*) ;;
+        *)
+          echo "building the examiner agent refuses remote Docker endpoint $docker_endpoint" >&2
+          exit 1
+          ;;
+      esac
+      docker_user="$(id -u):$(id -g)"
+      case "$(docker info --format '{{json .SecurityOptions}}')" in
+        *name=rootless*) docker_user=0:0 ;;
+      esac
+      docker run --rm --userns host --user "$docker_user" \
         --env HOME=/tmp --env GOCACHE=/tmp/go-build \
         --mount "type=bind,src=$root,dst=/workspace" \
         --workdir /workspace \

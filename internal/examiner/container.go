@@ -60,7 +60,8 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	if _, ok := os.LookupEnv(AnthropicAPIKeyEnvVar); !ok {
 		return Result{Kind: Refused, Message: fmt.Sprintf("%s is not set", AnthropicAPIKeyEnvVar)}, nil
 	}
-	if err := container.EnsureAvailableContext(runCtx); err != nil {
+	runtimeUser, err := localDockerRuntimeUser(runCtx)
+	if err != nil {
 		return Result{Kind: Refused, Message: fmt.Sprintf("no usable container runtime: %v", err)}, nil
 	}
 
@@ -90,6 +91,7 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		APIBaseURL:      opts.APIBaseURL,
 		Network:         network,
 		Timeout:         timeout,
+		User:            runtimeUser,
 	})
 	defer cmd.Cleanup()
 	cmd.Stdout = opts.Stdout
@@ -148,6 +150,7 @@ type ContainerOptions struct {
 	AppURL, Model, APIBaseURL            string
 	Network                              string
 	Timeout                              time.Duration
+	User                                 string
 }
 
 func jsonUnmarshalStrict(data []byte, target any) error {
@@ -173,10 +176,14 @@ func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	user := opts.User
+	if user == "" {
+		user = containerHostUser()
+	}
 	args := []string{
 		"--read-only",
 		"--userns", "host",
-		"--user", containerHostUser(),
+		"--user", user,
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",

@@ -9,12 +9,15 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/inactdev/inspector/internal/container"
 )
 
 const (
@@ -77,6 +80,60 @@ func prepareAgentExecutable(ctx context.Context) (string, func(), error) {
 		}
 	}
 	return path, cleanup, nil
+}
+
+func localDockerRuntimeUser(ctx context.Context) (string, error) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return "", container.ErrNotInstalled
+	}
+	endpoint, err := dockerOutput(ctx, "reading Docker endpoint", "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}")
+	if err != nil {
+		return "", err
+	}
+	var address string
+	if err := json.Unmarshal(bytes.TrimSpace(endpoint), &address); err != nil {
+		return "", fmt.Errorf("reading Docker endpoint: invalid response: %w", err)
+	}
+	if !strings.HasPrefix(address, "unix://") && !strings.HasPrefix(address, "npipe://") {
+		return "", fmt.Errorf("remote Docker endpoint %q cannot safely use host bind mounts", address)
+	}
+	if err := container.EnsureAvailableContext(ctx); err != nil {
+		return "", err
+	}
+	output, err := dockerOutput(ctx, "reading Docker security options", "info", "--format", "{{json .SecurityOptions}}")
+	if err != nil {
+		return "", err
+	}
+	var securityOptions []string
+	if err := json.Unmarshal(bytes.TrimSpace(output), &securityOptions); err != nil {
+		return "", fmt.Errorf("reading Docker security options: invalid response: %w", err)
+	}
+	for _, option := range securityOptions {
+		for _, field := range strings.Split(option, ",") {
+			if field == "rootless" || field == "name=rootless" {
+				return "0:0", nil
+			}
+		}
+	}
+	return containerHostUser(), nil
+}
+
+func dockerOutput(ctx context.Context, operation string, args ...string) ([]byte, error) {
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err == nil {
+		return output, nil
+	}
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("%s: %w", operation, ctx.Err())
+	}
+	detail := strings.TrimSpace(stderr.String())
+	if detail == "" {
+		detail = err.Error()
+	}
+	return nil, fmt.Errorf("%s: %s", operation, detail)
 }
 
 func dockerServerTarget(ctx context.Context) (string, error) {

@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/inactdev/inspector/internal/container"
 )
 
 func TestBundledAgentsMatchReviewedSource(t *testing.T) {
@@ -24,9 +22,7 @@ func TestBundledAgentsMatchReviewedSource(t *testing.T) {
 }
 
 func TestBundledAgentRunsOnDockerServerPlatform(t *testing.T) {
-	if err := container.EnsureAvailable(); err != nil {
-		t.Skipf("no usable container runtime, skipping: %v", err)
-	}
+	user := requireLocalDocker(t)
 	agentExecutable, cleanup, err := prepareAgentExecutable(context.Background())
 	if err != nil {
 		t.Fatalf("prepareAgentExecutable() error = %v", err)
@@ -36,6 +32,7 @@ func TestBundledAgentRunsOnDockerServerPlatform(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--read-only", "--network", "none",
+		"--userns", "host", "--user", user,
 		"--mount", "type=bind,src="+agentExecutable+",dst=/examiner/agent,readonly",
 		"--entrypoint", "/examiner/agent", RuntimeImage, "--help").CombinedOutput()
 	var exitErr *exec.ExitError
@@ -44,6 +41,53 @@ func TestBundledAgentRunsOnDockerServerPlatform(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "Usage of examiner-agent") {
 		t.Fatalf("bundled examiner agent did not emit its CLI help: %s", output)
+	}
+}
+
+func TestLocalDockerRuntimeUser_RejectsRemoteEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = context ]; then printf '%s\\n' '\"ssh://builder.example/run/docker.sock\"'; exit 0; fi\n" +
+		"exit 99\n"
+	if err := os.WriteFile(docker, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	_, err := localDockerRuntimeUser(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "remote Docker endpoint") {
+		t.Fatalf("localDockerRuntimeUser() = %v, want remote endpoint refusal", err)
+	}
+}
+
+func TestLocalDockerRuntimeUser_UsesNamespaceRootForRootlessDaemon(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = context ]; then printf '%s\\n' '\"unix:///run/user/1000/docker.sock\"'; exit 0; fi\n" +
+		"if [ \"$1\" = info ] && [ \"${2-}\" = --format ]; then printf '%s\\n' '[\"name=rootless\"]'; exit 0; fi\n" +
+		"if [ \"$1\" = info ]; then exit 0; fi\n" +
+		"exit 99\n"
+	if err := os.WriteFile(docker, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	user, err := localDockerRuntimeUser(context.Background())
+	if err != nil {
+		t.Fatalf("localDockerRuntimeUser() error = %v", err)
+	}
+	if user != "0:0" {
+		t.Fatalf("localDockerRuntimeUser() = %q, want 0:0", user)
+	}
+	cmd := NewContainerCommand(context.Background(), ContainerOptions{
+		InputDir: t.TempDir(), OutputDir: t.TempDir(), AgentExecutable: filepath.Join(t.TempDir(), "agent"),
+		AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
+	})
+	defer cmd.Cleanup()
+	if args := strings.Join(cmd.Args, " "); !strings.Contains(args, "--user 0:0") {
+		t.Fatalf("rootless Docker command does not run as namespace root: %q", cmd.Args)
 	}
 }
 
@@ -102,7 +146,7 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 		t.Fatalf("docker command must retain access to private staged files under user-namespace remapping: %q", cmd.Args)
 	}
 	if !strings.Contains(args, "--user "+containerHostUser()) {
-		t.Fatalf("docker command must run as the owner of its private staged files: %q", cmd.Args)
+		t.Fatalf("rootful docker command must run as the owner of its private staged files: %q", cmd.Args)
 	}
 	if !strings.Contains(args, "--entrypoint /examiner/agent "+RuntimeImage) {
 		t.Fatalf("docker command must force Inspector as the entrypoint in the pinned runtime: %q", cmd.Args)
@@ -113,9 +157,7 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 }
 
 func TestPreparedVerdictRemainsReadableAfterContainerWrite(t *testing.T) {
-	if err := container.EnsureAvailable(); err != nil {
-		t.Skipf("no usable container runtime, skipping: %v", err)
-	}
+	user := requireLocalDocker(t)
 	outputDir, verdictPath, cleanupOutput, err := prepareOutput()
 	if err != nil {
 		t.Fatalf("prepareOutput() error = %v", err)
@@ -133,7 +175,7 @@ func TestPreparedVerdictRemainsReadableAfterContainerWrite(t *testing.T) {
 	defer cancel()
 	cmd := NewContainerCommand(ctx, ContainerOptions{
 		InputDir: t.TempDir(), OutputDir: outputDir, AgentExecutable: agentExecutable,
-		AppURL: "http://app:8080", Model: "test-model", Network: "none",
+		AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
 	})
 	defer cmd.Cleanup()
 	if err := cmd.Run(); err != nil {
@@ -149,9 +191,7 @@ func TestPreparedVerdictRemainsReadableAfterContainerWrite(t *testing.T) {
 }
 
 func TestSealedContainerMountsExactlyAllowedResources(t *testing.T) {
-	if err := container.EnsureAvailable(); err != nil {
-		t.Skipf("no usable container runtime, skipping: %v", err)
-	}
+	user := requireLocalDocker(t)
 	applicationSource, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("finding application source: %v", err)
@@ -164,7 +204,7 @@ func TestSealedContainerMountsExactlyAllowedResources(t *testing.T) {
 	}
 	cmd := NewContainerCommand(context.Background(), ContainerOptions{
 		InputDir: inputDir, OutputDir: outputDir, AgentExecutable: agentExecutable,
-		AppURL: "http://app:8080", Model: "test-model", Network: "none",
+		AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
 	})
 	defer cmd.Cleanup()
 	name := fmt.Sprintf("inspector-examiner-mount-test-%d", time.Now().UnixNano())
@@ -246,9 +286,7 @@ func pathMakesReachable(source, target string) bool {
 }
 
 func TestNewContainerCommand_TimeoutKillsContainerAndDescendants(t *testing.T) {
-	if err := container.EnsureAvailable(); err != nil {
-		t.Skipf("no usable container runtime, skipping: %v", err)
-	}
+	user := requireLocalDocker(t)
 	inputDir := t.TempDir()
 	outputDir := t.TempDir()
 	agentExecutable := filepath.Join(t.TempDir(), "agent")
@@ -261,7 +299,7 @@ func TestNewContainerCommand_TimeoutKillsContainerAndDescendants(t *testing.T) {
 	defer cancel()
 	cmd := NewContainerCommand(ctx, ContainerOptions{
 		InputDir: inputDir, OutputDir: outputDir, AgentExecutable: agentExecutable,
-		AppURL: "http://app:8080", Model: "test-model", Network: "none",
+		AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
 	})
 	defer cmd.Cleanup()
 	start := time.Now()
@@ -277,6 +315,17 @@ func TestNewContainerCommand_TimeoutKillsContainerAndDescendants(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outputDir, "survived")); !os.IsNotExist(err) {
 		t.Fatal("examiner child survived the timed-out container")
 	}
+}
+
+func requireLocalDocker(t *testing.T) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	user, err := localDockerRuntimeUser(ctx)
+	if err != nil {
+		t.Skipf("no usable local container runtime, skipping: %v", err)
+	}
+	return user
 }
 
 func runDocker(args ...string) (string, error) {
