@@ -55,6 +55,22 @@ func TestParseTestChanges_RejectsApplicationSource(t *testing.T) {
 	}
 }
 
+func TestParseTestChanges_RequiresFilesArray(t *testing.T) {
+	for name, input := range map[string]string{
+		"missing": `{"baseCommit":"abc123"}`,
+		"null":    `{"baseCommit":"abc123","files":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseTestChanges([]byte(input)); err == nil {
+				t.Fatal("ParseTestChanges() accepted a missing test-change list")
+			}
+		})
+	}
+	if _, err := ParseTestChanges([]byte(`{"baseCommit":"abc123","files":[]}`)); err != nil {
+		t.Fatalf("ParseTestChanges() rejected an explicitly empty test-change list: %v", err)
+	}
+}
+
 func TestParseTestChanges_RejectsUnrecognizedChannels(t *testing.T) {
 	_, err := ParseTestChanges([]byte(`{
 		"baseCommit":"abc123",

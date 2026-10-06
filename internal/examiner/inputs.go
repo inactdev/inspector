@@ -118,6 +118,15 @@ func ParseTestChanges(data []byte) (TestChangeList, error) {
 	if err := rejectDuplicateJSONKeys(data); err != nil {
 		return TestChangeList{}, fmt.Errorf("parsing test-change list: %w", err)
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return TestChangeList{}, fmt.Errorf("parsing test-change list: %w", err)
+	}
+	files, ok := fields["files"]
+	if !ok || bytes.Equal(bytes.TrimSpace(files), []byte("null")) {
+		return TestChangeList{}, fmt.Errorf("parsing test-change list: files is required and must be an array")
+	}
+
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var list TestChangeList

@@ -2,6 +2,7 @@ package examiner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -133,11 +134,14 @@ func TestPreparedVerdictRemainsReadableAfterContainerWrite(t *testing.T) {
 	}
 }
 
-func TestSealedContainerMountsExcludeApplicationSource(t *testing.T) {
+func TestSealedContainerMountsExactlyAllowedResources(t *testing.T) {
 	if err := container.EnsureAvailable(); err != nil {
 		t.Skipf("no usable container runtime, skipping: %v", err)
 	}
-	applicationSource := t.TempDir()
+	applicationSource, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("finding application source: %v", err)
+	}
 	inputDir := t.TempDir()
 	outputDir := t.TempDir()
 	agentExecutable := filepath.Join(t.TempDir(), "examiner-agent")
@@ -165,18 +169,66 @@ func TestSealedContainerMountsExcludeApplicationSource(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = runDocker("rm", "-f", name) })
 
-	mountOutput, err := runDocker("inspect", "--format", "{{range .Mounts}}{{.Source}}\n{{end}}", name)
+	mountOutput, err := runDocker("inspect", "--format", "{{json .Mounts}}", name)
 	if err != nil {
 		t.Fatalf("inspecting sealed examiner mounts: %v: %s", err, mountOutput)
 	}
-	for _, source := range strings.Fields(mountOutput) {
-		if source == applicationSource {
-			t.Fatalf("Docker mounted application source %q into the sealed examiner", applicationSource)
+	var mounts []struct {
+		Type        string `json:"Type"`
+		Source      string `json:"Source"`
+		Destination string `json:"Destination"`
+		RW          bool   `json:"RW"`
+	}
+	if err := json.Unmarshal([]byte(mountOutput), &mounts); err != nil {
+		t.Fatalf("decoding sealed examiner mounts: %v: %s", err, mountOutput)
+	}
+	type expectedMount struct {
+		source string
+		rw     bool
+	}
+	want := map[string]expectedMount{
+		"/examiner/input":  {source: inputDir},
+		"/examiner/output": {source: outputDir, rw: true},
+		"/examiner/agent":  {source: agentExecutable},
+	}
+	if len(mounts) != len(want) {
+		t.Fatalf("sealed examiner mounts = %#v, want exactly %#v", mounts, want)
+	}
+	for _, mount := range mounts {
+		expected, ok := want[mount.Destination]
+		if !ok {
+			t.Fatalf("sealed examiner exposes unexpected mount %#v", mount)
+		}
+		source := normalizeDockerMountSource(mount.Source)
+		if source != normalizeDockerMountSource(expected.source) || mount.Type != "bind" || mount.RW != expected.rw {
+			t.Fatalf("sealed examiner mount %#v does not match expected %#v", mount, expected)
+		}
+		if pathMakesReachable(source, normalizeDockerMountSource(applicationSource)) {
+			t.Fatalf("sealed examiner mount %q makes application source %q reachable", source, applicationSource)
+		}
+		delete(want, mount.Destination)
+	}
+	if len(want) != 0 {
+		t.Fatalf("sealed examiner omitted required mounts: %#v", want)
+	}
+}
+
+func normalizeDockerMountSource(path string) string {
+	for _, prefix := range []string{"/host_mnt", "/run/desktop/mnt/host"} {
+		if strings.HasPrefix(path, prefix+"/") {
+			path = strings.TrimPrefix(path, prefix)
+			break
 		}
 	}
-	if strings.Contains(mountOutput, applicationSource) {
-		t.Fatalf("Docker mount configuration leaks application source %q: %s", applicationSource, mountOutput)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
 	}
+	return filepath.Clean(path)
+}
+
+func pathMakesReachable(source, target string) bool {
+	relative, err := filepath.Rel(source, target)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func TestNewContainerCommand_TimeoutKillsContainerAndDescendants(t *testing.T) {

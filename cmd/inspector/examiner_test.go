@@ -7,8 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/inactdev/inspector/internal/examiner"
@@ -158,34 +156,14 @@ func TestExaminer_StartFailurePostsErrorStatus(t *testing.T) {
 	}
 }
 
-func TestExaminerAgent_UsesConfiguredTimeout(t *testing.T) {
-	inputDir := t.TempDir()
-	outputDir := t.TempDir()
-	for name, content := range map[string]string{
-		examiner.InputRequestName:     "support duplicate captures",
-		examiner.InputGuidebookName:   "POST /captures",
-		examiner.InputTestChangesName: `{"baseCommit":"abc123","files":[]}`,
-	} {
-		if err := os.WriteFile(filepath.Join(inputDir, name), []byte(content), 0o600); err != nil {
-			t.Fatalf("writing %s: %v", name, err)
-		}
-	}
-	t.Setenv(examiner.AnthropicAPIKeyEnvVar, "test-key")
-
+func TestExaminerAgentIsNotAPublicSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runExaminerAgent([]string{
-		"--input-dir", inputDir,
-		"--output-dir", outputDir,
-		"--app-url", "http://app",
-		"--model", "test-model",
-		"--api-base-url", "http://127.0.0.1:1",
-		"--timeout", "1ns",
-	}, &stdout, &stderr)
+	code := run([]string{"examiner-agent"}, &stdout, &stderr)
 	if code != exitRefused {
-		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitRefused, stderr.String())
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
 	}
-	if !bytes.Contains(stderr.Bytes(), []byte("context deadline exceeded")) {
-		t.Fatalf("stderr = %q, want configured timeout failure", stderr.String())
+	if !bytes.Contains(stderr.Bytes(), []byte("missing required --branch")) {
+		t.Fatalf("stderr = %q, want the ordinary inspector usage path", stderr.String())
 	}
 }
 

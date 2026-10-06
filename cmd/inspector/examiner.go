@@ -171,34 +171,3 @@ func printExaminerResult(stdout, stderr io.Writer, result examiner.Result) {
 		fmt.Fprintf(stderr, "refused: %s\n", result.Message)
 	}
 }
-
-func runExaminerAgent(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("inspector examiner-agent", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	inputDir := fs.String("input-dir", "", "sealed input directory")
-	outputDir := fs.String("output-dir", "", "sealed output directory")
-	appURL := fs.String("app-url", "", "running app URL")
-	model := fs.String("model", "", "Anthropic model")
-	apiBaseURL := fs.String("api-base-url", "", "Anthropic Messages API URL")
-	timeout := fs.Duration("timeout", examiner.DefaultTimeout, "maximum examination duration")
-	if err := fs.Parse(args); err != nil {
-		return exitUsage
-	}
-	for _, required := range []struct{ name, value string }{
-		{"--input-dir", *inputDir}, {"--output-dir", *outputDir}, {"--app-url", *appURL}, {"--model", *model},
-	} {
-		if strings.TrimSpace(required.value) == "" {
-			fmt.Fprintf(stderr, "examiner-agent: missing required %s\n", required.name)
-			return exitUsage
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-	if err := examiner.RunAgent(ctx, examiner.AgentOptions{
-		InputDir: *inputDir, OutputDir: *outputDir, AppURL: *appURL, Model: *model, APIBaseURL: *apiBaseURL,
-	}); err != nil {
-		fmt.Fprintf(stderr, "examiner-agent: %v\n", err)
-		return exitRefused
-	}
-	return exitGreen
-}

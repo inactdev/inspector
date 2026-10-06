@@ -47,8 +47,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		switch args[0] {
 		case "examine":
 			return runExaminer(args[1:], stdout, stderr)
-		case "examiner-agent":
-			return runExaminerAgent(args[1:], stdout, stderr)
 		}
 	}
 	fs := flag.NewFlagSet("inspector", flag.ContinueOnError)
