@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	agentLinuxAMD64SHA256 = "d85c8340433c4914002a7a46b2efae724479b371abab558285ea401e572fc8e1"
-	agentLinuxARM64SHA256 = "e3ed4748ef158b3f6ecd4796bef1f69df5ed7769dd0dc6dc7453b7440065e9d0"
+	agentLinuxAMD64SHA256 = "91f3ac5f0c59bfc011691a8b41c9db69878e47f47e971939767f6dd9f72bb8dd"
+	agentLinuxARM64SHA256 = "5ac8bef7a1df423c52c244f80a8416a6b72cb7bcd0730640a6b34f4f55d92be1"
 )
 
 //go:embed runtime/examiner-agent-linux-amd64.gz

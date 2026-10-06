@@ -15,6 +15,14 @@ import (
 	"github.com/inactdev/inspector/internal/container"
 )
 
+func TestBundledAgentsMatchReviewedSource(t *testing.T) {
+	command := exec.Command("runtime/build.sh", "check")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("runtime/build.sh check: %v\n%s", err, output)
+	}
+}
+
 func TestBundledAgentRunsOnDockerServerPlatform(t *testing.T) {
 	if err := container.EnsureAvailable(); err != nil {
 		t.Skipf("no usable container runtime, skipping: %v", err)
@@ -92,6 +100,9 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 	}
 	if !strings.Contains(args, "--userns host") {
 		t.Fatalf("docker command must retain access to private staged files under user-namespace remapping: %q", cmd.Args)
+	}
+	if !strings.Contains(args, "--user "+containerHostUser()) {
+		t.Fatalf("docker command must run as the owner of its private staged files: %q", cmd.Args)
 	}
 	if !strings.Contains(args, "--entrypoint /examiner/agent "+RuntimeImage) {
 		t.Fatalf("docker command must force Inspector as the entrypoint in the pinned runtime: %q", cmd.Args)
