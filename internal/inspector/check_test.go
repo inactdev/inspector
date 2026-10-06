@@ -50,12 +50,13 @@ func requireInternet(t *testing.T) {
 }
 
 // failingDockerKill puts a docker shim first on PATH that hands every
-// subcommand to the real docker except `kill`, which it fails the way
-// docker itself does for a container that is no longer running. That
-// makes the failed-kill path reproducible instead of dependent on
-// winning a race with --rm's auto-remove window, and the names it was
-// asked to kill are what the cleanup needs to remove the containers
-// that consequently outlived their run.
+// subcommand to the real docker except the timeout's `kill` and fallback
+// `rm --force`, which it fails the way docker itself does for a container
+// that is no longer running. That makes the failed-cleanup path
+// reproducible instead of dependent on winning a race with --rm's
+// auto-remove window, and the names it was asked to kill are what the
+// test cleanup needs to remove the containers that consequently outlived
+// their run.
 func failingDockerKill(t *testing.T) {
 	t.Helper()
 	realDocker, err := exec.LookPath("docker")
@@ -69,6 +70,10 @@ func failingDockerKill(t *testing.T) {
 if [ "$1" = "kill" ]; then
 	printf '%%s\n' "$2" >> %q
 	echo "Error response from daemon: Cannot kill container: $2: Container $2 is not running" >&2
+	exit 1
+fi
+if [ "$1" = "rm" ] && [ "$2" = "--force" ]; then
+	echo "Error response from daemon: Cannot remove container: $3: Container $3 is not running" >&2
 	exit 1
 fi
 exec %q "$@"
