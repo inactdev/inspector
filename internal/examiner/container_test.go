@@ -1,10 +1,13 @@
 package examiner
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,10 +17,75 @@ import (
 )
 
 func TestBundledAgentsMatchReviewedSource(t *testing.T) {
-	command := exec.Command("runtime/build.sh", "check")
-	output, err := command.CombinedOutput()
+	const builderGoVersion = "go1.22.12"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
-		t.Fatalf("runtime/build.sh check: %v\n%s", err, output)
+		t.Fatalf("repository root: %v", err)
+	}
+	goVersion, err := exec.CommandContext(ctx, "go", "env", "GOVERSION").Output()
+	if err != nil {
+		t.Fatalf("go env GOVERSION: %v", err)
+	}
+
+	for _, target := range []struct {
+		arch       string
+		compressed []byte
+	}{
+		{arch: "amd64", compressed: agentLinuxAMD64},
+		{arch: "arm64", compressed: agentLinuxARM64},
+	} {
+		binary := filepath.Join(t.TempDir(), "examiner-agent-linux-"+target.arch)
+		args := []string{"build", "-tags", "examiner_agent", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-o", binary, "./cmd/examiner-agent"}
+		var command *exec.Cmd
+		if strings.TrimSpace(string(goVersion)) == builderGoVersion {
+			command = exec.CommandContext(ctx, "go", args...)
+			command.Dir = root
+			command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+target.arch)
+		} else {
+			user, err := localDockerRuntimeUser(ctx)
+			if err != nil {
+				t.Fatalf("Go is not %s and Docker cannot provide the reproducible builder: %v", builderGoVersion, err)
+			}
+			containerBinary := "/output/" + filepath.Base(binary)
+			dockerArgs := []string{
+				"run", "--rm", "--userns", "host", "--user", user,
+				"--env", "HOME=/tmp", "--env", "GOCACHE=/tmp/go-build",
+				"--env", "CGO_ENABLED=0", "--env", "GOOS=linux", "--env", "GOARCH=" + target.arch,
+				"--mount", "type=bind,src=" + root + ",dst=/workspace,readonly",
+				"--mount", "type=bind,src=" + filepath.Dir(binary) + ",dst=/output",
+				"--workdir", "/workspace",
+				"cimg/go@sha256:a3b66b5f01291de5d4ddcaaf7916f1eabdb3c990da628f766a6d28f978a6928e",
+				"go", "build", "-tags", "examiner_agent", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-o", containerBinary, "./cmd/examiner-agent",
+			}
+			command = exec.CommandContext(ctx, "docker", dockerArgs...)
+		}
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("building examiner agent for linux/%s: %v\n%s", target.arch, err, output)
+		}
+
+		built, err := os.ReadFile(binary)
+		if err != nil {
+			t.Fatalf("reading built examiner agent for linux/%s: %v", target.arch, err)
+		}
+		reader, err := gzip.NewReader(bytes.NewReader(target.compressed))
+		if err != nil {
+			t.Fatalf("opening bundled examiner agent for linux/%s: %v", target.arch, err)
+		}
+		bundled, readErr := io.ReadAll(reader)
+		closeErr := reader.Close()
+		if readErr != nil {
+			t.Fatalf("reading bundled examiner agent for linux/%s: %v", target.arch, readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("closing bundled examiner agent for linux/%s: %v", target.arch, closeErr)
+		}
+		if !bytes.Equal(built, bundled) {
+			t.Fatalf("bundled examiner agent for linux/%s does not match its reviewed source", target.arch)
+		}
 	}
 }
 

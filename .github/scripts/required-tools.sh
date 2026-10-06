@@ -11,5 +11,4 @@
 # scaffolding, so it cannot prove them - see the drift block's comment in
 # inspector-gate_test.sh. They are listed here anyway because script/check
 # genuinely cannot run to completion without them.
-# shellcheck disable=SC2034 # This file is sourced by its consumers.
-REQUIRED_TOOLS="go gofmt bash jq base64 awk tr dirname mktemp ln sed rm id gzip cmp"
+REQUIRED_TOOLS="go gofmt bash jq base64 awk tr dirname mktemp ln sed rm"
