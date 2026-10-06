@@ -175,6 +175,7 @@ func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.
 	}
 	args := []string{
 		"--read-only",
+		"--userns", "host",
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",

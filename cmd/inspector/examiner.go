@@ -48,8 +48,7 @@ a sealed container; it never mounts the judged repository or implementation.
 		return exitRefused
 	}
 	for _, required := range []struct{ name, value string }{
-		{"--request", *requestPath}, {"--guidebook", *guidebookPath}, {"--test-changes", *testChangesPath},
-		{"--app-url", *appURL}, {"--commit", *commit}, {"--owner", *owner}, {"--repo", *repo}, {"--model", *model},
+		{"--owner", *owner}, {"--repo", *repo}, {"--commit", *commit},
 	} {
 		if strings.TrimSpace(required.value) == "" {
 			fmt.Fprintf(stderr, "refused: missing required %s\n", required.name)
@@ -59,6 +58,15 @@ a sealed container; it never mounts the judged repository or implementation.
 	if !isFullCommitSHA(*commit) {
 		fmt.Fprintln(stderr, "refused: --commit must be a full 40-character commit SHA")
 		return exitRefused
+	}
+	for _, required := range []struct{ name, value string }{
+		{"--request", *requestPath}, {"--guidebook", *guidebookPath}, {"--test-changes", *testChangesPath},
+		{"--app-url", *appURL}, {"--model", *model},
+	} {
+		if strings.TrimSpace(required.value) == "" {
+			result := examiner.Result{Kind: examiner.Refused, Message: fmt.Sprintf("missing required %s", required.name)}
+			return finishExaminer(*owner, *repo, *commit, stdout, stderr, result)
+		}
 	}
 
 	result, err := runExamination(context.Background(), examiner.RunOptions{
@@ -78,8 +86,12 @@ a sealed container; it never mounts the judged repository or implementation.
 	if err != nil {
 		result = examiner.Result{Kind: examiner.Refused, Message: fmt.Sprintf("examiner could not start: %v", err)}
 	}
+	return finishExaminer(*owner, *repo, *commit, stdout, stderr, result)
+}
+
+func finishExaminer(owner, repo, commit string, stdout, stderr io.Writer, result examiner.Result) int {
 	printExaminerResult(stdout, stderr, result)
-	if err := postExaminerStatus(*owner, *repo, *commit, result); err != nil {
+	if err := postExaminerStatus(owner, repo, commit, result); err != nil {
 		fmt.Fprintf(stderr, "refused: examiner reached a %s result but could not post its separate status: %v\n", result.Kind, err)
 		return exitRefused
 	}

@@ -88,6 +88,46 @@ func TestExaminer_RefusalPostsErrorNotFailure(t *testing.T) {
 	}
 }
 
+func TestExaminer_MissingOperationalInputPostsErrorStatus(t *testing.T) {
+	var got struct {
+		State   string `json:"state"`
+		Context string `json:"context"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decoding status: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+	previousRun := runExamination
+	runCalled := false
+	runExamination = func(context.Context, examiner.RunOptions) (examiner.Result, error) {
+		runCalled = true
+		return examiner.Result{Kind: examiner.Green}, nil
+	}
+	t.Cleanup(func() { runExamination = previousRun })
+	previousAPIBaseURL := githubAPIBaseURL
+	githubAPIBaseURL = server.URL
+	t.Cleanup(func() { githubAPIBaseURL = previousAPIBaseURL })
+	t.Setenv("GITHUB_TOKEN", "test-token")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"examine", "--request", "request", "--test-changes", "changes", "--app-url", "http://app", "--commit", testExaminerCommit, "--owner", "inactdev", "--repo", "inkwell", "--model", "test-model"}, &stdout, &stderr)
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	}
+	if runCalled {
+		t.Fatal("examination ran without its guidebook")
+	}
+	if got.State != "error" || got.Context != "examiner" {
+		t.Fatalf("posted status = %#v, want examiner error", got)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("missing required --guidebook")) {
+		t.Fatalf("stderr = %q, want missing guidebook refusal", stderr.String())
+	}
+}
+
 func TestExaminer_RejectsCallerSuppliedAgentBinary(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"examine", "--agent-binary", "/tmp/untrusted-agent"}, &stdout, &stderr)

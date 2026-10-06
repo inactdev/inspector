@@ -90,6 +90,9 @@ func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
 	if !strings.Contains(args, "--read-only") {
 		t.Fatalf("docker command must keep the examiner filesystem read-only: %q", cmd.Args)
 	}
+	if !strings.Contains(args, "--userns host") {
+		t.Fatalf("docker command must retain access to private staged files under user-namespace remapping: %q", cmd.Args)
+	}
 	if !strings.Contains(args, "--entrypoint /examiner/agent "+RuntimeImage) {
 		t.Fatalf("docker command must force Inspector as the entrypoint in the pinned runtime: %q", cmd.Args)
 	}
