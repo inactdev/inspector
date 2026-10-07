@@ -67,7 +67,7 @@ type anthropicBlock struct {
 // RunAgent asks the model to propose scenarios and operate the running app
 // through a constrained HTTP driver. The model never submits a verdict. The
 // machine records delivered observations per capability and derives the result.
-func RunAgent(ctx context.Context, opts AgentOptions) error {
+func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 	if strings.TrimSpace(opts.Model) == "" {
 		return errors.New("no model was configured")
 	}
@@ -113,6 +113,14 @@ func RunAgent(ctx context.Context, opts AgentOptions) error {
 	initial := fmt.Sprintf("REQUEST (derive the requested capabilities from this, never a worker checklist):\n%s\n\nFEATURE MAP (features and how to drive the running app):\n%s\n\nALWAYS-TRUE LIST (project invariants):\n%s\n\nCHANGED FILE NAMES (worker output, names only):\n%s\n\nPRE-TASK CHANGED TESTS (from the task starting commit, never worker content):\n%s", request, featureMap, alwaysTrue, changedFilesData, baseTestsData)
 	messages := []anthropicMessage{{Role: "user", Content: initial}}
 	record := NewExaminationRecord(opts.Budget)
+	defer func() {
+		if runErr == nil || len(record.Capabilities) == 0 {
+			return
+		}
+		if err := writeTerminalResult(opts.OutputDir, record, runErr); err != nil {
+			runErr = errors.Join(runErr, err)
+		}
+	}()
 	baseTestPaths := make(map[string]struct{}, len(baseTests.Tests))
 	for _, test := range baseTests.Tests {
 		baseTestPaths[test.Path] = struct{}{}
@@ -137,21 +145,30 @@ func RunAgent(ctx context.Context, opts AgentOptions) error {
 			}
 			switch block.Name {
 			case "propose_capabilities":
-				answer, err := addCapabilities(record, block.Input, baseTestPaths)
-				if err != nil {
-					answer = "proposal rejected: " + err.Error()
+				answer, proposalErr := addCapabilities(record, block.Input, baseTestPaths)
+				if proposalErr != nil {
+					answer = "proposal rejected: " + proposalErr.Error()
+				} else if err := writeDerivedResult(opts.OutputDir, record); err != nil {
+					return err
 				}
 				toolResults = append(toolResults, toolResult(block.ID, answer))
 			case "drive_app":
-				answer, observation := driveCapability(ctx, record, baseURL, block.Input)
+				answer, observation, err := driveCapability(ctx, record, baseURL, block.Input, func() error {
+					return writeDerivedResult(opts.OutputDir, record)
+				})
+				if err != nil {
+					return err
+				}
 				if observation != nil {
 					pendingObservations = append(pendingObservations, *observation)
 				}
 				toolResults = append(toolResults, toolResult(block.ID, answer))
 			case "assess_capabilities":
-				answer, err := addAssessments(record, block.Input)
-				if err != nil {
-					answer = "assessment rejected: " + err.Error()
+				answer, assessmentErr := addAssessments(record, block.Input)
+				if assessmentErr != nil {
+					answer = "assessment rejected: " + assessmentErr.Error()
+				} else if err := writeDerivedResult(opts.OutputDir, record); err != nil {
+					return err
 				}
 				toolResults = append(toolResults, toolResult(block.ID, answer))
 			case "finish_examination":
@@ -170,6 +187,9 @@ func RunAgent(ctx context.Context, opts AgentOptions) error {
 		// a request whose response it has not seen.
 		for _, observation := range pendingObservations {
 			if err := record.RecordObservation(observation.CapabilityID, observation.Evidence); err != nil {
+				return err
+			}
+			if err := writeDerivedResult(opts.OutputDir, record); err != nil {
 				return err
 			}
 		}
@@ -223,30 +243,39 @@ func addCapabilities(record *ExaminationRecord, input json.RawMessage, baseTestP
 	return fmt.Sprintf("recorded %d capability proposals", len(request.Capabilities)), nil
 }
 
-func driveCapability(ctx context.Context, record *ExaminationRecord, base *url.URL, input json.RawMessage) (string, *Observation) {
+func driveCapability(ctx context.Context, record *ExaminationRecord, base *url.URL, input json.RawMessage, checkpoint func() error) (string, *Observation, error) {
 	var request struct {
 		CapabilityID string     `json:"capabilityId"`
 		Request      AppRequest `json:"request"`
 	}
 	if err := json.Unmarshal(input, &request); err != nil {
-		return "driver error: decoding drive_app call: " + err.Error(), nil
-	}
-	if err := record.StartAttempt(request.CapabilityID); err != nil {
-		return "driver error: " + err.Error(), nil
+		return "driver error: decoding drive_app call: " + err.Error(), nil, nil
 	}
 	normalizedRequest := normalizedAppRequest(request.Request)
+	if err := record.StartAttempt(request.CapabilityID, normalizedRequest); err != nil {
+		return "driver error: " + err.Error(), nil, nil
+	}
+	if err := checkpoint(); err != nil {
+		return "", nil, err
+	}
 	answer, err := driveApp(ctx, base, normalizedRequest)
 	if err != nil {
 		answer = "driver error: " + err.Error()
-		if recordErr := record.RecordAttempt(request.CapabilityID, normalizedRequest, false, answer); recordErr != nil {
-			return "driver error: " + recordErr.Error(), nil
+		if recordErr := record.CompleteAttempt(request.CapabilityID, false, answer); recordErr != nil {
+			return "driver error: " + recordErr.Error(), nil, nil
 		}
-		return answer, nil
+		if err := checkpoint(); err != nil {
+			return "", nil, err
+		}
+		return answer, nil, nil
 	}
-	if err := record.RecordAttempt(request.CapabilityID, normalizedRequest, true, answer); err != nil {
-		return "driver error: " + err.Error(), nil
+	if err := record.CompleteAttempt(request.CapabilityID, true, answer); err != nil {
+		return "driver error: " + err.Error(), nil, nil
 	}
-	return answer, &Observation{CapabilityID: request.CapabilityID, Evidence: answer}
+	if err := checkpoint(); err != nil {
+		return "", nil, err
+	}
+	return answer, &Observation{CapabilityID: request.CapabilityID, Evidence: answer}, nil
 }
 
 func addAssessments(record *ExaminationRecord, input json.RawMessage) (string, error) {
@@ -293,15 +322,54 @@ func writeDerivedResult(outputDir string, record *ExaminationRecord) error {
 	if err != nil {
 		return fmt.Errorf("deriving examination result: %w", err)
 	}
+	return writeResult(outputDir, result)
+}
+
+func writeTerminalResult(outputDir string, record *ExaminationRecord, terminalErr error) error {
+	result, err := record.DeriveResult()
+	if err != nil {
+		return fmt.Errorf("deriving partial examination result: %w", err)
+	}
+	markExaminationIncomplete(&result, "examination ended before completion: "+terminalErr.Error())
+	return writeResult(outputDir, result)
+}
+
+func writeResult(outputDir string, result Result) error {
+	result.RuntimeFingerprint = RuntimeSourceFingerprint()
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding verdict: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(filepath.Join(outputDir, VerdictName), data, 0o600); err != nil {
-		return fmt.Errorf("writing verdict: %w", err)
+	file, err := os.CreateTemp(outputDir, ".verdict-*.json")
+	if err != nil {
+		return fmt.Errorf("creating verdict checkpoint: %w", err)
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("securing verdict checkpoint: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("writing verdict checkpoint: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("writing verdict checkpoint: %w", err)
+	}
+	if err := os.Rename(name, filepath.Join(outputDir, VerdictName)); err != nil {
+		return fmt.Errorf("publishing verdict checkpoint: %w", err)
 	}
 	return nil
+}
+
+func markExaminationIncomplete(result *Result, message string) {
+	result.Verdict.ExaminationIncomplete = true
+	result.Message = message
+	if result.Kind == Green {
+		result.Kind = Refused
+	}
 }
 
 func askModel(ctx context.Context, opts AgentOptions, messages []anthropicMessage) (anthropicResponse, error) {

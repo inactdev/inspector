@@ -104,17 +104,26 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		return Result{Kind: Refused, Message: fmt.Sprintf("examiner container could not be stopped: %v; it may still be running", killErr)}, nil
 	}
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-		return Result{Kind: Refused, Message: fmt.Sprintf("examiner ran past its %s timeout; it could not be tested, not judged wrong", timeout)}, nil
+		message := fmt.Sprintf("examiner ran past its %s timeout; it could not be tested, not judged wrong", timeout)
+		if result, err := readRuntimeResult(verdictPath); err == nil {
+			markExaminationIncomplete(&result, message)
+			return result, nil
+		}
+		return Result{Kind: Refused, Message: message}, nil
 	}
 	if runErr != nil {
-		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent did not complete: %v", runErr)}, nil
+		message := fmt.Sprintf("examiner agent did not complete: %v", runErr)
+		if result, err := readRuntimeResult(verdictPath); err == nil {
+			markExaminationIncomplete(&result, message)
+			return result, nil
+		}
+		return Result{Kind: Refused, Message: message}, nil
 	}
-	data, err := os.ReadFile(verdictPath)
+	result, err := readRuntimeResult(verdictPath)
 	if err != nil {
-		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent completed without a verdict; userns-remap may be unsupported on this host (see inspector#32): %v", err)}, nil
-	}
-	var result Result
-	if err := jsonUnmarshalStrict(data, &result); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent completed without a verdict; userns-remap may be unsupported on this host (see inspector#32): %v", err)}, nil
+		}
 		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent wrote an invalid verdict: %v", err)}, nil
 	}
 	return result, nil
@@ -128,7 +137,40 @@ func ensureRuntimeImage(ctx context.Context) error {
 		}
 		return fmt.Errorf("examiner runtime image %q is not available; build it locally with internal/examiner/runtime/build.sh before examining (the command never builds or pulls at examination time): %s", RuntimeImage, strings.TrimSpace(string(output)))
 	}
+	cmd = exec.CommandContext(ctx, "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--entrypoint", "/usr/local/bin/examiner-agent", RuntimeImage, "--runtime-fingerprint")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("checking examiner runtime identity: %w", ctx.Err())
+		}
+		return staleRuntimeError(strings.TrimSpace(string(output)))
+	}
+	if actual := strings.TrimSpace(string(output)); actual != RuntimeSourceFingerprint() {
+		return staleRuntimeError(fmt.Sprintf("found fingerprint %q", actual))
+	}
 	return nil
+}
+
+func staleRuntimeError(detail string) error {
+	if detail == "" {
+		detail = "the image did not report its source fingerprint"
+	}
+	return fmt.Errorf("examiner runtime image %q is stale or incompatible; rebuild it with internal/examiner/runtime/build.sh before examining: %s", RuntimeImage, detail)
+}
+
+func readRuntimeResult(path string) (Result, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Result{}, err
+	}
+	var result Result
+	if err := jsonUnmarshalStrict(data, &result); err != nil {
+		return Result{}, err
+	}
+	if result.RuntimeFingerprint != RuntimeSourceFingerprint() {
+		return Result{}, staleRuntimeError(fmt.Sprintf("verdict fingerprint is %q", result.RuntimeFingerprint))
+	}
+	return result, nil
 }
 
 func prepareOutput() (string, string, func(), error) {

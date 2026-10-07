@@ -195,6 +195,53 @@ func TestRunAgent_RejectsAssessmentBatchAtomically(t *testing.T) {
 	}
 }
 
+func TestRunAgent_PreservesFoundBugWhenLaterModelCallFails(t *testing.T) {
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"broken"}`))
+	}))
+	defer app.Close()
+
+	modelCalls := 0
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelCalls++
+		switch modelCalls {
+		case 1:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"propose-1","name":"propose_capabilities","input":{"capabilities":[{"id":"list","claim":"saved inklings can be listed","scenario":"GET /inklings"}]}}]}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"drive-1","name":"drive_app","input":{"capabilityId":"list","request":{"method":"GET","path":"/inklings"}}}]}`))
+		case 3:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"assess-1","name":"assess_capabilities","input":{"assessments":[{"capabilityId":"list","verdict":"not_confirmed","evidence":"the app returned 500","proposedRegression":"keep a listing regression"}]}}]}`))
+		default:
+			http.Error(w, "model unavailable", http.StatusServiceUnavailable)
+		}
+	}))
+	defer model.Close()
+
+	inputDir, outputDir := agentDirectories(t)
+	t.Setenv(AnthropicAPIKeyEnvVar, "test-key")
+	err := RunAgent(context.Background(), AgentOptions{
+		InputDir: inputDir, OutputDir: outputDir, AppURL: app.URL, Model: "test-model", APIBaseURL: model.URL,
+	})
+	if err == nil {
+		t.Fatal("RunAgent() completed after the model failed")
+	}
+	data, readErr := os.ReadFile(filepath.Join(outputDir, VerdictName))
+	if readErr != nil {
+		t.Fatalf("reading partial verdict: %v", readErr)
+	}
+	var result Result
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("decoding partial verdict: %v", err)
+	}
+	if result.Kind != Red || !result.Verdict.ExaminationIncomplete {
+		t.Fatalf("partial verdict = %#v, want found bug plus incomplete examination", result)
+	}
+	if result.RuntimeFingerprint != RuntimeSourceFingerprint() || len(result.Verdict.Outcomes) != 1 || len(result.Verdict.Outcomes[0].Attempts) != 1 {
+		t.Fatalf("partial verdict = %#v, want fingerprinted recorded attempt", result)
+	}
+}
+
 func TestDriveApp_RejectsRedirectToAnotherOrigin(t *testing.T) {
 	destinationCalls := 0
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

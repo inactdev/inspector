@@ -9,11 +9,11 @@ func TestExaminationRecord_DerivesTestFindingFromPreTaskScenario(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddCapability() error = %v", err)
 	}
-	if err := record.StartAttempt("capture"); err != nil {
+	if err := record.StartAttempt("capture", AppRequest{Method: "post", Path: "/inklings"}); err != nil {
 		t.Fatalf("StartAttempt() error = %v", err)
 	}
-	if err := record.RecordAttempt("capture", AppRequest{Method: "post", Path: "/inklings"}, true, "HTTP 500"); err != nil {
-		t.Fatalf("RecordAttempt() error = %v", err)
+	if err := record.CompleteAttempt("capture", true, "HTTP 500"); err != nil {
+		t.Fatalf("CompleteAttempt() error = %v", err)
 	}
 	if err := record.RecordObservation("capture", "HTTP 500"); err != nil {
 		t.Fatalf("RecordObservation() error = %v", err)
@@ -60,11 +60,11 @@ func TestExaminationRecord_PreservesBugAndIncompleteMark(t *testing.T) {
 			t.Fatalf("AddCapability() error = %v", err)
 		}
 	}
-	if err := record.StartAttempt("broken"); err != nil {
+	if err := record.StartAttempt("broken", AppRequest{Method: "post", Path: "/inklings"}); err != nil {
 		t.Fatalf("StartAttempt() error = %v", err)
 	}
-	if err := record.RecordAttempt("broken", AppRequest{Method: "post", Path: "/inklings"}, true, "HTTP 500"); err != nil {
-		t.Fatalf("RecordAttempt() error = %v", err)
+	if err := record.CompleteAttempt("broken", true, "HTTP 500"); err != nil {
+		t.Fatalf("CompleteAttempt() error = %v", err)
 	}
 	if err := record.RecordObservation("broken", "HTTP 500"); err != nil {
 		t.Fatalf("RecordObservation() error = %v", err)
@@ -107,8 +107,11 @@ func TestExaminationRecord_RecordAttemptNormalizesAndRetainsRequest(t *testing.T
 		t.Fatalf("AddCapability() error = %v", err)
 	}
 	request := AppRequest{Method: "post", Path: "/inklings", Headers: map[string]string{"content-type": "application/json"}, Body: `{"text":"hello"}`}
-	if err := record.RecordAttempt("create", request, true, "HTTP 201"); err != nil {
-		t.Fatalf("RecordAttempt() error = %v", err)
+	if err := record.StartAttempt("create", request); err != nil {
+		t.Fatalf("StartAttempt() error = %v", err)
+	}
+	if err := record.CompleteAttempt("create", true, "HTTP 201"); err != nil {
+		t.Fatalf("CompleteAttempt() error = %v", err)
 	}
 	attempt := record.Attempts["create"][0]
 	if attempt.Request.Method != "POST" || attempt.Request.Path != request.Path || attempt.Request.Headers["Content-Type"] != "application/json" || attempt.Request.Body != request.Body {

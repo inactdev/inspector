@@ -84,9 +84,10 @@ const (
 // publication result. Red and Incomplete can both be true: a real bug remains
 // a failure even when another capability could not be tested.
 type Result struct {
-	Kind    ResultKind `json:"kind"`
-	Verdict Verdict    `json:"verdict"`
-	Message string     `json:"message,omitempty"`
+	Kind               ResultKind `json:"kind"`
+	Verdict            Verdict    `json:"verdict"`
+	Message            string     `json:"message,omitempty"`
+	RuntimeFingerprint string     `json:"runtimeFingerprint"`
 }
 
 // ChangedFileList is Fabrica's names-only record of every worker-changed file.
@@ -180,8 +181,8 @@ func (r *ExaminationRecord) AddCapability(proposal CapabilityProposal) error {
 	return nil
 }
 
-// StartAttempt reserves budget for a capability before its HTTP request runs.
-func (r *ExaminationRecord) StartAttempt(capabilityID string) error {
+// StartAttempt reserves budget and records the request before its HTTP call.
+func (r *ExaminationRecord) StartAttempt(capabilityID string, request AppRequest) error {
 	if _, exists := r.Capabilities[capabilityID]; !exists {
 		return fmt.Errorf("attempt names unknown capability %q", capabilityID)
 	}
@@ -189,22 +190,26 @@ func (r *ExaminationRecord) StartAttempt(capabilityID string) error {
 		return fmt.Errorf("examination attempt budget of %d is exhausted", r.Budget)
 	}
 	r.AttemptCount++
+	r.Attempts[capabilityID] = append(r.Attempts[capabilityID], AppAttempt{
+		Request: normalizedAppRequest(request), Evidence: "request started but no response was recorded",
+	})
 	return nil
 }
 
-// RecordAttempt retains the driver response or failure for the capability that
-// initiated it. A successful attempt becomes an observation only after that
+// CompleteAttempt retains the driver response or failure for the latest
+// started request. A successful attempt becomes an observation only after that
 // response was delivered back to the model in a later turn.
-func (r *ExaminationRecord) RecordAttempt(capabilityID string, request AppRequest, successful bool, evidence string) error {
-	if _, exists := r.Capabilities[capabilityID]; !exists {
-		return fmt.Errorf("attempt names unknown capability %q", capabilityID)
-	}
+func (r *ExaminationRecord) CompleteAttempt(capabilityID string, successful bool, evidence string) error {
 	if strings.TrimSpace(evidence) == "" {
 		return fmt.Errorf("attempt for %q has no evidence", capabilityID)
 	}
-	r.Attempts[capabilityID] = append(r.Attempts[capabilityID], AppAttempt{
-		Request: normalizedAppRequest(request), Evidence: evidence, Successful: successful,
-	})
+	attempts := r.Attempts[capabilityID]
+	if len(attempts) == 0 {
+		return fmt.Errorf("attempt for %q was not started", capabilityID)
+	}
+	attempts[len(attempts)-1].Evidence = evidence
+	attempts[len(attempts)-1].Successful = successful
+	r.Attempts[capabilityID] = attempts
 	return nil
 }
 

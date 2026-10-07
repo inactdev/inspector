@@ -168,6 +168,24 @@ func normalizeDockerMountSource(path string) string {
 	return filepath.Clean(path)
 }
 
+func TestEnsureRuntimeImage_RejectsStaleAgent(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = image ]; then exit 0; fi\n" +
+		"if [ \"$1\" = run ]; then printf '%s\\n' stale-fingerprint; exit 0; fi\n" +
+		"exit 99\n"
+	if err := os.WriteFile(docker, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	err := ensureRuntimeImage(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "stale or incompatible") || !strings.Contains(err.Error(), "build.sh") {
+		t.Fatalf("ensureRuntimeImage() error = %v, want stale image rebuild refusal", err)
+	}
+}
+
 func TestLocalDockerRuntimeUser_RejectsRemoteEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	docker := filepath.Join(dir, "docker")
