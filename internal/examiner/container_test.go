@@ -178,10 +178,32 @@ func TestLocalDockerRuntimeUser_RejectsRemoteEndpoint(t *testing.T) {
 		t.Fatalf("writing fake docker: %v", err)
 	}
 	t.Setenv("PATH", dir)
+	t.Setenv("DOCKER_CONTEXT", "")
+	t.Setenv("DOCKER_HOST", "")
 
 	_, err := localDockerRuntimeUser(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "remote Docker endpoint") {
 		t.Fatalf("localDockerRuntimeUser() = %v, want remote endpoint refusal", err)
+	}
+}
+
+func TestLocalDockerRuntimeUser_RejectsRemoteDockerHostOverride(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = context ]; then printf '%s\\n' '\"unix:///var/run/docker.sock\"'; exit 0; fi\n" +
+		"if [ \"$1\" = info ]; then exit 0; fi\n" +
+		"exit 99\n"
+	if err := os.WriteFile(docker, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("DOCKER_CONTEXT", "")
+	t.Setenv("DOCKER_HOST", "ssh://builder.example/run/docker.sock")
+
+	_, err := localDockerRuntimeUser(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "remote Docker endpoint") {
+		t.Fatalf("localDockerRuntimeUser() = %v, want DOCKER_HOST refusal", err)
 	}
 }
 
@@ -197,6 +219,8 @@ func TestLocalDockerRuntimeUser_UsesNamespaceRootForRootlessDaemon(t *testing.T)
 		t.Fatalf("writing fake docker: %v", err)
 	}
 	t.Setenv("PATH", dir)
+	t.Setenv("DOCKER_CONTEXT", "")
+	t.Setenv("DOCKER_HOST", "")
 
 	user, err := localDockerRuntimeUser(context.Background())
 	if err != nil {

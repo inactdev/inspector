@@ -204,16 +204,22 @@ func addCapabilities(record *ExaminationRecord, input json.RawMessage, baseTestP
 	if len(request.Capabilities) == 0 {
 		return "", errors.New("no capabilities were proposed")
 	}
+	staged := *record
+	staged.Capabilities = make(map[string]CapabilityProposal, len(record.Capabilities)+len(request.Capabilities))
+	for id, capability := range record.Capabilities {
+		staged.Capabilities[id] = capability
+	}
 	for _, proposal := range request.Capabilities {
 		if proposal.TestPath != "" {
 			if _, ok := baseTestPaths[proposal.TestPath]; !ok {
 				return "", fmt.Errorf("test protection %q has no supplied pre-task test", proposal.TestPath)
 			}
 		}
-		if err := record.AddCapability(proposal); err != nil {
+		if err := staged.AddCapability(proposal); err != nil {
 			return "", err
 		}
 	}
+	record.Capabilities = staged.Capabilities
 	return fmt.Sprintf("recorded %d capability proposals", len(request.Capabilities)), nil
 }
 
@@ -253,11 +259,17 @@ func addAssessments(record *ExaminationRecord, input json.RawMessage) (string, e
 	if len(request.Assessments) == 0 {
 		return "", errors.New("no assessments were proposed")
 	}
+	staged := *record
+	staged.Assessments = make(map[string]Assessment, len(record.Assessments)+len(request.Assessments))
+	for id, assessment := range record.Assessments {
+		staged.Assessments[id] = assessment
+	}
 	for _, assessment := range request.Assessments {
-		if err := record.AddAssessment(assessment); err != nil {
+		if err := staged.AddAssessment(assessment); err != nil {
 			return "", err
 		}
 	}
+	record.Assessments = staged.Assessments
 	return fmt.Sprintf("recorded %d evidence assessments", len(request.Assessments)), nil
 }
 

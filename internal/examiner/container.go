@@ -220,13 +220,9 @@ func localDockerRuntimeUser(ctx context.Context) (string, error) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return "", container.ErrNotInstalled
 	}
-	endpoint, err := dockerOutput(ctx, "reading Docker endpoint", "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}")
+	address, err := effectiveDockerEndpoint(ctx)
 	if err != nil {
 		return "", err
-	}
-	var address string
-	if err := json.Unmarshal(bytes.TrimSpace(endpoint), &address); err != nil {
-		return "", fmt.Errorf("reading Docker endpoint: invalid response: %w", err)
 	}
 	if !strings.HasPrefix(address, "unix://") && !strings.HasPrefix(address, "npipe://") {
 		return "", fmt.Errorf("remote Docker endpoint %q cannot safely use host bind mounts", address)
@@ -250,6 +246,28 @@ func localDockerRuntimeUser(ctx context.Context) (string, error) {
 		}
 	}
 	return containerHostUser(), nil
+}
+
+func effectiveDockerEndpoint(ctx context.Context) (string, error) {
+	contextName := strings.TrimSpace(os.Getenv("DOCKER_CONTEXT"))
+	if contextName == "" {
+		if address := strings.TrimSpace(os.Getenv("DOCKER_HOST")); address != "" {
+			return address, nil
+		}
+	}
+	args := []string{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"}
+	if contextName != "" {
+		args = []string{"context", "inspect", contextName, "--format", "{{json .Endpoints.docker.Host}}"}
+	}
+	endpoint, err := dockerOutput(ctx, "reading Docker endpoint", args...)
+	if err != nil {
+		return "", err
+	}
+	var address string
+	if err := json.Unmarshal(bytes.TrimSpace(endpoint), &address); err != nil {
+		return "", fmt.Errorf("reading Docker endpoint: invalid response: %w", err)
+	}
+	return address, nil
 }
 
 func dockerOutput(ctx context.Context, operation string, args ...string) ([]byte, error) {
