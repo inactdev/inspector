@@ -220,7 +220,7 @@ func addCapabilities(record *ExaminationRecord, input json.RawMessage, baseTestP
 func driveCapability(ctx context.Context, record *ExaminationRecord, base *url.URL, input json.RawMessage) (string, *Observation) {
 	var request struct {
 		CapabilityID string     `json:"capabilityId"`
-		Request      appRequest `json:"request"`
+		Request      AppRequest `json:"request"`
 	}
 	if err := json.Unmarshal(input, &request); err != nil {
 		return "driver error: decoding drive_app call: " + err.Error(), nil
@@ -228,23 +228,16 @@ func driveCapability(ctx context.Context, record *ExaminationRecord, base *url.U
 	if err := record.StartAttempt(request.CapabilityID); err != nil {
 		return "driver error: " + err.Error(), nil
 	}
-	payload, err := json.Marshal(request.Request)
-	if err != nil {
-		answer := "driver error: encoding app request: " + err.Error()
-		if recordErr := record.RecordAttempt(request.CapabilityID, false, answer); recordErr != nil {
-			return "driver error: " + recordErr.Error(), nil
-		}
-		return answer, nil
-	}
-	answer, err := driveApp(ctx, base, payload)
+	normalizedRequest := normalizedAppRequest(request.Request)
+	answer, err := driveApp(ctx, base, normalizedRequest)
 	if err != nil {
 		answer = "driver error: " + err.Error()
-		if recordErr := record.RecordAttempt(request.CapabilityID, false, answer); recordErr != nil {
+		if recordErr := record.RecordAttempt(request.CapabilityID, normalizedRequest, false, answer); recordErr != nil {
 			return "driver error: " + recordErr.Error(), nil
 		}
 		return answer, nil
 	}
-	if err := record.RecordAttempt(request.CapabilityID, true, answer); err != nil {
+	if err := record.RecordAttempt(request.CapabilityID, normalizedRequest, true, answer); err != nil {
 		return "driver error: " + err.Error(), nil
 	}
 	return answer, &Observation{CapabilityID: request.CapabilityID, Evidence: answer}
@@ -400,13 +393,6 @@ func toolResult(id, content string) map[string]any {
 	return map[string]any{"type": "tool_result", "tool_use_id": id, "content": content}
 }
 
-type appRequest struct {
-	Method  string            `json:"method"`
-	Path    string            `json:"path"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
-}
-
 func validAppURL(raw string) (*url.URL, error) {
 	base, err := url.Parse(raw)
 	if err != nil || base.Scheme == "" || base.Host == "" || (base.Scheme != "http" && base.Scheme != "https") {
@@ -415,12 +401,9 @@ func validAppURL(raw string) (*url.URL, error) {
 	return base, nil
 }
 
-func driveApp(ctx context.Context, base *url.URL, input json.RawMessage) (string, error) {
-	var call appRequest
-	if err := json.Unmarshal(input, &call); err != nil {
-		return "", fmt.Errorf("decoding app request: %w", err)
-	}
-	method := strings.ToUpper(call.Method)
+func driveApp(ctx context.Context, base *url.URL, call AppRequest) (string, error) {
+	call = normalizedAppRequest(call)
+	method := call.Method
 	switch method {
 	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 	default:

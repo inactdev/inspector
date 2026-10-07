@@ -5,6 +5,8 @@ package examiner
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -39,10 +41,19 @@ type Outcome struct {
 	ProposedRegression string         `json:"proposedRegression,omitempty"`
 }
 
+// AppRequest is the HTTP request used for an app-driving attempt.
+type AppRequest struct {
+	Method  string            `json:"method"`
+	Path    string            `json:"path"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body"`
+}
+
 // AppAttempt is one machine-recorded attempt to operate a capability.
 type AppAttempt struct {
-	Evidence   string `json:"evidence"`
-	Successful bool   `json:"successful"`
+	Request    AppRequest `json:"request"`
+	Evidence   string     `json:"evidence"`
+	Successful bool       `json:"successful"`
 }
 
 // Finding is a confirmed missing behavior protected by a changed test. It is a
@@ -184,18 +195,39 @@ func (r *ExaminationRecord) StartAttempt(capabilityID string) error {
 // RecordAttempt retains the driver response or failure for the capability that
 // initiated it. A successful attempt becomes an observation only after that
 // response was delivered back to the model in a later turn.
-func (r *ExaminationRecord) RecordAttempt(capabilityID string, successful bool, evidence string) error {
+func (r *ExaminationRecord) RecordAttempt(capabilityID string, request AppRequest, successful bool, evidence string) error {
 	if _, exists := r.Capabilities[capabilityID]; !exists {
 		return fmt.Errorf("attempt names unknown capability %q", capabilityID)
 	}
 	if strings.TrimSpace(evidence) == "" {
 		return fmt.Errorf("attempt for %q has no evidence", capabilityID)
 	}
-	r.Attempts[capabilityID] = append(r.Attempts[capabilityID], AppAttempt{Evidence: evidence, Successful: successful})
+	r.Attempts[capabilityID] = append(r.Attempts[capabilityID], AppAttempt{
+		Request: normalizedAppRequest(request), Evidence: evidence, Successful: successful,
+	})
 	return nil
 }
 
-// RecordObservation records only a response that was successfully delivered to
+func normalizedAppRequest(request AppRequest) AppRequest {
+	normalized := request
+	normalized.Method = strings.ToUpper(request.Method)
+	if request.Headers == nil {
+		normalized.Headers = map[string]string{}
+		return normalized
+	}
+	normalized.Headers = make(map[string]string, len(request.Headers))
+	names := make([]string, 0, len(request.Headers))
+	for name := range request.Headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		normalized.Headers[http.CanonicalHeaderKey(name)] = request.Headers[name]
+	}
+	return normalized
+}
+
+// RecordObservation records only a successful response that was delivered to
 // the model before a later assessment can refer to it.
 func (r *ExaminationRecord) RecordObservation(capabilityID, evidence string) error {
 	if _, exists := r.Capabilities[capabilityID]; !exists {
@@ -204,8 +236,13 @@ func (r *ExaminationRecord) RecordObservation(capabilityID, evidence string) err
 	if strings.TrimSpace(evidence) == "" {
 		return fmt.Errorf("observation for %q has no evidence", capabilityID)
 	}
-	r.Observations[capabilityID] = append(r.Observations[capabilityID], Observation{CapabilityID: capabilityID, Evidence: evidence})
-	return nil
+	for _, attempt := range r.Attempts[capabilityID] {
+		if attempt.Successful && attempt.Evidence == evidence {
+			r.Observations[capabilityID] = append(r.Observations[capabilityID], Observation{CapabilityID: capabilityID, Evidence: evidence})
+			return nil
+		}
+	}
+	return fmt.Errorf("observation for %q has no matching successful attempt", capabilityID)
 }
 
 // AddAssessment records a model proposal only after the machine recorded a

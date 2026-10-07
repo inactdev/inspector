@@ -145,26 +145,26 @@ func postExaminerStatus(owner, repo, commit string, result examiner.Result) erro
 }
 
 func examinerFailureDescription(result examiner.Result) string {
-	parts := []string{"examiner:"}
+	missing := ""
 	for _, outcome := range result.Verdict.Outcomes {
 		if outcome.Verdict == examiner.NotConfirmed {
-			parts = append(parts, "missing "+outcome.Claim)
+			missing = outcome.Claim
 			break
 		}
 	}
-	if len(parts) == 1 {
+	if missing == "" {
 		for _, finding := range result.Verdict.Findings {
-			parts = append(parts, finding.TestPath+" stopped checking "+finding.Detail)
+			missing = "pre-task test " + finding.TestPath + " protected an unconfirmed scenario: " + finding.Detail
 			break
 		}
+	}
+	if missing == "" {
+		missing = "requested behavior was not confirmed"
 	}
 	if result.Verdict.ExaminationIncomplete {
-		parts = append(parts, "examination incomplete: "+untestedClaims(result))
+		return statusDescription("examiner: missing behavior; examination incomplete; missing " + missing + "; " + untestedClaims(result))
 	}
-	if len(parts) == 1 {
-		parts = append(parts, "requested behavior was not confirmed")
-	}
-	return statusDescription(strings.Join(parts, "; "))
+	return statusDescription("examiner: missing " + missing)
 }
 
 func examinerIncompleteDescription(result examiner.Result) string {
@@ -204,7 +204,7 @@ func printExaminerResult(stdout, stderr io.Writer, result examiner.Result) {
 		}
 	}
 	for _, finding := range result.Verdict.Findings {
-		fmt.Fprintf(stdout, "not confirmed: test %s stopped checking %s\nproposed regression: %s\n", finding.TestPath, finding.Detail, finding.ProposedRegression)
+		fmt.Fprintf(stdout, "not confirmed: pre-task test %s protected a scenario the app did not confirm: %s\nproposed regression: %s\n", finding.TestPath, finding.Detail, finding.ProposedRegression)
 	}
 	switch result.Kind {
 	case examiner.Green:

@@ -198,31 +198,40 @@ func ParseBaseTests(data []byte, changed ChangedFileList) (BaseTestList, error) 
 	if strings.TrimSpace(list.BaseCommit) == "" {
 		return BaseTestList{}, errors.New("parsing base-test list: baseCommit is required")
 	}
-	changedTests := changedTestPaths(changed)
+	expected := expectedBaseTestPaths(changed)
 	seen := map[string]struct{}{}
 	for n, test := range list.Tests {
 		if !isTestPath(test.Path) {
 			return BaseTestList{}, fmt.Errorf("parsing base-test list: test %d path %q is not a *_test.* file", n+1, test.Path)
 		}
-		if _, exists := changedTests[test.Path]; !exists {
-			return BaseTestList{}, fmt.Errorf("parsing base-test list: %q was not a changed test file", test.Path)
+		if _, exists := expected[test.Path]; !exists {
+			return BaseTestList{}, fmt.Errorf("parsing base-test list: %q has no changed task-starting test", test.Path)
 		}
 		if _, exists := seen[test.Path]; exists {
 			return BaseTestList{}, fmt.Errorf("parsing base-test list: %q appears more than once", test.Path)
 		}
 		seen[test.Path] = struct{}{}
 	}
+	for path := range expected {
+		if _, exists := seen[path]; !exists {
+			return BaseTestList{}, fmt.Errorf("parsing base-test list: task-starting test %q is missing", path)
+		}
+	}
 	return list, nil
 }
 
-func changedTestPaths(changed ChangedFileList) map[string]struct{} {
+func expectedBaseTestPaths(changed ChangedFileList) map[string]struct{} {
 	paths := make(map[string]struct{})
 	for _, file := range changed.Files {
-		if isTestPath(file.Path) {
-			paths[file.Path] = struct{}{}
-		}
-		if isTestPath(file.PreviousPath) {
-			paths[file.PreviousPath] = struct{}{}
+		switch file.Change {
+		case "modified", "deleted":
+			if isTestPath(file.Path) {
+				paths[file.Path] = struct{}{}
+			}
+		case "renamed":
+			if isTestPath(file.PreviousPath) {
+				paths[file.PreviousPath] = struct{}{}
+			}
 		}
 	}
 	return paths

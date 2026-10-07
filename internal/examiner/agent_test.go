@@ -64,6 +64,10 @@ func TestRunAgent_RecordDerivesAConfirmedOutcome(t *testing.T) {
 	if result.Kind != Green || result.Verdict.Outcomes[0].Verdict != Confirmed {
 		t.Fatalf("verdict = %#v, want a record-derived confirmation", result)
 	}
+	attempts := result.Verdict.Outcomes[0].Attempts
+	if len(attempts) != 1 || attempts[0].Request.Method != http.MethodGet || attempts[0].Request.Path != "/inklings" {
+		t.Fatalf("attempts = %#v, want the driven request recorded with its response", attempts)
+	}
 }
 
 func TestRunAgent_UnreachableAppDerivesNamedCouldNotBeTestedOutcome(t *testing.T) {
@@ -135,12 +139,9 @@ func TestDriveApp_RejectsRedirectToAnotherOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validAppURL() error = %v", err)
 	}
-	input, err := json.Marshal(appRequest{Method: http.MethodGet, Path: "/redirect"})
-	if err != nil {
-		t.Fatalf("encoding driver call: %v", err)
-	}
+	request := AppRequest{Method: http.MethodGet, Path: "/redirect"}
 
-	if _, err := driveApp(context.Background(), base, input); err == nil {
+	if _, err := driveApp(context.Background(), base, request); err == nil {
 		t.Fatal("driveApp() followed a redirect outside the configured app origin")
 	}
 	if destinationCalls != 0 {

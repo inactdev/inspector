@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/inactdev/inspector/internal/examiner"
@@ -25,7 +26,7 @@ func TestExaminer_RedPostsFailureAndNamesIncompleteExamination(t *testing.T) {
 	withExaminerRun(t, examiner.Result{Kind: examiner.Red, Verdict: examiner.Verdict{
 		ExaminationIncomplete: true,
 		Outcomes: []examiner.Outcome{
-			{Claim: "a duplicate capture updates the existing inkling", Verdict: examiner.NotConfirmed, Scenario: "POST twice", Evidence: "two entries returned", ProposedRegression: "add an HTTP upsert regression"},
+			{Claim: strings.Repeat("a duplicate capture updates the existing inkling ", 5), Verdict: examiner.NotConfirmed, Scenario: "POST twice", Evidence: "two entries returned", ProposedRegression: "add an HTTP upsert regression"},
 			{Claim: "captures can be listed", Verdict: examiner.CouldNotBeTested, Scenario: "GET /inklings", Evidence: "app stopped"},
 		},
 	}})
@@ -42,8 +43,22 @@ func TestExaminer_RedPostsFailureAndNamesIncompleteExamination(t *testing.T) {
 	if !bytes.Contains(stdout.Bytes(), []byte("a duplicate capture updates the existing inkling")) {
 		t.Fatalf("stdout = %q, want the missing capability", stdout.String())
 	}
-	if !bytes.Contains(stderr.Bytes(), []byte("examination incomplete")) || !bytes.Contains([]byte(got.Description), []byte("incomplete")) {
-		t.Fatalf("incomplete examination must remain visible: stdout=%q stderr=%q status=%q", stdout.String(), stderr.String(), got.Description)
+	if !bytes.Contains(stderr.Bytes(), []byte("examination incomplete")) || !strings.Contains(got.Description, "missing behavior") || !strings.Contains(got.Description, "examination incomplete") {
+		t.Fatalf("bug and incomplete examination must remain visible: stdout=%q stderr=%q status=%q", stdout.String(), stderr.String(), got.Description)
+	}
+}
+
+func TestPrintExaminerResult_DescribesPreTaskProtectionWithoutClaimingWorkerTestContent(t *testing.T) {
+	result := examiner.Result{Kind: examiner.Red, Verdict: examiner.Verdict{Findings: []examiner.Finding{{
+		TestPath: "capture_test.go", Detail: "duplicate capture behavior", ProposedRegression: "keep the duplicate regression",
+	}}}}
+	var stdout, stderr bytes.Buffer
+	printExaminerResult(&stdout, &stderr, result)
+	if !strings.Contains(stdout.String(), "pre-task test capture_test.go protected a scenario the app did not confirm") {
+		t.Fatalf("stdout = %q, want a statement limited to the pre-task protection", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "stopped checking") {
+		t.Fatalf("stdout = %q, must not claim knowledge of worker-written test content", stdout.String())
 	}
 }
 

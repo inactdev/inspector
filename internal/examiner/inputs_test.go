@@ -90,6 +90,47 @@ func TestParseBaseTests_AcceptsOnlyChangedPreTaskTests(t *testing.T) {
 	}
 }
 
+func TestParseBaseTests_RequiresExactlyTaskStartingChangedTests(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		changed     string
+		baseTests   string
+		wantFailure bool
+	}{
+		{
+			name: "modified test is required", changed: `[{"path":"capture_test.go","change":"modified"}]`,
+			baseTests: `[]`, wantFailure: true,
+		},
+		{
+			name: "added test has no base version", changed: `[{"path":"capture_test.go","change":"added"}]`,
+			baseTests: `[{"path":"capture_test.go","content":"fabricated"}]`, wantFailure: true,
+		},
+		{
+			name: "deleted test retains base version", changed: `[{"path":"capture_test.go","change":"deleted"}]`,
+			baseTests: `[{"path":"capture_test.go","content":"old test"}]`,
+		},
+		{
+			name: "renamed test uses previous path", changed: `[{"path":"renamed_test.go","previousPath":"capture_test.go","change":"renamed"}]`,
+			baseTests: `[{"path":"capture_test.go","content":"old test"}]`,
+		},
+		{
+			name: "renamed test rejects current path", changed: `[{"path":"renamed_test.go","previousPath":"capture_test.go","change":"renamed"}]`,
+			baseTests: `[{"path":"renamed_test.go","content":"worker test"}]`, wantFailure: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed, err := ParseChangedFiles([]byte(`{"baseCommit":"abc123","files":` + test.changed + `}`))
+			if err != nil {
+				t.Fatalf("ParseChangedFiles() error = %v", err)
+			}
+			_, err = ParseBaseTests([]byte(`{"baseCommit":"abc123","tests":`+test.baseTests+`}`), changed)
+			if (err != nil) != test.wantFailure {
+				t.Fatalf("ParseBaseTests() error = %v, wantFailure %v", err, test.wantFailure)
+			}
+		})
+	}
+}
+
 func TestPrepareInputs_CanonicalizesWorkerLists(t *testing.T) {
 	dir := t.TempDir()
 	paths := writeInputFixture(t, dir)
