@@ -67,7 +67,7 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	if err != nil {
 		return Result{Kind: Refused, Message: fmt.Sprintf("no usable container runtime: %v", err)}, nil
 	}
-	runtimeImage, err := ensureRuntimeImage(runCtx)
+	runtimeImage, err := ensureRuntimeImage(runCtx, runtimeUser)
 	if err != nil {
 		return Result{Kind: Refused, Message: err.Error()}, nil
 	}
@@ -130,7 +130,7 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	return result, nil
 }
 
-func ensureRuntimeImage(ctx context.Context) (string, error) {
+func ensureRuntimeImage(ctx context.Context, runtimeUser string) (string, error) {
 	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", RuntimeImage)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -143,18 +143,37 @@ func ensureRuntimeImage(ctx context.Context) (string, error) {
 	if !validImageID(imageID) {
 		return "", staleRuntimeError(fmt.Sprintf("Docker resolved it to invalid image ID %q", imageID))
 	}
-	cmd = exec.CommandContext(ctx, "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--entrypoint", "/usr/local/bin/examiner-agent", imageID, "--runtime-fingerprint")
-	output, err = cmd.CombinedOutput()
+
+	identityCmd := newRuntimeIdentityCommand(ctx, runtimeUser, imageID)
+	defer identityCmd.Cleanup()
+	var identityOutput bytes.Buffer
+	identityCmd.Stdout = &identityOutput
+	identityCmd.Stderr = &identityOutput
+	err = identityCmd.Run()
+	if killErr := identityCmd.KillError(); killErr != nil {
+		return "", fmt.Errorf("checking examiner runtime identity: container could not be stopped: %v; it may still be running", killErr)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("checking examiner runtime identity: %w", ctx.Err())
 		}
-		return "", staleRuntimeError(strings.TrimSpace(string(output)))
+		return "", staleRuntimeError(strings.TrimSpace(identityOutput.String()))
 	}
-	if actual := strings.TrimSpace(string(output)); actual != RuntimeSourceFingerprint() {
+	if actual := strings.TrimSpace(identityOutput.String()); actual != RuntimeSourceFingerprint() {
 		return "", staleRuntimeError(fmt.Sprintf("found fingerprint %q", actual))
 	}
 	return imageID, nil
+}
+
+func newRuntimeIdentityCommand(ctx context.Context, runtimeUser, imageID string) *container.Cmd {
+	args := runtimeIsolationArgs(runtimeUser)
+	args = append(args,
+		"--network", "none",
+		"--entrypoint", "/usr/local/bin/examiner-agent",
+		imageID,
+		"--runtime-fingerprint",
+	)
+	return container.NewCommand(ctx, "inspector-examiner-identity-", args...)
 }
 
 func validImageID(id string) bool {
@@ -245,20 +264,10 @@ func newContainerCommand(ctx context.Context, opts containerOptions, runtimeImag
 	if budget <= 0 {
 		budget = DefaultBudget
 	}
-	user := opts.User
-	if user == "" {
-		user = containerHostUser()
-	}
-	args := []string{
-		"--pull", "never",
-		"--read-only",
-		"--userns", "host",
-		"--user", user,
-		"--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges",
-		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-		"--mount", "type=bind,src=" + opts.InputDir + ",dst=/examiner/input,readonly",
-		"--mount", "type=bind,src=" + opts.OutputDir + ",dst=/examiner/output",
+	args := runtimeIsolationArgs(opts.User)
+	args = append(args,
+		"--mount", "type=bind,src="+opts.InputDir+",dst=/examiner/input,readonly",
+		"--mount", "type=bind,src="+opts.OutputDir+",dst=/examiner/output",
 		"--workdir", "/examiner",
 		"--network", opts.Network,
 		"--env", AnthropicAPIKeyEnvVar,
@@ -270,8 +279,23 @@ func newContainerCommand(ctx context.Context, opts containerOptions, runtimeImag
 		"--model", opts.Model,
 		"--timeout", timeout.String(),
 		"--budget", fmt.Sprintf("%d", budget),
-	}
+	)
 	return container.NewCommand(ctx, "inspector-examiner-", args...)
+}
+
+func runtimeIsolationArgs(user string) []string {
+	if user == "" {
+		user = containerHostUser()
+	}
+	return []string{
+		"--pull", "never",
+		"--read-only",
+		"--userns", "host",
+		"--user", user,
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+	}
 }
 
 func localDockerRuntimeUser(ctx context.Context) (string, error) {
