@@ -138,6 +138,8 @@ func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 
 		toolResults := make([]map[string]any, 0, len(response.Content))
 		pendingObservations := make([]Observation, 0)
+		finishResultIndexes := make([]int, 0)
+		operationRejected := false
 		finish := false
 		for _, block := range response.Content {
 			if block.Type != "tool_use" {
@@ -147,17 +149,21 @@ func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 			case "propose_capabilities":
 				answer, proposalErr := addCapabilities(record, block.Input, baseTestPaths)
 				if proposalErr != nil {
+					operationRejected = true
 					answer = "proposal rejected: " + proposalErr.Error()
 				} else if err := writeDerivedResult(opts.OutputDir, record); err != nil {
 					return err
 				}
 				toolResults = append(toolResults, toolResult(block.ID, answer))
 			case "drive_app":
-				answer, observation, err := driveCapability(ctx, record, baseURL, block.Input, func() error {
+				answer, observation, accepted, err := driveCapability(ctx, record, baseURL, block.Input, func() error {
 					return writeDerivedResult(opts.OutputDir, record)
 				})
 				if err != nil {
 					return err
+				}
+				if !accepted {
+					operationRejected = true
 				}
 				if observation != nil {
 					pendingObservations = append(pendingObservations, *observation)
@@ -166,6 +172,7 @@ func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 			case "assess_capabilities":
 				answer, assessmentErr := addAssessments(record, block.Input)
 				if assessmentErr != nil {
+					operationRejected = true
 					answer = "assessment rejected: " + assessmentErr.Error()
 				} else if err := writeDerivedResult(opts.OutputDir, record); err != nil {
 					return err
@@ -173,13 +180,21 @@ func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 				toolResults = append(toolResults, toolResult(block.ID, answer))
 			case "finish_examination":
 				finish = true
+				finishResultIndexes = append(finishResultIndexes, len(toolResults))
 				toolResults = append(toolResults, toolResult(block.ID, "the examination record will now derive every outcome"))
 			default:
+				operationRejected = true
 				toolResults = append(toolResults, toolResult(block.ID, "tool is not available"))
 			}
 		}
 		if len(toolResults) == 0 {
 			return errors.New("model did not propose capabilities, drive the app, assess evidence, or finish")
+		}
+		if finish && operationRejected {
+			finish = false
+			for _, index := range finishResultIndexes {
+				toolResults[index]["content"] = "finish rejected because another tool operation in this turn was rejected"
+			}
 		}
 		messages = append(messages, anthropicMessage{Role: "user", Content: toolResults})
 		// Observations become available only after their tool result was added
@@ -243,39 +258,39 @@ func addCapabilities(record *ExaminationRecord, input json.RawMessage, baseTestP
 	return fmt.Sprintf("recorded %d capability proposals", len(request.Capabilities)), nil
 }
 
-func driveCapability(ctx context.Context, record *ExaminationRecord, base *url.URL, input json.RawMessage, checkpoint func() error) (string, *Observation, error) {
+func driveCapability(ctx context.Context, record *ExaminationRecord, base *url.URL, input json.RawMessage, checkpoint func() error) (string, *Observation, bool, error) {
 	var request struct {
 		CapabilityID string     `json:"capabilityId"`
 		Request      AppRequest `json:"request"`
 	}
 	if err := json.Unmarshal(input, &request); err != nil {
-		return "driver error: decoding drive_app call: " + err.Error(), nil, nil
+		return "driver error: decoding drive_app call: " + err.Error(), nil, false, nil
 	}
 	normalizedRequest := normalizedAppRequest(request.Request)
 	if err := record.StartAttempt(request.CapabilityID, normalizedRequest); err != nil {
-		return "driver error: " + err.Error(), nil, nil
+		return "driver error: " + err.Error(), nil, false, nil
 	}
 	if err := checkpoint(); err != nil {
-		return "", nil, err
+		return "", nil, true, err
 	}
 	answer, err := driveApp(ctx, base, normalizedRequest)
 	if err != nil {
 		answer = "driver error: " + err.Error()
 		if recordErr := record.CompleteAttempt(request.CapabilityID, false, answer); recordErr != nil {
-			return "driver error: " + recordErr.Error(), nil, nil
+			return "driver error: " + recordErr.Error(), nil, true, nil
 		}
 		if err := checkpoint(); err != nil {
-			return "", nil, err
+			return "", nil, true, err
 		}
-		return answer, nil, nil
+		return answer, nil, true, nil
 	}
 	if err := record.CompleteAttempt(request.CapabilityID, true, answer); err != nil {
-		return "driver error: " + err.Error(), nil, nil
+		return "driver error: " + err.Error(), nil, true, nil
 	}
 	if err := checkpoint(); err != nil {
-		return "", nil, err
+		return "", nil, true, err
 	}
-	return answer, &Observation{CapabilityID: request.CapabilityID, Evidence: answer}, nil
+	return answer, &Observation{CapabilityID: request.CapabilityID, Evidence: answer}, true, nil
 }
 
 func addAssessments(record *ExaminationRecord, input json.RawMessage) (string, error) {

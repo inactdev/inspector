@@ -195,6 +195,61 @@ func TestRunAgent_RejectsAssessmentBatchAtomically(t *testing.T) {
 	}
 }
 
+func TestRunAgent_DoesNotFinishTurnWithRejectedOperation(t *testing.T) {
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer app.Close()
+
+	modelCalls := 0
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelCalls++
+		switch modelCalls {
+		case 1:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"propose-a","name":"propose_capabilities","input":{"capabilities":[{"id":"a","claim":"capability A works","scenario":"GET /a"}]}}]}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"drive-a","name":"drive_app","input":{"capabilityId":"a","request":{"method":"GET","path":"/a"}}}]}`))
+		case 3:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"assess-a","name":"assess_capabilities","input":{"assessments":[{"capabilityId":"a","verdict":"confirmed","evidence":"A succeeded"}]}}]}`))
+		case 4:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"propose-bad","name":"propose_capabilities","input":{"capabilities":[{"id":"b","claim":"capability B works","scenario":"GET /b"},{"id":"invalid","claim":"invalid capability","scenario":""}]}},{"type":"tool_use","id":"finish-early","name":"finish_examination","input":{}}]}`))
+		case 5:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"propose-b","name":"propose_capabilities","input":{"capabilities":[{"id":"b","claim":"capability B works","scenario":"GET /b"}]}}]}`))
+		case 6:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"drive-b","name":"drive_app","input":{"capabilityId":"b","request":{"method":"GET","path":"/b"}}}]}`))
+		case 7:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"assess-b","name":"assess_capabilities","input":{"assessments":[{"capabilityId":"b","verdict":"confirmed","evidence":"B succeeded"}]}}]}`))
+		case 8:
+			_, _ = w.Write([]byte(`{"content":[{"type":"tool_use","id":"finish","name":"finish_examination","input":{}}]}`))
+		default:
+			t.Errorf("unexpected model call %d", modelCalls)
+		}
+	}))
+	defer model.Close()
+
+	inputDir, outputDir := agentDirectories(t)
+	t.Setenv(AnthropicAPIKeyEnvVar, "test-key")
+	if err := RunAgent(context.Background(), AgentOptions{
+		InputDir: inputDir, OutputDir: outputDir, AppURL: app.URL, Model: "test-model", APIBaseURL: model.URL, Budget: 4,
+	}); err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if modelCalls != 8 {
+		t.Fatalf("model calls = %d, want rejected finish followed by correction", modelCalls)
+	}
+	data, err := os.ReadFile(filepath.Join(outputDir, VerdictName))
+	if err != nil {
+		t.Fatalf("reading verdict: %v", err)
+	}
+	var result Result
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("decoding verdict: %v", err)
+	}
+	if result.Kind != Green || len(result.Verdict.Outcomes) != 2 {
+		t.Fatalf("verdict = %#v, want both corrected capabilities confirmed", result)
+	}
+}
+
 func TestRunAgent_PreservesFoundBugWhenLaterModelCallFails(t *testing.T) {
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
