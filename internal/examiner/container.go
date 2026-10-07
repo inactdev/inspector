@@ -67,7 +67,8 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	if err != nil {
 		return Result{Kind: Refused, Message: fmt.Sprintf("no usable container runtime: %v", err)}, nil
 	}
-	if err := ensureRuntimeImage(runCtx); err != nil {
+	runtimeImage, err := ensureRuntimeImage(runCtx)
+	if err != nil {
 		return Result{Kind: Refused, Message: err.Error()}, nil
 	}
 
@@ -86,7 +87,7 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		budget = DefaultBudget
 	}
 
-	cmd := NewContainerCommand(runCtx, ContainerOptions{
+	cmd := newContainerCommand(runCtx, containerOptions{
 		InputDir:  prepared.Dir,
 		OutputDir: outputDir,
 		AppURL:    opts.AppURL,
@@ -95,7 +96,7 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		Timeout:   timeout,
 		Budget:    budget,
 		User:      runtimeUser,
-	})
+	}, runtimeImage)
 	defer cmd.Cleanup()
 	cmd.Stdout = opts.Stdout
 	cmd.Stderr = opts.Stderr
@@ -129,26 +130,45 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	return result, nil
 }
 
-func ensureRuntimeImage(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", RuntimeImage)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("checking examiner runtime image: %w", ctx.Err())
-		}
-		return fmt.Errorf("examiner runtime image %q is not available; build it locally with internal/examiner/runtime/build.sh before examining (the command never builds or pulls at examination time): %s", RuntimeImage, strings.TrimSpace(string(output)))
-	}
-	cmd = exec.CommandContext(ctx, "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--entrypoint", "/usr/local/bin/examiner-agent", RuntimeImage, "--runtime-fingerprint")
+func ensureRuntimeImage(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", RuntimeImage)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("checking examiner runtime identity: %w", ctx.Err())
+			return "", fmt.Errorf("checking examiner runtime image: %w", ctx.Err())
 		}
-		return staleRuntimeError(strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("examiner runtime image %q is not available; build it locally with internal/examiner/runtime/build.sh before examining (the command never builds or pulls at examination time): %s", RuntimeImage, strings.TrimSpace(string(output)))
+	}
+	imageID := strings.TrimSpace(string(output))
+	if !validImageID(imageID) {
+		return "", staleRuntimeError(fmt.Sprintf("Docker resolved it to invalid image ID %q", imageID))
+	}
+	cmd = exec.CommandContext(ctx, "docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only", "--entrypoint", "/usr/local/bin/examiner-agent", imageID, "--runtime-fingerprint")
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("checking examiner runtime identity: %w", ctx.Err())
+		}
+		return "", staleRuntimeError(strings.TrimSpace(string(output)))
 	}
 	if actual := strings.TrimSpace(string(output)); actual != RuntimeSourceFingerprint() {
-		return staleRuntimeError(fmt.Sprintf("found fingerprint %q", actual))
+		return "", staleRuntimeError(fmt.Sprintf("found fingerprint %q", actual))
 	}
-	return nil
+	return imageID, nil
+}
+
+func validImageID(id string) bool {
+	if len(id) != len("sha256:")+64 || !strings.HasPrefix(id, "sha256:") {
+		return false
+	}
+	for _, char := range id[len("sha256:"):] {
+		if char < '0' || char > '9' {
+			if char < 'a' || char > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func staleRuntimeError(detail string) error {
@@ -192,9 +212,7 @@ func prepareOutput() (string, string, func(), error) {
 	return dir, path, cleanup, nil
 }
 
-// ContainerOptions names the only filesystem objects mounted into the examiner
-// container. It intentionally has no application-source or executable field.
-type ContainerOptions struct {
+type containerOptions struct {
 	InputDir, OutputDir string
 	AppURL, Model       string
 	Network             string
@@ -218,9 +236,7 @@ func jsonUnmarshalStrict(data []byte, target any) error {
 	return nil
 }
 
-// NewContainerCommand builds the sealed Docker invocation. The locally-built
-// trusted image contains the agent. Inputs and output are the sole host mounts.
-func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.Cmd {
+func newContainerCommand(ctx context.Context, opts containerOptions, runtimeImageID string) *container.Cmd {
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
@@ -247,7 +263,7 @@ func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.
 		"--network", opts.Network,
 		"--env", AnthropicAPIKeyEnvVar,
 		"--entrypoint", "/usr/local/bin/examiner-agent",
-		RuntimeImage,
+		runtimeImageID,
 		"--input-dir", "/examiner/input",
 		"--output-dir", "/examiner/output",
 		"--app-url", opts.AppURL,

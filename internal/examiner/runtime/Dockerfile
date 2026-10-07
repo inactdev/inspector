@@ -11,7 +11,7 @@
 # the real machine when pinned. It stays multi-architecture for amd64 and arm64.
 FROM golang@sha256:ce864e7223ac17b1775e6fd0b4c0db580c2eb50e7953a427916379e4b92a1628 AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod runtime_identity.go ./
 COPY cmd/examiner-agent ./cmd/examiner-agent
 COPY internal/container ./internal/container
 COPY internal/examiner ./internal/examiner

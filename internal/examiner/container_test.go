@@ -12,13 +12,15 @@ import (
 	"time"
 )
 
+const testRuntimeImageID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func TestNewContainerCommand_OnlyMountsAllowedResources(t *testing.T) {
 	applicationSource := t.TempDir()
 	inputDir := t.TempDir()
 	outputDir := t.TempDir()
-	cmd := NewContainerCommand(context.Background(), ContainerOptions{
+	cmd := newContainerCommand(context.Background(), containerOptions{
 		InputDir: inputDir, OutputDir: outputDir, AppURL: "http://app:8080", Model: "test-model", Network: "examiner-test", Timeout: 23 * time.Minute, Budget: 7,
-	})
+	}, testRuntimeImageID)
 	defer cmd.Cleanup()
 
 	mounts := dockerMounts(t, cmd.Args)
@@ -49,8 +51,8 @@ func TestNewContainerCommand_OnlyMountsAllowedResources(t *testing.T) {
 	if !strings.Contains(strings.Join(cmd.Args, " "), "--pull never") {
 		t.Fatalf("examination must never pull a runtime image: %q", cmd.Args)
 	}
-	if !strings.Contains(strings.Join(cmd.Args, " "), "--entrypoint /usr/local/bin/examiner-agent "+RuntimeImage) {
-		t.Fatalf("container command must force the locally-built runtime entrypoint: %q", cmd.Args)
+	if !strings.Contains(strings.Join(cmd.Args, " "), "--entrypoint /usr/local/bin/examiner-agent "+testRuntimeImageID) {
+		t.Fatalf("container command must force the verified immutable runtime entrypoint: %q", cmd.Args)
 	}
 	if !strings.Contains(strings.Join(cmd.Args, " "), "--timeout 23m0s --budget 7") {
 		t.Fatalf("container command must forward timeout and budget: %q", cmd.Args)
@@ -58,9 +60,9 @@ func TestNewContainerCommand_OnlyMountsAllowedResources(t *testing.T) {
 }
 
 func TestNewContainerCommand_RejectsEveryOtherMountSpelling(t *testing.T) {
-	cmd := NewContainerCommand(context.Background(), ContainerOptions{
+	cmd := newContainerCommand(context.Background(), containerOptions{
 		InputDir: "/private/input", OutputDir: "/private/output", AppURL: "http://app:8080", Model: "test-model", Network: "none",
-	})
+	}, testRuntimeImageID)
 	defer cmd.Cleanup()
 	for n, arg := range cmd.Args {
 		if arg == "--mount" {
@@ -82,7 +84,8 @@ func TestRuntimeContainerMountsExactlyAllowedResources(t *testing.T) {
 	if err != nil {
 		t.Skipf("no usable local Docker runtime, skipping: %v", err)
 	}
-	if err := ensureRuntimeImage(ctx); err != nil {
+	runtimeImage, err := ensureRuntimeImage(ctx)
+	if err != nil {
 		t.Skipf("local examiner runtime is unavailable, skipping: %v", err)
 	}
 	applicationSource, err := filepath.Abs(filepath.Join("..", ".."))
@@ -91,9 +94,9 @@ func TestRuntimeContainerMountsExactlyAllowedResources(t *testing.T) {
 	}
 	inputDir := t.TempDir()
 	outputDir := t.TempDir()
-	cmd := NewContainerCommand(ctx, ContainerOptions{
+	cmd := newContainerCommand(ctx, containerOptions{
 		InputDir: inputDir, OutputDir: outputDir, AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
-	})
+	}, runtimeImage)
 	defer cmd.Cleanup()
 	name := fmt.Sprintf("inspector-examiner-mount-test-%d", time.Now().UnixNano())
 	args := dockerCreateArgs(cmd.Args, name)
@@ -172,7 +175,7 @@ func TestEnsureRuntimeImage_RejectsStaleAgent(t *testing.T) {
 	dir := t.TempDir()
 	docker := filepath.Join(dir, "docker")
 	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = image ]; then exit 0; fi\n" +
+		"if [ \"$1\" = image ]; then printf '%s\\n' '" + testRuntimeImageID + "'; exit 0; fi\n" +
 		"if [ \"$1\" = run ]; then printf '%s\\n' stale-fingerprint; exit 0; fi\n" +
 		"exit 99\n"
 	if err := os.WriteFile(docker, []byte(script), 0o700); err != nil {
@@ -180,9 +183,32 @@ func TestEnsureRuntimeImage_RejectsStaleAgent(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 
-	err := ensureRuntimeImage(context.Background())
+	_, err := ensureRuntimeImage(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "stale or incompatible") || !strings.Contains(err.Error(), "build.sh") {
 		t.Fatalf("ensureRuntimeImage() error = %v, want stale image rebuild refusal", err)
+	}
+}
+
+func TestEnsureRuntimeImagePinsVerifiedImageID(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = image ]; then printf '%s\\n' '" + testRuntimeImageID + "'; exit 0; fi\n" +
+		"if [ \"$1\" = run ]; then\n" +
+		"  case \" $* \" in *\" " + testRuntimeImageID + " --runtime-fingerprint \"*) printf '%s\\n' '" + RuntimeSourceFingerprint() + "'; exit 0;; esac\n" +
+		"fi\n" +
+		"exit 99\n"
+	if err := os.WriteFile(docker, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	image, err := ensureRuntimeImage(context.Background())
+	if err != nil {
+		t.Fatalf("ensureRuntimeImage() error = %v", err)
+	}
+	if image != testRuntimeImageID {
+		t.Fatalf("ensureRuntimeImage() = %q, want %q", image, testRuntimeImageID)
 	}
 }
 
