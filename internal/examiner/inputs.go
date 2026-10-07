@@ -14,62 +14,90 @@ import (
 
 const maxInputBytes = 1 << 20
 
-// Inputs names the three files the examiner is allowed to receive. The paths
-// are copied into a private directory before the examiner container starts, so
-// it never receives a parent directory that could also contain app source.
+// Inputs names the examiner's four documents plus the pre-task test versions
+// Fabrica supplies for changed tests. All worker output is names-only.
 type Inputs struct {
-	RequestPath     string
-	GuidebookPath   string
-	TestChangesPath string
+	RequestPath      string
+	FeatureMapPath   string
+	AlwaysTruePath   string
+	ChangedFilesPath string
+	BaseTestsPath    string
 }
 
-// PreparedInputs is a private, disposable copy of the examiner's inputs.
+// PreparedInputs is a private, disposable copy of the examiner's validated
+// inputs. The worker's bytes are never copied into the container.
 type PreparedInputs struct {
-	Dir         string
-	TestChanges TestChangeList
+	Dir          string
+	ChangedFiles ChangedFileList
+	BaseTests    BaseTestList
 }
 
-// PrepareInputs reads and validates all three inputs, then copies only their
-// bytes to a new directory. Call Cleanup after the examiner exits.
+// PrepareInputs reads, validates, and copies the permitted inputs into a new
+// directory. Structured input is re-serialized from validated data before the
+// container starts. Call Cleanup after the examiner exits.
 func PrepareInputs(inputs Inputs) (PreparedInputs, error) {
 	return PrepareInputsContext(context.Background(), inputs)
 }
 
+// PrepareInputsContext respects ctx while preparing the sealed inputs.
 func PrepareInputsContext(ctx context.Context, inputs Inputs) (PreparedInputs, error) {
 	request, err := readInput(ctx, inputs.RequestPath, "request")
 	if err != nil {
 		return PreparedInputs{}, err
 	}
 	if strings.TrimSpace(string(request)) == "" {
-		return PreparedInputs{}, fmt.Errorf("reading request: file is empty")
+		return PreparedInputs{}, errors.New("reading request: file is empty")
 	}
-	guidebook, err := readInput(ctx, inputs.GuidebookPath, "guidebook")
+	featureMap, err := readInput(ctx, inputs.FeatureMapPath, "feature map")
 	if err != nil {
 		return PreparedInputs{}, err
 	}
-	if strings.TrimSpace(string(guidebook)) == "" {
-		return PreparedInputs{}, fmt.Errorf("reading guidebook: file is empty")
+	if strings.TrimSpace(string(featureMap)) == "" {
+		return PreparedInputs{}, errors.New("reading feature map: file is empty")
 	}
-	testChanges, err := readInput(ctx, inputs.TestChangesPath, "test-change list")
+	alwaysTrue, err := readInput(ctx, inputs.AlwaysTruePath, "always-true list")
 	if err != nil {
 		return PreparedInputs{}, err
 	}
-	list, err := ParseTestChanges(testChanges)
+	if strings.TrimSpace(string(alwaysTrue)) == "" {
+		return PreparedInputs{}, errors.New("reading always-true list: file is empty")
+	}
+	changedFilesData, err := readInput(ctx, inputs.ChangedFilesPath, "changed-file list")
 	if err != nil {
 		return PreparedInputs{}, err
 	}
-	canonicalTestChanges, err := json.Marshal(list)
+	changedFiles, err := ParseChangedFiles(changedFilesData)
 	if err != nil {
-		return PreparedInputs{}, fmt.Errorf("serializing validated test-change list: %w", err)
+		return PreparedInputs{}, err
+	}
+	baseTestsData, err := readInput(ctx, inputs.BaseTestsPath, "base-test list")
+	if err != nil {
+		return PreparedInputs{}, err
+	}
+	baseTests, err := ParseBaseTests(baseTestsData, changedFiles)
+	if err != nil {
+		return PreparedInputs{}, err
+	}
+	if baseTests.BaseCommit != changedFiles.BaseCommit {
+		return PreparedInputs{}, fmt.Errorf("parsing base-test list: baseCommit %q does not match changed-file list baseCommit %q", baseTests.BaseCommit, changedFiles.BaseCommit)
+	}
+	canonicalChangedFiles, err := json.Marshal(changedFiles)
+	if err != nil {
+		return PreparedInputs{}, fmt.Errorf("serializing validated changed-file list: %w", err)
+	}
+	canonicalBaseTests, err := json.Marshal(baseTests)
+	if err != nil {
+		return PreparedInputs{}, fmt.Errorf("serializing validated base-test list: %w", err)
 	}
 
 	dir, err := os.MkdirTemp("", "inspector-examiner-")
 	if err != nil {
 		return PreparedInputs{}, fmt.Errorf("creating examiner input directory: %w", err)
 	}
-	prepared := PreparedInputs{Dir: dir, TestChanges: list}
+	prepared := PreparedInputs{Dir: dir, ChangedFiles: changedFiles, BaseTests: baseTests}
 	for name, data := range map[string][]byte{
-		InputRequestName: request, InputGuidebookName: guidebook, InputTestChangesName: canonicalTestChanges,
+		InputRequestName: request, InputFeatureMapName: featureMap, InputAlwaysTrueName: alwaysTrue,
+		InputChangedFilesName: canonicalChangedFiles, InputBaseTestsName: canonicalBaseTests,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o400); err != nil {
 			prepared.Cleanup()
@@ -112,62 +140,123 @@ func readInput(ctx context.Context, path, name string) ([]byte, error) {
 	return data, nil
 }
 
-// ParseTestChanges accepts only test files shaped like *_test.*. This keeps the
-// deliberate test-diff exception from becoming a channel for app source.
-func ParseTestChanges(data []byte) (TestChangeList, error) {
+// ParseChangedFiles accepts every worker-changed path by name only. The list
+// must explicitly contain files, even when it is empty, so an unreadable
+// producer output can never be mistaken for no changes.
+func ParseChangedFiles(data []byte) (ChangedFileList, error) {
 	if err := rejectDuplicateJSONKeys(data); err != nil {
-		return TestChangeList{}, fmt.Errorf("parsing test-change list: %w", err)
+		return ChangedFileList{}, fmt.Errorf("parsing changed-file list: %w", err)
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return TestChangeList{}, fmt.Errorf("parsing test-change list: %w", err)
+	if err := requireJSONArrayField(data, "files"); err != nil {
+		return ChangedFileList{}, fmt.Errorf("parsing changed-file list: %w", err)
 	}
-	files, ok := fields["files"]
-	if !ok || bytes.Equal(bytes.TrimSpace(files), []byte("null")) {
-		return TestChangeList{}, fmt.Errorf("parsing test-change list: files is required and must be an array")
-	}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var list TestChangeList
-	if err := decoder.Decode(&list); err != nil {
-		return TestChangeList{}, fmt.Errorf("parsing test-change list: %w", err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return TestChangeList{}, fmt.Errorf("parsing test-change list: contains more than one JSON value")
-		}
-		return TestChangeList{}, fmt.Errorf("parsing test-change list: %w", err)
+	var list ChangedFileList
+	if err := decodeStrictJSON(data, &list); err != nil {
+		return ChangedFileList{}, fmt.Errorf("parsing changed-file list: %w", err)
 	}
 	if strings.TrimSpace(list.BaseCommit) == "" {
-		return TestChangeList{}, fmt.Errorf("parsing test-change list: baseCommit is required")
+		return ChangedFileList{}, errors.New("parsing changed-file list: baseCommit is required")
 	}
-	for n, change := range list.Files {
-		if !isTestPath(change.Path) {
-			return TestChangeList{}, fmt.Errorf("parsing test-change list: file %d path %q is not a *_test.* file", n+1, change.Path)
+	seen := map[string]struct{}{}
+	for n, file := range list.Files {
+		if !isRelativePath(file.Path) {
+			return ChangedFileList{}, fmt.Errorf("parsing changed-file list: file %d path %q is not a clean relative path", n+1, file.Path)
 		}
-		switch change.Change {
-		case "added":
-			if change.Before != "" || change.After == "" || change.PreviousPath != "" {
-				return TestChangeList{}, fmt.Errorf("parsing test-change list: added test %q must have only after content", change.Path)
-			}
-		case "modified":
-			if change.Before == "" || change.After == "" || change.PreviousPath != "" {
-				return TestChangeList{}, fmt.Errorf("parsing test-change list: modified test %q must have before and after content", change.Path)
-			}
-		case "deleted":
-			if change.Before == "" || change.After != "" || change.PreviousPath != "" {
-				return TestChangeList{}, fmt.Errorf("parsing test-change list: deleted test %q must have only before content", change.Path)
+		if _, exists := seen[file.Path]; exists {
+			return ChangedFileList{}, fmt.Errorf("parsing changed-file list: file path %q appears more than once", file.Path)
+		}
+		seen[file.Path] = struct{}{}
+		switch file.Change {
+		case "added", "modified", "deleted":
+			if file.PreviousPath != "" {
+				return ChangedFileList{}, fmt.Errorf("parsing changed-file list: %s file %q may not have previousPath", file.Change, file.Path)
 			}
 		case "renamed":
-			if !isTestPath(change.PreviousPath) || change.Before == "" || change.After == "" {
-				return TestChangeList{}, fmt.Errorf("parsing test-change list: renamed test %q must name a *_test.* previousPath and have before and after content", change.Path)
+			if !isRelativePath(file.PreviousPath) {
+				return ChangedFileList{}, fmt.Errorf("parsing changed-file list: renamed file %q needs a clean previousPath", file.Path)
 			}
 		default:
-			return TestChangeList{}, fmt.Errorf("parsing test-change list: test %q has unknown change %q", change.Path, change.Change)
+			return ChangedFileList{}, fmt.Errorf("parsing changed-file list: file %q has unknown change %q", file.Path, file.Change)
 		}
 	}
 	return list, nil
+}
+
+// ParseBaseTests accepts only task-starting versions of test files that the
+// changed-file list already named. New tests have no entry and trigger nothing.
+func ParseBaseTests(data []byte, changed ChangedFileList) (BaseTestList, error) {
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return BaseTestList{}, fmt.Errorf("parsing base-test list: %w", err)
+	}
+	if err := requireJSONArrayField(data, "tests"); err != nil {
+		return BaseTestList{}, fmt.Errorf("parsing base-test list: %w", err)
+	}
+	var list BaseTestList
+	if err := decodeStrictJSON(data, &list); err != nil {
+		return BaseTestList{}, fmt.Errorf("parsing base-test list: %w", err)
+	}
+	if strings.TrimSpace(list.BaseCommit) == "" {
+		return BaseTestList{}, errors.New("parsing base-test list: baseCommit is required")
+	}
+	changedTests := changedTestPaths(changed)
+	seen := map[string]struct{}{}
+	for n, test := range list.Tests {
+		if !isTestPath(test.Path) {
+			return BaseTestList{}, fmt.Errorf("parsing base-test list: test %d path %q is not a *_test.* file", n+1, test.Path)
+		}
+		if _, exists := changedTests[test.Path]; !exists {
+			return BaseTestList{}, fmt.Errorf("parsing base-test list: %q was not a changed test file", test.Path)
+		}
+		if _, exists := seen[test.Path]; exists {
+			return BaseTestList{}, fmt.Errorf("parsing base-test list: %q appears more than once", test.Path)
+		}
+		seen[test.Path] = struct{}{}
+	}
+	return list, nil
+}
+
+func changedTestPaths(changed ChangedFileList) map[string]struct{} {
+	paths := make(map[string]struct{})
+	for _, file := range changed.Files {
+		if isTestPath(file.Path) {
+			paths[file.Path] = struct{}{}
+		}
+		if isTestPath(file.PreviousPath) {
+			paths[file.PreviousPath] = struct{}{}
+		}
+	}
+	return paths
+}
+
+func requireJSONArrayField(data []byte, field string) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	value, ok := fields[field]
+	if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return fmt.Errorf("%s is required and must be an array", field)
+	}
+	var array []json.RawMessage
+	if err := json.Unmarshal(value, &array); err != nil {
+		return fmt.Errorf("%s must be an array", field)
+	}
+	return nil
+}
+
+func decodeStrictJSON(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("contains more than one JSON value")
+		}
+		return err
+	}
+	return nil
 }
 
 func rejectDuplicateJSONKeys(data []byte) error {
@@ -228,15 +317,19 @@ func rejectDuplicateJSONKeys(data []byte) error {
 	return nil
 }
 
-func isTestPath(path string) bool {
+func isRelativePath(path string) bool {
 	if path == "" || filepath.IsAbs(path) || strings.Contains(path, "\\") {
 		return false
 	}
 	clean := filepath.ToSlash(filepath.Clean(path))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || clean != path {
+	return clean != "." && clean != ".." && !strings.HasPrefix(clean, "../") && clean == path
+}
+
+func isTestPath(path string) bool {
+	if !isRelativePath(path) {
 		return false
 	}
-	base := filepath.Base(clean)
+	base := filepath.Base(path)
 	ext := filepath.Ext(base)
 	return ext != "" && strings.HasSuffix(strings.TrimSuffix(base, ext), "_test")
 }

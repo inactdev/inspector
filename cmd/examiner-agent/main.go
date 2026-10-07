@@ -1,5 +1,3 @@
-//go:build examiner_agent
-
 package main
 
 import (
@@ -31,8 +29,8 @@ func run(args []string) int {
 	outputDir := fs.String("output-dir", "", "sealed output directory")
 	appURL := fs.String("app-url", "", "running app URL")
 	model := fs.String("model", "", "Anthropic model")
-	apiBaseURL := fs.String("api-base-url", "", "Anthropic Messages API URL")
 	timeout := fs.Duration("timeout", defaultTimeout, "maximum examination duration")
+	budget := fs.Int("budget", examiner.DefaultBudget, "maximum app-driving attempts")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -47,7 +45,7 @@ func run(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	if err := examiner.RunAgent(ctx, examiner.AgentOptions{
-		InputDir: *inputDir, OutputDir: *outputDir, AppURL: *appURL, Model: *model, APIBaseURL: *apiBaseURL,
+		InputDir: *inputDir, OutputDir: *outputDir, AppURL: *appURL, Model: *model, Budget: *budget,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "examiner-agent: %v\n", err)
 		return exitRefused

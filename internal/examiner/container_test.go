@@ -1,13 +1,9 @@
 package examiner
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,100 +12,160 @@ import (
 	"time"
 )
 
-func TestBundledAgentsMatchReviewedSource(t *testing.T) {
-	const builderGoVersion = "go1.22.12"
+func TestNewContainerCommand_OnlyMountsAllowedResources(t *testing.T) {
+	applicationSource := t.TempDir()
+	inputDir := t.TempDir()
+	outputDir := t.TempDir()
+	cmd := NewContainerCommand(context.Background(), ContainerOptions{
+		InputDir: inputDir, OutputDir: outputDir, AppURL: "http://app:8080", Model: "test-model", Network: "examiner-test", Timeout: 23 * time.Minute, Budget: 7,
+	})
+	defer cmd.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("repository root: %v", err)
+	mounts := dockerMounts(t, cmd.Args)
+	want := map[string]dockerMount{
+		"/examiner/input":  {source: inputDir, readOnly: true},
+		"/examiner/output": {source: outputDir},
 	}
-	goVersion, err := exec.CommandContext(ctx, "go", "env", "GOVERSION").Output()
-	if err != nil {
-		t.Fatalf("go env GOVERSION: %v", err)
+	if len(mounts) != len(want) {
+		t.Fatalf("container mounts = %#v, want exactly %#v", mounts, want)
 	}
+	for target, expected := range want {
+		actual, ok := mounts[target]
+		if !ok {
+			t.Fatalf("container omitted required mount %q: %#v", target, mounts)
+		}
+		if actual != expected {
+			t.Fatalf("container mount %q = %#v, want %#v", target, actual, expected)
+		}
+	}
+	for _, mount := range mounts {
+		if pathMakesReachable(mount.source, applicationSource) {
+			t.Fatalf("examiner mount %q makes application source %q reachable", mount.source, applicationSource)
+		}
+	}
+	if strings.Contains(strings.Join(cmd.Args, "\x00"), "examiner-agent-linux") {
+		t.Fatalf("container command must not mount caller or committed agent executables: %q", cmd.Args)
+	}
+	if !strings.Contains(strings.Join(cmd.Args, " "), "--pull never") {
+		t.Fatalf("examination must never pull a runtime image: %q", cmd.Args)
+	}
+	if !strings.Contains(strings.Join(cmd.Args, " "), "--entrypoint /usr/local/bin/examiner-agent "+RuntimeImage) {
+		t.Fatalf("container command must force the locally-built runtime entrypoint: %q", cmd.Args)
+	}
+	if !strings.Contains(strings.Join(cmd.Args, " "), "--timeout 23m0s --budget 7") {
+		t.Fatalf("container command must forward timeout and budget: %q", cmd.Args)
+	}
+}
 
-	for _, target := range []struct {
-		arch       string
-		compressed []byte
-	}{
-		{arch: "amd64", compressed: agentLinuxAMD64},
-		{arch: "arm64", compressed: agentLinuxARM64},
-	} {
-		binary := filepath.Join(t.TempDir(), "examiner-agent-linux-"+target.arch)
-		args := []string{"build", "-tags", "examiner_agent", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-o", binary, "./cmd/examiner-agent"}
-		var command *exec.Cmd
-		if strings.TrimSpace(string(goVersion)) == builderGoVersion {
-			command = exec.CommandContext(ctx, "go", args...)
-			command.Dir = root
-			command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+target.arch)
-		} else {
-			user, err := localDockerRuntimeUser(ctx)
-			if err != nil {
-				t.Fatalf("Go is not %s and Docker cannot provide the reproducible builder: %v", builderGoVersion, err)
+func TestNewContainerCommand_RejectsEveryOtherMountSpelling(t *testing.T) {
+	cmd := NewContainerCommand(context.Background(), ContainerOptions{
+		InputDir: "/private/input", OutputDir: "/private/output", AppURL: "http://app:8080", Model: "test-model", Network: "none",
+	})
+	defer cmd.Cleanup()
+	for n, arg := range cmd.Args {
+		if arg == "--mount" {
+			if n+1 == len(cmd.Args) {
+				t.Fatal("--mount has no value")
 			}
-			containerBinary := "/output/" + filepath.Base(binary)
-			dockerArgs := []string{
-				"run", "--rm", "--userns", "host", "--user", user,
-				"--env", "HOME=/tmp", "--env", "GOCACHE=/tmp/go-build",
-				"--env", "CGO_ENABLED=0", "--env", "GOOS=linux", "--env", "GOARCH=" + target.arch,
-				"--mount", "type=bind,src=" + root + ",dst=/workspace,readonly",
-				"--mount", "type=bind,src=" + filepath.Dir(binary) + ",dst=/output",
-				"--workdir", "/workspace",
-				"cimg/go@sha256:a3b66b5f01291de5d4ddcaaf7916f1eabdb3c990da628f766a6d28f978a6928e",
-				"go", "build", "-tags", "examiner_agent", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-o", containerBinary, "./cmd/examiner-agent",
-			}
-			command = exec.CommandContext(ctx, "docker", dockerArgs...)
+			continue
 		}
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("building examiner agent for linux/%s: %v\n%s", target.arch, err, output)
-		}
-
-		built, err := os.ReadFile(binary)
-		if err != nil {
-			t.Fatalf("reading built examiner agent for linux/%s: %v", target.arch, err)
-		}
-		reader, err := gzip.NewReader(bytes.NewReader(target.compressed))
-		if err != nil {
-			t.Fatalf("opening bundled examiner agent for linux/%s: %v", target.arch, err)
-		}
-		bundled, readErr := io.ReadAll(reader)
-		closeErr := reader.Close()
-		if readErr != nil {
-			t.Fatalf("reading bundled examiner agent for linux/%s: %v", target.arch, readErr)
-		}
-		if closeErr != nil {
-			t.Fatalf("closing bundled examiner agent for linux/%s: %v", target.arch, closeErr)
-		}
-		if !bytes.Equal(built, bundled) {
-			t.Fatalf("bundled examiner agent for linux/%s does not match its reviewed source", target.arch)
+		if strings.HasPrefix(arg, "-v") || strings.HasPrefix(arg, "--volume") || strings.HasPrefix(arg, "--mount=") {
+			t.Fatalf("container command used unsupported mount spelling %q: %q", arg, cmd.Args)
 		}
 	}
 }
 
-func TestBundledAgentRunsOnDockerServerPlatform(t *testing.T) {
-	user := requireLocalDocker(t)
-	agentExecutable, cleanup, err := prepareAgentExecutable(context.Background())
-	if err != nil {
-		t.Fatalf("prepareAgentExecutable() error = %v", err)
-	}
-	defer cleanup()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func TestRuntimeContainerMountsExactlyAllowedResources(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--read-only", "--network", "none",
-		"--userns", "host", "--user", user,
-		"--mount", "type=bind,src="+agentExecutable+",dst=/examiner/agent,readonly",
-		"--entrypoint", "/examiner/agent", RuntimeImage, "--help").CombinedOutput()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 64 {
-		t.Fatalf("bundled examiner agent --help error = %v, output = %s", err, output)
+	user, err := localDockerRuntimeUser(ctx)
+	if err != nil {
+		t.Skipf("no usable local Docker runtime, skipping: %v", err)
 	}
-	if !strings.Contains(string(output), "Usage of examiner-agent") {
-		t.Fatalf("bundled examiner agent did not emit its CLI help: %s", output)
+	if err := ensureRuntimeImage(ctx); err != nil {
+		t.Skipf("local examiner runtime is unavailable, skipping: %v", err)
 	}
+	applicationSource, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolving application source fixture: %v", err)
+	}
+	inputDir := t.TempDir()
+	outputDir := t.TempDir()
+	cmd := NewContainerCommand(ctx, ContainerOptions{
+		InputDir: inputDir, OutputDir: outputDir, AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
+	})
+	defer cmd.Cleanup()
+	name := fmt.Sprintf("inspector-examiner-mount-test-%d", time.Now().UnixNano())
+	args := dockerCreateArgs(cmd.Args, name)
+	if output, err := exec.Command("docker", args...).CombinedOutput(); err != nil {
+		t.Fatalf("creating sealed examiner container: %v: %s", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+
+	output, err := exec.Command("docker", "inspect", "--format", "{{json .Mounts}}", name).Output()
+	if err != nil {
+		t.Fatalf("inspecting sealed examiner mounts: %v", err)
+	}
+	var mounts []struct {
+		Type        string `json:"Type"`
+		Source      string `json:"Source"`
+		Destination string `json:"Destination"`
+		RW          bool   `json:"RW"`
+	}
+	if err := json.Unmarshal(output, &mounts); err != nil {
+		t.Fatalf("decoding sealed examiner mounts: %v: %s", err, output)
+	}
+	want := map[string]dockerMount{
+		"/examiner/input":  {source: inputDir, readOnly: true},
+		"/examiner/output": {source: outputDir},
+	}
+	if len(mounts) != len(want) {
+		t.Fatalf("runtime mounts = %#v, want exactly %#v", mounts, want)
+	}
+	for _, mount := range mounts {
+		expected, ok := want[mount.Destination]
+		if !ok {
+			t.Fatalf("runtime exposes unexpected mount %#v", mount)
+		}
+		source := normalizeDockerMountSource(mount.Source)
+		if mount.Type != "bind" || source != normalizeDockerMountSource(expected.source) || mount.RW != !expected.readOnly {
+			t.Fatalf("runtime mount %#v does not match expected %#v", mount, expected)
+		}
+		if pathMakesReachable(source, normalizeDockerMountSource(applicationSource)) {
+			t.Fatalf("runtime mount %q makes application source %q reachable", source, applicationSource)
+		}
+		delete(want, mount.Destination)
+	}
+	if len(want) != 0 {
+		t.Fatalf("runtime omitted mounts: %#v", want)
+	}
+}
+
+func dockerCreateArgs(command []string, name string) []string {
+	args := []string{"create", "--name", name}
+	for n := 2; n < len(command); n++ {
+		switch command[n] {
+		case "--rm":
+		case "--name", "--cidfile":
+			n++
+		default:
+			args = append(args, command[n])
+		}
+	}
+	return args
+}
+
+func normalizeDockerMountSource(path string) string {
+	for _, prefix := range []string{"/host_mnt", "/run/desktop/mnt/host"} {
+		if strings.HasPrefix(path, prefix+"/") {
+			path = strings.TrimPrefix(path, prefix)
+			break
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return filepath.Clean(path)
 }
 
 func TestLocalDockerRuntimeUser_RejectsRemoteEndpoint(t *testing.T) {
@@ -149,270 +205,47 @@ func TestLocalDockerRuntimeUser_UsesNamespaceRootForRootlessDaemon(t *testing.T)
 	if user != "0:0" {
 		t.Fatalf("localDockerRuntimeUser() = %q, want 0:0", user)
 	}
-	cmd := NewContainerCommand(context.Background(), ContainerOptions{
-		InputDir: t.TempDir(), OutputDir: t.TempDir(), AgentExecutable: filepath.Join(t.TempDir(), "agent"),
-		AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
-	})
-	defer cmd.Cleanup()
-	if args := strings.Join(cmd.Args, " "); !strings.Contains(args, "--user 0:0") {
-		t.Fatalf("rootless Docker command does not run as namespace root: %q", cmd.Args)
-	}
 }
 
-func TestDockerServerTarget_DeadlineStopsPlatformProbe(t *testing.T) {
-	dir := t.TempDir()
-	docker := filepath.Join(dir, "docker")
-	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o700); err != nil {
-		t.Fatalf("writing fake docker: %v", err)
-	}
-	t.Setenv("PATH", dir)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	start := time.Now()
-	_, err := dockerServerTarget(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("dockerServerTarget() = %v, want context deadline exceeded", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("dockerServerTarget() returned after %s, want it bounded by the context", elapsed)
-	}
+type dockerMount struct {
+	source   string
+	readOnly bool
 }
 
-func TestNewContainerCommand_ApplicationSourceCannotBeMounted(t *testing.T) {
-	applicationSource := t.TempDir()
-	inputDir := t.TempDir()
-	outputDir := t.TempDir()
-	agentExecutable := filepath.Join(t.TempDir(), "examiner-agent")
-	if err := os.WriteFile(agentExecutable, []byte("placeholder"), 0o700); err != nil {
-		t.Fatalf("writing agent placeholder: %v", err)
-	}
-	cmd := NewContainerCommand(context.Background(), ContainerOptions{
-		InputDir: inputDir, OutputDir: outputDir, AgentExecutable: agentExecutable,
-		AppURL: "http://app:8080", Model: "test-model", Network: "examiner-test", Timeout: 23 * time.Minute,
-	})
-	defer cmd.Cleanup()
-
-	mounts := dockerMountSources(t, cmd.Args)
-	if mounts[applicationSource] {
-		t.Fatalf("application source %q is reachable from the examiner container", applicationSource)
-	}
-	want := map[string]bool{inputDir: true, outputDir: true, agentExecutable: true}
-	if len(mounts) != len(want) {
-		t.Fatalf("container mount sources = %#v, want only %#v", mounts, want)
-	}
-	for source := range want {
-		if !mounts[source] {
-			t.Fatalf("container does not mount expected examiner resource %q: %#v", source, mounts)
+func dockerMounts(t *testing.T, args []string) map[string]dockerMount {
+	t.Helper()
+	mounts := map[string]dockerMount{}
+	for n, arg := range args {
+		if arg != "--mount" {
+			continue
 		}
-	}
-	args := strings.Join(cmd.Args, " ")
-	if !strings.Contains(args, "--read-only") {
-		t.Fatalf("docker command must keep the examiner filesystem read-only: %q", cmd.Args)
-	}
-	if !strings.Contains(args, "--userns host") {
-		t.Fatalf("docker command must retain access to private staged files under user-namespace remapping: %q", cmd.Args)
-	}
-	if !strings.Contains(args, "--user "+containerHostUser()) {
-		t.Fatalf("rootful docker command must run as the owner of its private staged files: %q", cmd.Args)
-	}
-	if !strings.Contains(args, "--entrypoint /examiner/agent "+RuntimeImage) {
-		t.Fatalf("docker command must force Inspector as the entrypoint in the pinned runtime: %q", cmd.Args)
-	}
-	if !strings.Contains(args, "--timeout 23m0s") {
-		t.Fatalf("docker command must forward the examination timeout to the agent: %q", cmd.Args)
-	}
-}
-
-func TestPreparedVerdictRemainsReadableAfterContainerWrite(t *testing.T) {
-	user := requireLocalDocker(t)
-	outputDir, verdictPath, cleanupOutput, err := prepareOutput()
-	if err != nil {
-		t.Fatalf("prepareOutput() error = %v", err)
-	}
-	defer cleanupOutput()
-	if _, err := os.Stat(verdictPath); err != nil {
-		t.Fatalf("verdict was not pre-created on the host: %v", err)
-	}
-
-	agentExecutable := filepath.Join(t.TempDir(), "agent")
-	if err := os.WriteFile(agentExecutable, []byte("#!/bin/sh\nprintf container-verdict > /examiner/output/verdict.json\n"), 0o700); err != nil {
-		t.Fatalf("writing agent: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := NewContainerCommand(ctx, ContainerOptions{
-		InputDir: t.TempDir(), OutputDir: outputDir, AgentExecutable: agentExecutable,
-		AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
-	})
-	defer cmd.Cleanup()
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("container write failed: %v", err)
-	}
-	data, err := os.ReadFile(verdictPath)
-	if err != nil {
-		t.Fatalf("host could not read container-written verdict: %v", err)
-	}
-	if string(data) != "container-verdict" {
-		t.Fatalf("verdict = %q, want container-verdict", data)
-	}
-}
-
-func TestSealedContainerMountsExactlyAllowedResources(t *testing.T) {
-	user := requireLocalDocker(t)
-	applicationSource, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("finding application source: %v", err)
-	}
-	inputDir := t.TempDir()
-	outputDir := t.TempDir()
-	agentExecutable := filepath.Join(t.TempDir(), "examiner-agent")
-	if err := os.WriteFile(agentExecutable, []byte("placeholder"), 0o700); err != nil {
-		t.Fatalf("writing agent placeholder: %v", err)
-	}
-	cmd := NewContainerCommand(context.Background(), ContainerOptions{
-		InputDir: inputDir, OutputDir: outputDir, AgentExecutable: agentExecutable,
-		AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
-	})
-	defer cmd.Cleanup()
-	name := fmt.Sprintf("inspector-examiner-mount-test-%d", time.Now().UnixNano())
-	args := []string{"create", "--name", name}
-	for n := 2; n < len(cmd.Args); n++ {
-		switch cmd.Args[n] {
-		case "--rm":
-		case "--name", "--cidfile":
-			n++
-		default:
-			args = append(args, cmd.Args[n])
+		if n+1 == len(args) {
+			t.Fatal("--mount has no value")
 		}
-	}
-	if output, err := runDocker(args...); err != nil {
-		t.Skipf("could not create alpine examiner container: %v: %s", err, output)
-	}
-	t.Cleanup(func() { _, _ = runDocker("rm", "-f", name) })
-
-	mountOutput, err := runDocker("inspect", "--format", "{{json .Mounts}}", name)
-	if err != nil {
-		t.Fatalf("inspecting sealed examiner mounts: %v: %s", err, mountOutput)
-	}
-	var mounts []struct {
-		Type        string `json:"Type"`
-		Source      string `json:"Source"`
-		Destination string `json:"Destination"`
-		RW          bool   `json:"RW"`
-	}
-	if err := json.Unmarshal([]byte(mountOutput), &mounts); err != nil {
-		t.Fatalf("decoding sealed examiner mounts: %v: %s", err, mountOutput)
-	}
-	type expectedMount struct {
-		source string
-		rw     bool
-	}
-	want := map[string]expectedMount{
-		"/examiner/input":  {source: inputDir},
-		"/examiner/output": {source: outputDir, rw: true},
-		"/examiner/agent":  {source: agentExecutable},
-	}
-	if len(mounts) != len(want) {
-		t.Fatalf("sealed examiner mounts = %#v, want exactly %#v", mounts, want)
-	}
-	for _, mount := range mounts {
-		expected, ok := want[mount.Destination]
-		if !ok {
-			t.Fatalf("sealed examiner exposes unexpected mount %#v", mount)
+		mount := dockerMount{}
+		var target string
+		for _, part := range strings.Split(args[n+1], ",") {
+			switch {
+			case strings.HasPrefix(part, "src="):
+				mount.source = strings.TrimPrefix(part, "src=")
+			case strings.HasPrefix(part, "dst="):
+				target = strings.TrimPrefix(part, "dst=")
+			case part == "readonly":
+				mount.readOnly = true
+			}
 		}
-		source := normalizeDockerMountSource(mount.Source)
-		if source != normalizeDockerMountSource(expected.source) || mount.Type != "bind" || mount.RW != expected.rw {
-			t.Fatalf("sealed examiner mount %#v does not match expected %#v", mount, expected)
+		if mount.source == "" || target == "" {
+			t.Fatalf("invalid mount %q", args[n+1])
 		}
-		if pathMakesReachable(source, normalizeDockerMountSource(applicationSource)) {
-			t.Fatalf("sealed examiner mount %q makes application source %q reachable", source, applicationSource)
+		if _, exists := mounts[target]; exists {
+			t.Fatalf("duplicate mount target %q", target)
 		}
-		delete(want, mount.Destination)
+		mounts[target] = mount
 	}
-	if len(want) != 0 {
-		t.Fatalf("sealed examiner omitted required mounts: %#v", want)
-	}
-}
-
-func normalizeDockerMountSource(path string) string {
-	for _, prefix := range []string{"/host_mnt", "/run/desktop/mnt/host"} {
-		if strings.HasPrefix(path, prefix+"/") {
-			path = strings.TrimPrefix(path, prefix)
-			break
-		}
-	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	}
-	return filepath.Clean(path)
+	return mounts
 }
 
 func pathMakesReachable(source, target string) bool {
 	relative, err := filepath.Rel(source, target)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-}
-
-func TestNewContainerCommand_TimeoutKillsContainerAndDescendants(t *testing.T) {
-	user := requireLocalDocker(t)
-	inputDir := t.TempDir()
-	outputDir := t.TempDir()
-	agentExecutable := filepath.Join(t.TempDir(), "agent")
-	script := "#!/bin/sh\n(sleep 2; echo survived > /examiner/output/survived) &\nwait\n"
-	if err := os.WriteFile(agentExecutable, []byte(script), 0o700); err != nil {
-		t.Fatalf("writing agent: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	cmd := NewContainerCommand(ctx, ContainerOptions{
-		InputDir: inputDir, OutputDir: outputDir, AgentExecutable: agentExecutable,
-		AppURL: "http://app:8080", Model: "test-model", Network: "none", User: user,
-	})
-	defer cmd.Cleanup()
-	start := time.Now()
-	_ = cmd.Run()
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("container returned %s after its timeout", elapsed)
-	}
-	if err := cmd.KillError(); err != nil {
-		t.Fatalf("stopping timed-out examiner container: %v", err)
-	}
-
-	time.Sleep(2200 * time.Millisecond)
-	if _, err := os.Stat(filepath.Join(outputDir, "survived")); !os.IsNotExist(err) {
-		t.Fatal("examiner child survived the timed-out container")
-	}
-}
-
-func requireLocalDocker(t *testing.T) string {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	user, err := localDockerRuntimeUser(ctx)
-	if err != nil {
-		t.Skipf("no usable local container runtime, skipping: %v", err)
-	}
-	return user
-}
-
-func runDocker(args ...string) (string, error) {
-	out, err := exec.Command("docker", args...).CombinedOutput()
-	return string(out), err
-}
-
-func dockerMountSources(t *testing.T, args []string) map[string]bool {
-	t.Helper()
-	mounts := map[string]bool{}
-	for n, arg := range args {
-		if arg != "--mount" || n+1 == len(args) {
-			continue
-		}
-		for _, part := range strings.Split(args[n+1], ",") {
-			if source, ok := strings.CutPrefix(part, "src="); ok {
-				mounts[source] = true
-			}
-		}
-	}
-	return mounts
 }

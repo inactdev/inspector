@@ -1,5 +1,11 @@
 # Examiner runtime
 
-The examiner runtime contains Inspector's trusted Linux agent executables for Docker's common AMD64 and ARM64 server platforms.
+The examiner runtime is the locally built Docker image that runs Inspector's sealed agent.
 
-`build.sh` cross-compiles both static agents from `cmd/examiner-agent` with a pinned Go 1.22.12 toolchain, compresses them reproducibly, and prints their SHA-256 digests. It uses a digest-pinned builder container when the host toolchain differs. Run `build.sh check` to prove the committed executables match the reviewed source. After rebuilding, update the matching digest constants in `internal/examiner/runtime.go`. The `examiner_agent` build tag leaves the host-only container launcher and embedded artifacts out of the agent executable.
+Build it before running `inspector examine`:
+
+```
+internal/examiner/runtime/build.sh
+```
+
+The Dockerfile compiles the reviewed agent source with a pinned multi-architecture Go builder and copies it into a digest-pinned runtime base. The image is local only. Examination refuses if the image is absent instead of building or pulling while it holds app access and an API key.

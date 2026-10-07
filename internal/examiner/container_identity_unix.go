@@ -1,4 +1,4 @@
-//go:build unix && !examiner_agent
+//go:build unix
 
 package examiner
 

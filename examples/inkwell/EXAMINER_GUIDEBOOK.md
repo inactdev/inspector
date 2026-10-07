@@ -1,10 +1,10 @@
-# Inkwell examiner guidebook
+# Inkwell examiner feature map
 
-This guidebook lets the examiner judge Inkwell's backend through HTTP without reading Inkwell source.
+This feature map lets the examiner judge Inkwell's backend through HTTP without reading Inkwell source.
 
 ## Coverage
 
-This first guidebook covers the Go backend's HTTP interface. It does not drive the native iOS app, Simulator, microphone, speech recognition, or SwiftUI screens. A backend request is a real app driver for the covered half, but it is not evidence that the iOS half works.
+This first feature map covers the Go backend's HTTP interface. It does not drive the native iOS app, Simulator, microphone, speech recognition, or SwiftUI screens. A backend request is a real app driver for the covered half, but it is not evidence that the iOS half works.
 
 ## Start the app outside the examiner boundary
 
@@ -46,4 +46,4 @@ Use fresh UUIDs per examination. At minimum, exercise creating a record, listing
 
 ## Known limits
 
-The backend writes markdown and commits it to its configured storage repository. That storage effect is outside this guidebook's observation surface. The examiner may observe the HTTP contract only. If the running backend cannot be reached, report the affected request-derived outcome as `could_not_be_tested`, not as a backend failure.
+The backend writes markdown and commits it to its configured storage repository. That storage effect is outside this feature map's observation surface. The examiner may observe the HTTP contract only. If the running backend cannot be reached, report the affected request-derived outcome as `could_not_be_tested`, not as a backend failure.

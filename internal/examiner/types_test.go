@@ -2,82 +2,85 @@ package examiner
 
 import "testing"
 
-func TestClassify_WeakeningChangedTestIsRedAndNamesWhatItStoppedChecking(t *testing.T) {
-	tests := TestChangeList{
-		BaseCommit: "abc123",
-		Files: []TestChange{{
-			Path: "capture_test.go", Change: "modified", Before: "assert.Equal(t, want, got)", After: "assert.NotEmpty(t, got)",
-		}},
+func TestExaminationRecord_DerivesTestFindingFromPreTaskScenario(t *testing.T) {
+	record := NewExaminationRecord(2)
+	if err := record.AddCapability(CapabilityProposal{
+		ID: "capture", Claim: "capture saves an inkling", Scenario: "POST /inklings", TestPath: "capture_test.go",
+	}); err != nil {
+		t.Fatalf("AddCapability() error = %v", err)
 	}
-	result, err := Classify(Verdict{
-		Outcomes: []Outcome{{Claim: "capture saves an inkling", Verdict: Confirmed, Scenario: "POST /inklings", Evidence: "201 Created"}},
-		Findings: []Finding{{
-			TestPath: "capture_test.go", Detail: "the exact saved text assertion was widened to non-empty", ProposedRegression: "keep an HTTP capture test that asserts the saved text exactly matches the request",
-		}},
-	}, tests)
+	if err := record.StartAttempt("capture"); err != nil {
+		t.Fatalf("StartAttempt() error = %v", err)
+	}
+	if err := record.RecordObservation("capture", "HTTP 500"); err != nil {
+		t.Fatalf("RecordObservation() error = %v", err)
+	}
+	if err := record.AddAssessment(Assessment{
+		CapabilityID: "capture", Verdict: NotConfirmed, Evidence: "HTTP 500", ProposedRegression: "keep an HTTP capture regression",
+	}); err != nil {
+		t.Fatalf("AddAssessment() error = %v", err)
+	}
+	result, err := record.DeriveResult()
 	if err != nil {
-		t.Fatalf("Classify() error = %v", err)
+		t.Fatalf("DeriveResult() error = %v", err)
 	}
-	if result.Kind != Red {
-		t.Fatalf("Kind = %q, want red", result.Kind)
+	if result.Kind != Red || len(result.Verdict.Findings) != 1 {
+		t.Fatalf("result = %#v, want red test finding", result)
 	}
-	if result.Verdict.Findings[0].TestPath != "capture_test.go" || result.Verdict.Findings[0].Detail == "" {
-		t.Fatalf("finding = %#v, want the test and what it stopped checking", result.Verdict.Findings[0])
+	finding := result.Verdict.Findings[0]
+	if finding.TestPath != "capture_test.go" || finding.Detail == "" {
+		t.Fatalf("finding = %#v, want named test and lost protection", finding)
 	}
 }
 
-func TestClassify_LegitimateTestChangeDoesNotMakeTheResultRed(t *testing.T) {
-	result, err := Classify(Verdict{
-		Outcomes: []Outcome{{Claim: "capture saves an inkling", Verdict: Confirmed, Scenario: "POST /inklings", Evidence: "201 Created"}},
-	}, TestChangeList{BaseCommit: "abc123", Files: []TestChange{{
-		Path: "capture_test.go", Change: "added", After: "func TestCapture() {}",
-	}}})
-	if err != nil {
-		t.Fatalf("Classify() error = %v", err)
+func TestExaminationRecord_DerivesCouldNotBeTestedWithoutObservation(t *testing.T) {
+	record := NewExaminationRecord(1)
+	if err := record.AddCapability(CapabilityProposal{ID: "list", Claim: "saved inklings can be listed", Scenario: "GET /inklings"}); err != nil {
+		t.Fatalf("AddCapability() error = %v", err)
 	}
-	if result.Kind != Green {
-		t.Fatalf("Kind = %q, want green", result.Kind)
+	result, err := record.DeriveResult()
+	if err != nil {
+		t.Fatalf("DeriveResult() error = %v", err)
+	}
+	if result.Kind != Refused || !result.Verdict.ExaminationIncomplete || result.Verdict.Outcomes[0].Verdict != CouldNotBeTested {
+		t.Fatalf("result = %#v, want incomplete could-not-be-tested refusal", result)
 	}
 }
 
-func TestClassify_CouldNotBeTestedIsRefusedNotRed(t *testing.T) {
-	result, err := Classify(Verdict{Outcomes: []Outcome{{
-		Claim: "capture saves an inkling", Verdict: CouldNotBeTested, Scenario: "POST /inklings", Evidence: "the app did not start",
-	}}}, TestChangeList{BaseCommit: "abc123"})
+func TestExaminationRecord_PreservesBugAndIncompleteMark(t *testing.T) {
+	record := NewExaminationRecord(2)
+	for _, capability := range []CapabilityProposal{
+		{ID: "broken", Claim: "capture saves", Scenario: "POST /inklings"},
+		{ID: "unknown", Claim: "capture lists", Scenario: "GET /inklings"},
+	} {
+		if err := record.AddCapability(capability); err != nil {
+			t.Fatalf("AddCapability() error = %v", err)
+		}
+	}
+	if err := record.StartAttempt("broken"); err != nil {
+		t.Fatalf("StartAttempt() error = %v", err)
+	}
+	if err := record.RecordObservation("broken", "HTTP 500"); err != nil {
+		t.Fatalf("RecordObservation() error = %v", err)
+	}
+	if err := record.AddAssessment(Assessment{CapabilityID: "broken", Verdict: NotConfirmed, Evidence: "HTTP 500", ProposedRegression: "add regression"}); err != nil {
+		t.Fatalf("AddAssessment() error = %v", err)
+	}
+	result, err := record.DeriveResult()
 	if err != nil {
-		t.Fatalf("Classify() error = %v", err)
+		t.Fatalf("DeriveResult() error = %v", err)
 	}
-	if result.Kind != Refused {
-		t.Fatalf("Kind = %q, want refused", result.Kind)
-	}
-	if result.Message == "" {
-		t.Fatal("refusal should explain that the capability could not be tested")
+	if result.Kind != Red || !result.Verdict.ExaminationIncomplete {
+		t.Fatalf("result = %#v, want a bug plus incomplete examination", result)
 	}
 }
 
-func TestClassify_CouldNotBeTestedMakesMixedVerdictRefusedNotRed(t *testing.T) {
-	result, err := Classify(Verdict{Outcomes: []Outcome{
-		{
-			Claim: "capture saves an inkling", Verdict: NotConfirmed, Scenario: "POST /inklings", Evidence: "500 response", ProposedRegression: "keep an HTTP capture regression",
-		},
-		{
-			Claim: "capture can be listed", Verdict: CouldNotBeTested, Scenario: "GET /inklings", Evidence: "the app stopped responding",
-		},
-	}}, TestChangeList{BaseCommit: "abc123"})
-	if err != nil {
-		t.Fatalf("Classify() error = %v", err)
+func TestExaminationRecord_RejectsConfirmationWithoutObservation(t *testing.T) {
+	record := NewExaminationRecord(1)
+	if err := record.AddCapability(CapabilityProposal{ID: "list", Claim: "saved inklings can be listed", Scenario: "GET /inklings"}); err != nil {
+		t.Fatalf("AddCapability() error = %v", err)
 	}
-	if result.Kind != Refused {
-		t.Fatalf("Kind = %q, want refused because the examination did not finish", result.Kind)
-	}
-}
-
-func TestClassify_RejectsFindingForUnlistedTest(t *testing.T) {
-	_, err := Classify(Verdict{
-		Outcomes: []Outcome{{Claim: "capture saves an inkling", Verdict: Confirmed, Scenario: "POST /inklings", Evidence: "201 Created"}},
-		Findings: []Finding{{TestPath: "hidden_test.go", Detail: "deleted case", ProposedRegression: "restore it"}},
-	}, TestChangeList{BaseCommit: "abc123"})
-	if err == nil {
-		t.Fatal("Classify() accepted a test-change finding for a test that was not supplied")
+	if err := record.AddAssessment(Assessment{CapabilityID: "list", Verdict: Confirmed, Evidence: "claimed"}); err == nil {
+		t.Fatal("AddAssessment() accepted confirmation without a recorded observation")
 	}
 }

@@ -316,72 +316,106 @@ limit on what a green status does and doesn't prove.
 
 ## Examiner
 
-`inspector examine` is the independent outcome judge. It answers whether the
-request came true by deriving scenarios from the request and operating an
-already-running HTTP app. It does not rerun the project's check command or use
-a worker-authored outcome checklist.
+`inspector examine` is the independent outcome judge. It derives scenarios from
+the request, operates an already-running HTTP app, and never reads the judged
+application's implementation or worker-written test content.
 
-The first version drives HTTP backends. It does not drive native iOS screens,
-so an Inkwell examination covers its backend only. The hand-written first
-[Inkwell guidebook](examples/inkwell/EXAMINER_GUIDEBOOK.md) is the worked
-example. Issue #22 will generate confirmed guidebooks for other projects.
+The first version drives HTTP backends. It does not drive native iOS screens, so
+an Inkwell examination covers its backend only. The hand-written first
+[Inkwell feature map](examples/inkwell/EXAMINER_GUIDEBOOK.md) and
+[always-true list](examples/inkwell/INKWELL_ALWAYS_TRUE.md) are worked examples.
+Issue #22 will generate confirmed feature maps for other projects, and #24 owns
+the always-true list producer.
 
-Start the app outside the examiner, then provide each input explicitly:
+Build the trusted runtime once, before examining. This build is local; the
+examination command never builds or pulls an image while it has app access and
+an API key:
+
+```
+internal/examiner/runtime/build.sh
+```
+
+The runtime Dockerfile compiles the reviewed agent source with a pinned,
+multi-architecture Go builder into a digest-pinned Linux base. It works from a
+Linux, macOS, or Windows host without mounting a caller-supplied executable.
+The image is intentionally general-purpose so a future browser driver can live
+there too.
+
+The caller starts the app outside the examiner, then provides the four inputs
+explicitly:
 
 ```
 ANTHROPIC_API_KEY=... GITHUB_TOKEN=... inspector examine \
   --request /path/to/request.md \
-  --guidebook /path/to/guidebook.md \
-  --test-changes /path/to/test-changes.json \
+  --feature-map /path/to/feature-map.md \
+  --always-true /path/to/always-true.md \
+  --changed-files /path/to/changed-files.json \
+  --base-tests /path/to/base-tests.json \
   --app-url http://host.docker.internal:8080 \
   --network bridge \
-  --commit <commit-sha> \
+  --budget 12 \
+  --commit <40-character-commit-sha> \
   --owner inactdev \
   --repo inkwell \
   --model claude-sonnet-4-5
 ```
 
-`--request` is the issue or pull request text. `--guidebook` teaches the
-examiner how to drive the app. `--test-changes` is Fabrica's list diffed from
-the task's starting commit, never a worker's claim. Its JSON has a `baseCommit`
-and `files`; each file is an added, modified, deleted, or renamed `*_test.*`
-file with the relevant before and after test content. Non-test paths and extra
-fields are refused rather than becoming an implementation-source channel.
-Fabrica issue #101 will generate this list; until then, the caller must supply
-it explicitly.
+`--request` is the issue or pull request text. `--feature-map` teaches the
+examiner how to drive the app, and `--always-true` names its invariants. The
+per-task `--budget` bounds app-driving attempts: request scenarios come first,
+then nearby feature-map and invariant scenarios, then the examiner stops.
 
-The caller, not the examiner, starts the app and gives the sealed container a
-network that reaches it. Inspector carries integrity-pinned static Linux agents
-for AMD64 and ARM64 Docker servers, so the host installation may run on Linux,
-macOS, or Windows without supplying executable code to the container. The
-container receives read-only copies of exactly those three files, the matching
-bundled agent, and a writable temporary output directory. It has no repository
-mount or implementation diff. A local Docker daemon is required because bind
-mounts resolve on the daemon host; remote Docker endpoints are refused. It uses
-the host user namespace with all Linux capabilities dropped and selects the
-staging owner's mapped identity for rootful or rootless Docker. The forced agent
-gives the model no shell or arbitrary HTTP tool: it can call only the supplied
-app URL, and redirects cannot
-leave that app's origin. Inspector pins the Alpine runtime by digest, forces the
-bundled agent as its entrypoint, and does not allow callers to substitute a
-project image or agent binary that could contain application source.
+`--changed-files` is Fabrica's names-only list of every worker-changed file:
 
-The examiner derives claimed capabilities from the request, drives the app, and
-prints a JSON verdict per capability: `confirmed`, `not_confirmed`, or
-`could_not_be_tested`. A completed judgment is red when a capability or test
-protection is not confirmed, and names what is missing. If any capability could
-not be tested, the whole examination is instead a refusal, even if another
-capability was not confirmed, because the judgment did not finish. Every
-confirmed finding includes a proposed regression line for the project's own
-check suite; Inspector never writes it. A guidebook failure, unreachable app,
-model failure, or timeout exits `2` and posts GitHub status state `error` with
-context `examiner`, not a red `failure` result.
+```json
+{
+  "baseCommit": "<task-starting-commit>",
+  "files": [{"path": "backend/capture_test.go", "change": "modified"}]
+}
+```
 
-The examiner posts its own status under the stable context `examiner`: `success`
-for green, `failure` for red, and `error` for a refusal. Red and error both block
-a normal merge; an owner can use GitHub's visible admin override when that is
-the right human decision. The branch-protection setup is documented under
-inspector-gate below.
+It has no file contents or diff. `--base-tests` supplies only the starting-commit
+content of changed test files, never the worker's version:
+
+```json
+{
+  "baseCommit": "<task-starting-commit>",
+  "tests": [{"path": "backend/capture_test.go", "content": "...pre-task test..."}]
+}
+```
+
+A changed test name is a signal. The examiner derives the old test's protected
+scenario and drives it in the app. A new test with no pre-task version triggers
+nothing. Fabrica issue #101 will produce both artifacts; until then, callers
+supply them explicitly. Missing or malformed lists refuse rather than reading as
+no changed tests.
+
+The sealed container receives copies of only these inputs and a writable
+temporary output directory. It has no repository mount or implementation diff.
+The locally built runtime forces the trusted agent entrypoint. The model has no
+shell or arbitrary-network tool: it can call only the supplied app URL, and a
+redirect cannot leave that origin. A local Docker daemon is required because
+bind mounts resolve on the daemon host; remote Docker endpoints are refused.
+Docker `userns-remap` is unsupported for now because private staged inputs
+cannot safely cross that mapping - see [#32](https://github.com/inactdev/inspector/issues/32).
+
+The model proposes capabilities, attempts, and assessments. Inspector records
+which capability each app request drove and what response was delivered, then
+derives every per-capability result from that record. A capability with no
+successful observation is `could_not_be_tested` and cannot be marked confirmed.
+The JSON verdict also carries `examinationIncomplete`, so an untested capability
+never hides a confirmed bug and a bug never hides an incomplete examination.
+Confirmed missing behavior and failed pre-task-test scenarios include proposed
+permanent regression lines; Inspector never edits the project.
+
+The examiner posts its own status under the stable context `examiner`:
+`success` only when every capability is confirmed and the examination completed,
+`failure` when it found a bug, and `error` when nothing was found wrong but the
+examination was incomplete. When both a bug and incompleteness are present it
+posts `failure` and names both facts. Both blocking states are distinct on the
+pull request page. Require `examiner` alongside `gate`: **Settings -> Branches
+-> main -> Require status checks -> add `gate` and `examiner`**. An owner can
+use GitHub's visible admin override when that is the right human decision.
 
 ## inspector-gate
 

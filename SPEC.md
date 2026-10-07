@@ -14,12 +14,15 @@ later rulings override every contrary statement in them:
 - Inspector never edits a judged project. It returns findings and proposed
   regression lines to Fabrica's handback loop (fabrica#95).
 - The examiner judges the request, not an implementation or worker-authored
-  outcome list. It receives only request text, an operating guidebook,
-  Fabrica's base-diffed test-change list, and the URL of a running app driven
-  through a real driver. It derives scenarios from the request itself.
-- The examiner container never receives application source or an implementation
-  diff. Test changes are its narrow `*_test.*` exception. It posts the separate
-  `examiner` commit status, where a refusal is `error` and not a red `failure`.
+  outcome list. It receives issue text, changed file names, a feature map, an
+  always-true list, and pre-task changed tests from Fabrica, then drives a
+  running app through a real driver. It derives scenarios from the request
+  itself and bounds attempts per task.
+- The examiner container never receives application source, an implementation
+  diff, or worker-written file content. A changed test name may lead it to a
+  pre-task test version, never the worker's version. It posts the separate
+  `examiner` status: `failure` means it found a bug; `error` means an otherwise
+  incomplete examination.
 
 Issue #7 and README's Examiner section are the current operational design for
 that examiner. The older outcome-list and fixer descriptions in this document

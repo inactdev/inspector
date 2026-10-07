@@ -1,5 +1,3 @@
-//go:build !examiner_agent
-
 package examiner
 
 import (
@@ -10,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,26 +17,30 @@ import (
 )
 
 const (
-	RuntimeImage   = "alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+	// RuntimeImage is built locally from runtime/Dockerfile. The examiner never
+	// accepts caller-selected executable content or a project image.
+	RuntimeImage   = "inspector-examiner-agent:local"
 	DefaultNetwork = "bridge"
 	DefaultTimeout = 10 * time.Minute
+	DefaultBudget  = 12
 )
 
 // RunOptions configures the container that holds the examiner agent. It has no
 // repository path by design: app source cannot be mounted into this container.
 type RunOptions struct {
-	Inputs     Inputs
-	AppURL     string
-	Model      string
-	APIBaseURL string
-	Network    string
-	Timeout    time.Duration
-	Stdout     io.Writer
-	Stderr     io.Writer
+	Inputs  Inputs
+	AppURL  string
+	Model   string
+	Network string
+	Timeout time.Duration
+	Budget  int
+	Stdout  io.Writer
+	Stderr  io.Writer
 }
 
-// Run starts the sealed agent and returns its verdict. It writes only to
-// temporary directories owned by Inspector, never to the project being judged.
+// Run starts the sealed agent and returns its record-derived verdict. It writes
+// only to temporary directories owned by Inspector, never to the project being
+// judged.
 func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	timeout := opts.Timeout
 	if timeout <= 0 {
@@ -64,12 +67,9 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	if err != nil {
 		return Result{Kind: Refused, Message: fmt.Sprintf("no usable container runtime: %v", err)}, nil
 	}
-
-	agentExecutable, cleanupAgent, err := prepareAgentExecutable(runCtx)
-	if err != nil {
-		return Result{Kind: Refused, Message: fmt.Sprintf("preparing trusted examiner agent: %v", err)}, nil
+	if err := ensureRuntimeImage(runCtx); err != nil {
+		return Result{Kind: Refused, Message: err.Error()}, nil
 	}
-	defer cleanupAgent()
 
 	outputDir, verdictPath, cleanupOutput, err := prepareOutput()
 	if err != nil {
@@ -81,17 +81,20 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	if network == "" {
 		network = DefaultNetwork
 	}
+	budget := opts.Budget
+	if budget <= 0 {
+		budget = DefaultBudget
+	}
 
 	cmd := NewContainerCommand(runCtx, ContainerOptions{
-		InputDir:        prepared.Dir,
-		OutputDir:       outputDir,
-		AgentExecutable: agentExecutable,
-		AppURL:          opts.AppURL,
-		Model:           opts.Model,
-		APIBaseURL:      opts.APIBaseURL,
-		Network:         network,
-		Timeout:         timeout,
-		User:            runtimeUser,
+		InputDir:  prepared.Dir,
+		OutputDir: outputDir,
+		AppURL:    opts.AppURL,
+		Model:     opts.Model,
+		Network:   network,
+		Timeout:   timeout,
+		Budget:    budget,
+		User:      runtimeUser,
 	})
 	defer cmd.Cleanup()
 	cmd.Stdout = opts.Stdout
@@ -108,20 +111,24 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 	data, err := os.ReadFile(verdictPath)
 	if err != nil {
-		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent completed without a verdict: %v", err)}, nil
+		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent completed without a verdict; userns-remap may be unsupported on this host (see inspector#32): %v", err)}, nil
 	}
 	var result Result
 	if err := jsonUnmarshalStrict(data, &result); err != nil {
 		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent wrote an invalid verdict: %v", err)}, nil
 	}
-	checked, err := Classify(result.Verdict, prepared.TestChanges)
-	if err != nil {
-		return Result{Kind: Refused, Message: fmt.Sprintf("examiner agent wrote an invalid verdict: %v", err)}, nil
+	return result, nil
+}
+
+func ensureRuntimeImage(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", RuntimeImage)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("checking examiner runtime image: %w", ctx.Err())
+		}
+		return fmt.Errorf("examiner runtime image %q is not available; build it locally with internal/examiner/runtime/build.sh before examining (the command never builds or pulls at examination time): %s", RuntimeImage, strings.TrimSpace(string(output)))
 	}
-	if checked.Kind != result.Kind {
-		return Result{Kind: Refused, Message: "examiner agent verdict did not match its per-outcome results"}, nil
-	}
-	return checked, nil
+	return nil
 }
 
 func prepareOutput() (string, string, func(), error) {
@@ -129,7 +136,7 @@ func prepareOutput() (string, string, func(), error) {
 	if err != nil {
 		return "", "", nil, fmt.Errorf("creating examiner output directory: %w", err)
 	}
-	cleanup := func() { os.RemoveAll(dir) }
+	cleanup := func() { _ = os.RemoveAll(dir) }
 	path := filepath.Join(dir, VerdictName)
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -144,13 +151,14 @@ func prepareOutput() (string, string, func(), error) {
 }
 
 // ContainerOptions names the only filesystem objects mounted into the examiner
-// container. It intentionally has no application-source field.
+// container. It intentionally has no application-source or executable field.
 type ContainerOptions struct {
-	InputDir, OutputDir, AgentExecutable string
-	AppURL, Model, APIBaseURL            string
-	Network                              string
-	Timeout                              time.Duration
-	User                                 string
+	InputDir, OutputDir string
+	AppURL, Model       string
+	Network             string
+	Timeout             time.Duration
+	Budget              int
+	User                string
 }
 
 func jsonUnmarshalStrict(data []byte, target any) error {
@@ -168,19 +176,23 @@ func jsonUnmarshalStrict(data []byte, target any) error {
 	return nil
 }
 
-// NewContainerCommand builds the sealed Docker invocation. The input directory
-// is read-only, the output directory is the sole writable host mount, and the
-// bundled Linux examiner agent is the only program copied in.
+// NewContainerCommand builds the sealed Docker invocation. The locally-built
+// trusted image contains the agent. Inputs and output are the sole host mounts.
 func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.Cmd {
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
+	}
+	budget := opts.Budget
+	if budget <= 0 {
+		budget = DefaultBudget
 	}
 	user := opts.User
 	if user == "" {
 		user = containerHostUser()
 	}
 	args := []string{
+		"--pull", "never",
 		"--read-only",
 		"--userns", "host",
 		"--user", user,
@@ -189,20 +201,71 @@ func NewContainerCommand(ctx context.Context, opts ContainerOptions) *container.
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
 		"--mount", "type=bind,src=" + opts.InputDir + ",dst=/examiner/input,readonly",
 		"--mount", "type=bind,src=" + opts.OutputDir + ",dst=/examiner/output",
-		"--mount", "type=bind,src=" + opts.AgentExecutable + ",dst=/examiner/agent,readonly",
 		"--workdir", "/examiner",
 		"--network", opts.Network,
 		"--env", AnthropicAPIKeyEnvVar,
-		"--entrypoint", "/examiner/agent",
+		"--entrypoint", "/usr/local/bin/examiner-agent",
 		RuntimeImage,
 		"--input-dir", "/examiner/input",
 		"--output-dir", "/examiner/output",
 		"--app-url", opts.AppURL,
 		"--model", opts.Model,
 		"--timeout", timeout.String(),
-	}
-	if opts.APIBaseURL != "" {
-		args = append(args, "--api-base-url", opts.APIBaseURL)
+		"--budget", fmt.Sprintf("%d", budget),
 	}
 	return container.NewCommand(ctx, "inspector-examiner-", args...)
+}
+
+func localDockerRuntimeUser(ctx context.Context) (string, error) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return "", container.ErrNotInstalled
+	}
+	endpoint, err := dockerOutput(ctx, "reading Docker endpoint", "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}")
+	if err != nil {
+		return "", err
+	}
+	var address string
+	if err := json.Unmarshal(bytes.TrimSpace(endpoint), &address); err != nil {
+		return "", fmt.Errorf("reading Docker endpoint: invalid response: %w", err)
+	}
+	if !strings.HasPrefix(address, "unix://") && !strings.HasPrefix(address, "npipe://") {
+		return "", fmt.Errorf("remote Docker endpoint %q cannot safely use host bind mounts", address)
+	}
+	if err := container.EnsureAvailableContext(ctx); err != nil {
+		return "", err
+	}
+	output, err := dockerOutput(ctx, "reading Docker security options", "info", "--format", "{{json .SecurityOptions}}")
+	if err != nil {
+		return "", err
+	}
+	var securityOptions []string
+	if err := json.Unmarshal(bytes.TrimSpace(output), &securityOptions); err != nil {
+		return "", fmt.Errorf("reading Docker security options: invalid response: %w", err)
+	}
+	for _, option := range securityOptions {
+		for _, field := range strings.Split(option, ",") {
+			if field == "rootless" || field == "name=rootless" {
+				return "0:0", nil
+			}
+		}
+	}
+	return containerHostUser(), nil
+}
+
+func dockerOutput(ctx context.Context, operation string, args ...string) ([]byte, error) {
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err == nil {
+		return output, nil
+	}
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("%s: %w", operation, ctx.Err())
+	}
+	detail := strings.TrimSpace(stderr.String())
+	if detail == "" {
+		detail = err.Error()
+	}
+	return nil, fmt.Errorf("%s: %s", operation, detail)
 }

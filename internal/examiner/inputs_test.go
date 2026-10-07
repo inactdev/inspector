@@ -7,22 +7,13 @@ import (
 	"testing"
 )
 
-func TestPrepareInputs_CopiesOnlyTheThreeAllowedInputs(t *testing.T) {
+func TestPrepareInputs_CopiesOnlyThePermittedInputs(t *testing.T) {
 	dir := t.TempDir()
-	request := filepath.Join(dir, "request.md")
-	guidebook := filepath.Join(dir, "guidebook.md")
-	testChanges := filepath.Join(dir, "changes.json")
-	for path, content := range map[string]string{
-		request:     "Add capture.",
-		guidebook:   "POST /inklings creates a capture.",
-		testChanges: `{"baseCommit":"abc123","files":[]}`,
-	} {
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatalf("writing %s: %v", path, err)
-		}
-	}
-
-	prepared, err := PrepareInputs(Inputs{RequestPath: request, GuidebookPath: guidebook, TestChangesPath: testChanges})
+	paths := writeInputFixture(t, dir)
+	prepared, err := PrepareInputs(Inputs{
+		RequestPath: paths[InputRequestName], FeatureMapPath: paths[InputFeatureMapName], AlwaysTruePath: paths[InputAlwaysTrueName],
+		ChangedFilesPath: paths[InputChangedFilesName], BaseTestsPath: paths[InputBaseTestsName],
+	})
 	if err != nil {
 		t.Fatalf("PrepareInputs() error = %v", err)
 	}
@@ -31,10 +22,10 @@ func TestPrepareInputs_CopiesOnlyTheThreeAllowedInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir() error = %v", err)
 	}
-	if len(entries) != 3 {
-		t.Fatalf("input directory has %d entries, want exactly the three permitted inputs", len(entries))
+	if len(entries) != 5 {
+		t.Fatalf("input directory has %d entries, want exactly the permitted inputs", len(entries))
 	}
-	want := map[string]bool{InputRequestName: true, InputGuidebookName: true, InputTestChangesName: true}
+	want := map[string]bool{InputRequestName: true, InputFeatureMapName: true, InputAlwaysTrueName: true, InputChangedFilesName: true, InputBaseTestsName: true}
 	for _, entry := range entries {
 		if !want[entry.Name()] {
 			t.Fatalf("input directory unexpectedly contains %q", entry.Name())
@@ -45,83 +36,102 @@ func TestPrepareInputs_CopiesOnlyTheThreeAllowedInputs(t *testing.T) {
 	}
 }
 
-func TestParseTestChanges_RejectsApplicationSource(t *testing.T) {
-	_, err := ParseTestChanges([]byte(`{
+func TestParseChangedFiles_AllowsSourceNamesButNoSourceContent(t *testing.T) {
+	list, err := ParseChangedFiles([]byte(`{
 		"baseCommit":"abc123",
-		"files":[{"path":"backend/server.go","change":"modified","before":"old","after":"new"}]
+		"files":[{"path":"backend/server.go","change":"modified"}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParseChangedFiles() error = %v", err)
+	}
+	if list.Files[0].Path != "backend/server.go" {
+		t.Fatalf("list = %#v, want source filename only", list)
+	}
+	_, err = ParseChangedFiles([]byte(`{
+		"baseCommit":"abc123",
+		"files":[{"path":"backend/server.go","change":"modified","after":"source is forbidden"}]
 	}`))
 	if err == nil {
-		t.Fatal("ParseTestChanges() accepted application source in the test-change exception")
+		t.Fatal("ParseChangedFiles() accepted worker content")
 	}
 }
 
-func TestParseTestChanges_RequiresFilesArray(t *testing.T) {
+func TestParseChangedFiles_RequiresExplicitFilesArray(t *testing.T) {
 	for name, input := range map[string]string{
 		"missing": `{"baseCommit":"abc123"}`,
 		"null":    `{"baseCommit":"abc123","files":null}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := ParseTestChanges([]byte(input)); err == nil {
-				t.Fatal("ParseTestChanges() accepted a missing test-change list")
+			if _, err := ParseChangedFiles([]byte(input)); err == nil {
+				t.Fatal("ParseChangedFiles() accepted a missing changed-file list")
 			}
 		})
 	}
-	if _, err := ParseTestChanges([]byte(`{"baseCommit":"abc123","files":[]}`)); err != nil {
-		t.Fatalf("ParseTestChanges() rejected an explicitly empty test-change list: %v", err)
+	if _, err := ParseChangedFiles([]byte(`{"baseCommit":"abc123","files":[]}`)); err != nil {
+		t.Fatalf("ParseChangedFiles() rejected an explicitly empty changed-file list: %v", err)
 	}
 }
 
-func TestParseTestChanges_RejectsUnrecognizedChannels(t *testing.T) {
-	_, err := ParseTestChanges([]byte(`{
-		"baseCommit":"abc123",
-		"files":[],
-		"implementationDiff":"not allowed"
-	}`))
+func TestParseBaseTests_AcceptsOnlyChangedPreTaskTests(t *testing.T) {
+	changed, err := ParseChangedFiles([]byte(`{"baseCommit":"abc123","files":[{"path":"capture_test.go","change":"modified"}]}`))
+	if err != nil {
+		t.Fatalf("ParseChangedFiles() error = %v", err)
+	}
+	base, err := ParseBaseTests([]byte(`{"baseCommit":"abc123","tests":[{"path":"capture_test.go","content":"func TestCapture(t *testing.T) {}"}]}`), changed)
+	if err != nil {
+		t.Fatalf("ParseBaseTests() error = %v", err)
+	}
+	if len(base.Tests) != 1 {
+		t.Fatalf("base tests = %#v, want one test", base)
+	}
+	_, err = ParseBaseTests([]byte(`{"baseCommit":"abc123","tests":[{"path":"server_test.go","content":"not changed"}]}`), changed)
 	if err == nil {
-		t.Fatal("ParseTestChanges() accepted an implementation-diff field")
+		t.Fatal("ParseBaseTests() accepted a test not named by changed files")
 	}
 }
 
-func TestParseTestChanges_RejectsDuplicateSourceChannel(t *testing.T) {
-	_, err := ParseTestChanges([]byte(`{
-		"baseCommit":"abc123",
-		"files":[{"path":"backend/server.go","change":"modified","before":"old","after":"new"}],
-		"files":[]
-	}`))
-	if err == nil {
-		t.Fatal("ParseTestChanges() accepted a duplicate field hiding application source")
-	}
-}
-
-func TestPrepareInputs_WritesCanonicalTestChanges(t *testing.T) {
+func TestPrepareInputs_CanonicalizesWorkerLists(t *testing.T) {
 	dir := t.TempDir()
-	request := filepath.Join(dir, "request.md")
-	guidebook := filepath.Join(dir, "guidebook.md")
-	testChanges := filepath.Join(dir, "changes.json")
-	for path, content := range map[string]string{
-		request:     "Add capture.",
-		guidebook:   "POST /inklings creates a capture.",
-		testChanges: "{\n  \"files\": [],\n  \"baseCommit\": \"abc123\"\n}\n",
-	} {
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatalf("writing %s: %v", path, err)
-		}
+	paths := writeInputFixture(t, dir)
+	if err := os.WriteFile(paths[InputChangedFilesName], []byte("{\n  \"files\": [],\n  \"baseCommit\": \"abc123\"\n}\n"), 0o600); err != nil {
+		t.Fatalf("writing changed files: %v", err)
 	}
-
-	prepared, err := PrepareInputs(Inputs{RequestPath: request, GuidebookPath: guidebook, TestChangesPath: testChanges})
+	prepared, err := PrepareInputs(Inputs{
+		RequestPath: paths[InputRequestName], FeatureMapPath: paths[InputFeatureMapName], AlwaysTruePath: paths[InputAlwaysTrueName],
+		ChangedFilesPath: paths[InputChangedFilesName], BaseTestsPath: paths[InputBaseTestsName],
+	})
 	if err != nil {
 		t.Fatalf("PrepareInputs() error = %v", err)
 	}
 	defer prepared.Cleanup()
-	data, err := os.ReadFile(filepath.Join(prepared.Dir, InputTestChangesName))
+	data, err := os.ReadFile(filepath.Join(prepared.Dir, InputChangedFilesName))
 	if err != nil {
-		t.Fatalf("reading prepared test changes: %v", err)
+		t.Fatalf("reading prepared changed files: %v", err)
 	}
-	want, err := json.Marshal(prepared.TestChanges)
+	want, err := json.Marshal(prepared.ChangedFiles)
 	if err != nil {
-		t.Fatalf("marshaling parsed test changes: %v", err)
+		t.Fatalf("marshaling parsed changed files: %v", err)
 	}
 	if string(data) != string(want) {
-		t.Fatalf("prepared test changes = %q, want canonical validated JSON %q", data, want)
+		t.Fatalf("prepared changed files = %q, want canonical validated JSON %q", data, want)
 	}
+}
+
+func writeInputFixture(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	paths := map[string]string{}
+	for name, content := range map[string]string{
+		InputRequestName:      "Add capture.",
+		InputFeatureMapName:   "POST /inklings creates a capture.",
+		InputAlwaysTrueName:   "Existing captures remain readable.",
+		InputChangedFilesName: `{"baseCommit":"abc123","files":[]}`,
+		InputBaseTestsName:    `{"baseCommit":"abc123","tests":[]}`,
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+		paths[name] = path
+	}
+	return paths
 }

@@ -1,3 +1,3 @@
-This directory contains the hand-written Inkwell guidebook used by Inspector's first examiner run.
+This directory contains the hand-written Inkwell feature map and always-true list used by Inspector's first examiner run.
 
-The guidebook is an operating document for the sealed examiner, not application source or a generated artifact. Inspector issue #22 will generate confirmed guidebooks for arbitrary projects; this committed example establishes the input shape before that producer exists.
+They are operating documents for the sealed examiner, not application source or generated artifacts. Inspector issue #22 will generate confirmed feature maps for arbitrary projects, and #24 will produce always-true lists; these committed examples establish both input shapes first.
