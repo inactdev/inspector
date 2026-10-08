@@ -423,6 +423,13 @@ must require `examiner` alongside `gate`; the inspector-gate setup below owns th
 repository-setting instructions. An owner can use GitHub's visible admin
 override when that is the right human decision.
 
+This repository temporarily protects `*_test.go` through `.inspector.json` under
+[fabrica#96](https://github.com/inactdev/fabrica/issues/96). A pull request that
+adds or changes required Go tests therefore remains intentionally red at `gate`
+until the owner reviews it and uses that override. Do not remove or rename tests,
+weaken the protected-path policy, or create a status merely to make such a change
+green.
+
 ## inspector-gate
 
 `.github/workflows/inspector-gate.yml` is the cloud half (SPEC.md sections 2, 4,
