@@ -341,8 +341,8 @@ Linux, macOS, or Windows host without mounting a caller-supplied executable.
 The image is intentionally general-purpose so a future browser driver can live
 there too.
 
-The caller starts the app outside the examiner, then provides the four inputs
-explicitly:
+The caller starts the app outside the examiner, then provides the permitted
+input files explicitly:
 
 ```
 ANTHROPIC_API_KEY=... GITHUB_TOKEN=... inspector examine \
@@ -410,12 +410,18 @@ permanent regression lines; Inspector never edits the project.
 
 The examiner posts its own status under the stable context `examiner`:
 `success` only when every capability is confirmed and the examination completed,
-`failure` when it found a bug, and `error` when nothing was found wrong but the
-examination was incomplete. When both a bug and incompleteness are present it
-posts `failure` and names both facts. Both blocking states are distinct on the
-pull request page. Require `examiner` alongside `gate`: **Settings -> Branches
--> main -> Require status checks -> add `gate` and `examiner`**. An owner can
-use GitHub's visible admin override when that is the right human decision.
+`failure` when it found a bug, and `error` for an otherwise incomplete or
+explicitly refused examination. When both a bug and incompleteness are present it
+posts `failure` and names both facts. A complete success exits `0`, a found bug
+exits `1`, and an incomplete or refused examination exits `2`. A missing
+`--owner`, `--repo`, or `--commit`, or a malformed `--commit`, exits `2` before
+posting because there is no valid status destination; a status-post failure also
+exits `2`.
+
+Both blocking states are distinct on the pull request page. Branch protection
+must require `examiner` alongside `gate`; the inspector-gate setup below owns the
+repository-setting instructions. An owner can use GitHub's visible admin
+override when that is the right human decision.
 
 ## inspector-gate
 

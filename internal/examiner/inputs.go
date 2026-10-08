@@ -14,8 +14,9 @@ import (
 
 const maxInputBytes = 1 << 20
 
-// Inputs names the examiner's four documents plus the pre-task test versions
-// Fabrica supplies for changed tests. All worker output is names-only.
+// Inputs names the examiner's permitted input documents, including the pre-task
+// test versions Fabrica supplies. The worker-derived changed-file input is
+// names-only.
 type Inputs struct {
 	RequestPath      string
 	FeatureMapPath   string
