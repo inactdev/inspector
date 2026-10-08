@@ -59,9 +59,17 @@ func EnsureAvailableContext(ctx context.Context) error {
 
 // Run describes one containerized check command.
 type Run struct {
-	// RepoRoot is bind-mounted read-write at WorkspaceDir. Nothing else
-	// on the host is reachable from inside the container.
+	// RepoRoot is bind-mounted read-write at WorkspaceDir. Nothing on
+	// the host is reachable from inside the container except this and
+	// ReadOnlyMounts.
 	RepoRoot string
+	// ReadOnlyMounts are the few host paths that have to be readable
+	// alongside the repo for the check command to work at all, each at
+	// a fixed absolute path inside the container and none of them
+	// writable. In practice this is what ResolveGitMounts returns: a
+	// linked worktree's shared git directory, which lives outside
+	// RepoRoot, plus a sanitized stand-in for its config.
+	ReadOnlyMounts []Mount
 	// Command is run with `sh -c` inside the container, from WorkspaceDir.
 	Command string
 	// Image is the project's own container image, declared in
@@ -113,6 +121,26 @@ func New(ctx context.Context, r Run) *Cmd {
 		"-v", r.RepoRoot + ":" + WorkspaceDir,
 		"-w", WorkspaceDir,
 	}
+	for _, mount := range r.ReadOnlyMounts {
+		args = append(args, "-v", mount.Source+":"+mount.Target+":ro")
+	}
+	// Everything mounted here is owned by whoever ran inspector, while
+	// the image picks its own user - so on Linux, where bind-mounted
+	// files keep their host ownership, git would refuse to look at the
+	// repository at all ("detected dubious ownership", verified). The
+	// ownership check exists to stop you running a stranger's
+	// repository's config and hooks as yourself; inside this container
+	// the repository and the command inspecting it are the same
+	// project's code, and the container is the trust boundary, so the
+	// check has nothing left to protect. This is git's own documented
+	// escape hatch and it has to be passed as environment - git honors
+	// safe.directory only from protected configuration, never from a
+	// repository's own config file.
+	args = append(args,
+		"-e", "GIT_CONFIG_COUNT=1",
+		"-e", "GIT_CONFIG_KEY_0=safe.directory",
+		"-e", "GIT_CONFIG_VALUE_0=*",
+	)
 	if !r.Network {
 		args = append(args, "--network", "none")
 	}

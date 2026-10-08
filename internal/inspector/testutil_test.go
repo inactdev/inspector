@@ -56,3 +56,16 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// newTestWorktree creates a repo with the given files committed, adds a
+// linked worktree of it, and returns that worktree - the repo root
+// inspector is actually handed in a factory where every worker works in
+// one of these, and whose own .git is a pointer file naming a directory
+// outside it (issue #31).
+func newTestWorktree(t *testing.T, files map[string]string) string {
+	t.Helper()
+	project := newTestRepo(t, files)
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	runGitT(t, project, "worktree", "add", "-q", "--detach", worktree)
+	return worktree
+}

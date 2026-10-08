@@ -79,9 +79,34 @@ never guesses at either:
 `image` has to have the project's own toolchain in it, the same way `check`
 has to be the project's own command - inspector ships no images and builds
 none for you. The check command runs with that image, bind-mounted to the
-repo (and nothing else on the host) at `/workspace`, its own working
-directory. If the image is missing or unusable, inspector refuses the same way
-it refuses a missing check command, rather than quietly doing nothing.
+repo at `/workspace`, its own working directory. If the image is missing or
+unusable, inspector refuses the same way it refuses a missing check command,
+rather than quietly doing nothing.
+
+One other thing is reachable from inside that container, and only when the
+repo needs it: its own git directory. An ordinary clone keeps that inside the
+repo, so nothing extra is mounted. A **linked worktree** (`git worktree add`)
+does not - its `.git` is a one-line pointer file naming the project's shared
+git directory by absolute host path, outside the repo entirely, so a check
+command that uses git would find no repository at all in there and go red for
+a reason that has nothing to do with the code. For that case inspector mounts
+the shared git directory **read-only, at the same path the pointer names**, so
+git resolves it, `git status`, `git log` and `git diff` work against the
+project's real history, and a `git commit` inside the container fails on a
+read-only file system.
+
+The one file in a git directory that can carry a credential is its `config` -
+a remote URL with an embedded token, a credential helper, an authorization
+header, a URL rewrite, an `include` pulling any of those in - and a check
+command is arbitrary project code. So the real `config` is never visible
+inside the container: inspector shadow-mounts a throwaway copy carrying
+forward only the `[core]` section and individually allowlisted, structural
+`[extensions]` keys. Inside the container, `git config --get
+remote.origin.url` returns nothing. An `[extensions]` key the allowlist does
+not cover is refused by name rather than dropped (which would misread the
+repository) or forwarded (a future key's value may not be credential-free),
+and so is a worktree whose git directory cannot be reached at all: a refusal
+and exit `2`, never a red.
 
 The container gets no network access by default. A check command that needs
 it - installing dependencies is the common case - has to opt in:

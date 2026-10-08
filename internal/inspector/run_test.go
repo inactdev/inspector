@@ -350,3 +350,52 @@ func TestRun_RecordsClaimInReport(t *testing.T) {
 		t.Fatalf("report should record the claim, got: %s", data)
 	}
 }
+
+func TestRun_GreenFromLinkedWorktreeWhoseCheckUsesGit(t *testing.T) {
+	// The defect in issue #31: from a linked worktree the container saw
+	// a .git pointer file naming a directory outside the mount, so every
+	// git call a check made failed and the run came back red for a
+	// reason that had nothing to do with the code.
+	requireDocker(t)
+	dir := newTestWorktree(t, map[string]string{
+		ConfigFileName: `{"check": "git log --oneline -1 && git status --porcelain", "image": "` + gitTestImage + `"}`,
+	})
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Green {
+		t.Fatalf("Outcome = %v, want Green - a check command that uses git must work from a linked worktree (message: %s)", result.Outcome, result.Message)
+	}
+}
+
+func TestRun_RefusesWhenTheGitDirCannotBeMadeAvailable(t *testing.T) {
+	// The minimum acceptable behavior issue #31 names for any case that
+	// cannot be supported: refuse by name, never report red on a check
+	// that failed only because the repository was unreachable. Here the
+	// shared config carries an [extensions] key the sanitizer will not
+	// vouch for, so the mount cannot be built - while the host's own git
+	// (which ignores unknown extensions at format version 0) works.
+	requireDocker(t)
+	dir := newTestWorktree(t, map[string]string{
+		ConfigFileName: `{"check": "true", "image": "alpine"}`,
+	})
+	runGitT(t, dir, "config", "extensions.inspectorTest", "1")
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused (message: %s)", result.Outcome, result.Message)
+	}
+	if !strings.Contains(result.Message, "linked git worktree and its git directory is outside the mount") {
+		t.Fatalf("the refusal has to name what it is, got: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "extensions.inspectorTest") {
+		t.Fatalf("the refusal has to name what it could not forward, got: %s", result.Message)
+	}
+}

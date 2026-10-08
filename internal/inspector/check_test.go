@@ -25,6 +25,11 @@ const testTimeout = 30 * time.Second
 // that.
 const testImage = "alpine"
 
+// gitTestImage is a small official library image carrying git and a
+// shell, for the few tests whose check command actually uses git -
+// testImage carries no git at all.
+const gitTestImage = "buildpack-deps:bookworm-scm"
+
 // requireDocker skips a test that genuinely needs a live container
 // runtime, rather than failing on a machine without one - the same
 // tolerance LoadConfig's own permission-bit test already extends to a
