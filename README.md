@@ -426,9 +426,12 @@ override when that is the right human decision.
 This repository temporarily protects `*_test.go` through `.inspector.json` under
 [fabrica#96](https://github.com/inactdev/fabrica/issues/96). A pull request that
 adds or changes required Go tests therefore remains intentionally red at `gate`
-until the owner reviews it and uses that override. Do not remove or rename tests,
-weaken the protected-path policy, or create a status merely to make such a change
-green.
+until the owner reviews it and uses that override. A delivery pipeline that
+publishes the branch without Inspector's stage, stamp, then publish sequence also
+leaves that commit without the required `inspector` status. Neither condition is
+a CI defect that a follow-up source change can make green. Do not remove or rename
+tests, weaken the protected-path policy, or create a status merely to make such a
+change green.
 
 ## inspector-gate
 
