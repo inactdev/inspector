@@ -1,10 +1,31 @@
 # inspector
 
-The shipping gate. It checks that finished work is actually finished, repairs what
-it can, and blocks the merge when it can't.
+The shipping gate. It checks that finished work is actually finished and blocks
+the merge when it cannot judge it.
 
 This is the design of record, not a build report - see the Status section of
 [README.md](README.md) for what exists today.
+
+## Current Client rulings
+
+The sections below preserve the original roadmap's reasoning. The following
+later rulings override every contrary statement in them:
+
+- Inspector never edits a judged project. It returns findings and proposed
+  regression lines to Fabrica's handback loop (fabrica#95).
+- The examiner judges the request, not an implementation or worker-authored
+  outcome list. It receives issue text, changed file names, a feature map, an
+  always-true list, and pre-task changed tests from Fabrica, then drives a
+  running app through a real driver. It derives scenarios from the request
+  itself and bounds attempts per task.
+- The examiner container never receives application source, an implementation
+  diff, or worker-written file content. A changed test name may lead it to a
+  pre-task test version, never the worker's version. It posts the separate
+  `examiner` status: `failure` means it found a bug; `error` means an otherwise
+  incomplete or explicitly refused examination.
+
+Issue #7 and README's Examiner section are the current operational design for
+that examiner. They replace the roadmap's earlier outcome-list and fixer designs.
 
 ---
 
@@ -42,32 +63,30 @@ you believe is finished, checked by something that has no stake in believing you
 
 ## 2. Two halves
 
-**inspector** runs on your machine. It does all the work: runs the project's
-checks, lints, reviews the change, checks the documentation against it, proves
-the claimed outcomes with its own end-to-end tests (section 6), repairs what it
-can, re-verifies, stages a green commit, records the result against that commit,
-then pushes its pull request branch, opens the pull request, watches CI, and
-fixes what CI complains about.
+**inspector** runs on your machine. It runs the project's checks and independently
+examines request-derived behavior against a running app. It records both
+judgments against the exact commit and reports findings without editing the
+judged project. For a green project check, it stages the commit, records the
+result, and only then pushes the pull request branch.
 
 **inspector-gate** runs on GitHub. It is small and dumb on purpose: does this
 exact commit carry a green inspector result, and were any protected files
-touched. Nothing else.
+touched. Nothing else. Branch protection requires the separate `examiner` status
+alongside the gate rather than folding it into the gate's decision.
 
-The split follows the AI. Locally you are already signed in, so checking and
-fixing cost nothing extra. In the cloud, an AI would need a copy of that sign-in
-stored in repository secrets, and a leaked sign-in is the whole account rather
-than a capped amount of money. So the cloud half has no AI in it at all, which
-also removes the prompt-injection surface entirely - hostile repository content
-has no model to steer.
+The split follows the AI. The local half can seal its runtime and allowed inputs
+before giving the model credentials or app access. A cloud AI would require
+those credentials in repository secrets. Keeping the cloud half free of AI
+avoids that exposure and removes the prompt-injection surface entirely - hostile
+repository content has no model to steer.
 
 ## 3. When it runs
 
 **On a claim that the work is finished. Never on push.**
 
-This is not about efficiency. inspector has a fixer, and a fixer let loose on
-half-written work will confidently repair tests that are failing because the
-feature is not written yet. It would patch code mid-change into something nobody
-asked for.
+This is not about efficiency. A judgment on half-written work creates findings
+for behavior the builder has not claimed is ready and says nothing about the
+finished request.
 
 **Fabrica starts inspector, and nothing else does.** Not a watcher, not a push
 hook, not a supervisor telling a worker to run it - the builder hands the work
@@ -83,61 +102,46 @@ calls it.
        fabrica runs the project's check command -> green
        fabrica now believes the feature is finished
 
-    2. fabrica explicitly names and hands the branch to inspector
-                                                       <- the handoff IS the trigger
+    2. fabrica starts the app, then explicitly hands finished work to inspector
+                                                          <- the handoff IS the trigger
 
-    3. inspector runs everything - checks, lint, review, docs, outcome tests
-       fixes what it may fix, without asking
-       stages a green commit, records its result, then pushes its branch
-       opens the pull request, watches CI, and fixes what CI complains about
+    3. inspector runs the project check and independent examiner
+       records each judgment and every finding without editing the project
+       publishes only through each judgment's defined status path
 
     4a. green -> the delivery reaches the Client -> verdict -> the Client merges
-    4b. red -> every finding it may not touch travels with the delivery
+    4b. blocking -> every finding and incomplete result travels with the delivery
         -> the Client rules on all of them at once
         -> verdict fix -> same warm worker, same branch -> back to step 2
 
 Section 5 owns that loop: inspector never stops to ask, and the verdict is the
 only decision point.
 
-For a repo with no Fabrica, step 1 is you, and step 2 is you running the command.
+For a repo with no Fabrica, step 1 is you; when examination applies, you also
+start the app before running the command.
 
-**Where the line falls between inspector and a verdict:** inspector handles work
-that is mechanically wrong - will not compile, a lint rule, a plainly broken
-assertion. A verdict handles work that is *wrong* - it built the wrong thing.
-
-The test: **if fixing it requires knowing what was asked for, it is a verdict. If
-it does not, inspector can do it.** A type error needs no knowledge of the
-request. A `--json` flag emitting the wrong shape does. Formatting and lint sit
-squarely on inspector's side: nothing about them needs to know what was asked
-for, and the project cannot be relied on to have run them - across many
-repositories some will, some will not, and inspector can guarantee it once.
+Inspector never repairs the judged project. Mechanical failures and
+request-dependent findings alike return through Fabrica's handback loop; the
+Client's verdict remains the only decision point.
 
 ## 4. Who owns what
 
-**inspector owns everything from "the code is written" to "it is green in CI."**
-Running the checks, linting, reviewing the change, checking the documentation
-against it, proving the claimed outcomes, repairing what is mechanically broken,
-staging a green commit, recording its result, pushing the pull request branch,
-opening the pull request, watching CI, fixing what CI complains about, and
-blessing the final commit.
+**Inspector owns independent judgment and the publication steps it performs.**
+It runs the project check, drives request-derived app scenarios, preserves the
+results against the exact commit, and reports what did not hold.
 
-**Fabrica owns whether it is the right thing.** Before, by building it. After,
-through the Client's verdict and the fix loop back into the same warm worker.
+**Fabrica owns authorship and repair.** It builds the request and applies every
+fix after the Client's verdict. Inspector never crosses that boundary, even for
+a mechanical edit or a proposed regression.
 
 That is the honest form of the separation this document opens with:
 
-> **inspector never judges whether the right thing was built, and fabrica never
-> judges whether what it built works.**
+> **Inspector judges Fabrica's work independently; Fabrica never grades its own
+> work, and Inspector never rewrites what it judges.**
 
-Neither one grades itself on the question that decides its own work.
-
-It also settles who reacts to a red build. Whoever repairs must be able to push,
-so having fabrica push and inspector repair locally would mean handing patches
-back and forth. Inspector owns green publication because inspector repairs. In
-v1, a red local result does not create a GitHub branch or status: its local
-report returns to Fabrica through a verdict instead. This is a deliberate
-publication policy that the Client may overrule, not a claim that red is green
-or a refusal.
+Neither one grades itself on the question that decides its own work. A red
+project check remains local by v1 policy; the examiner posts its separate
+blocking status so incompleteness and found bugs stay visible.
 
 Running the project's tests in more than one place is not duplication. Fabrica
 runs them to know when it is done, the way anyone runs tests while writing code.
@@ -146,22 +150,17 @@ command, different purpose.
 
 ### Documentation
 
-inspector reads the change and asks whether the project's documentation still
-describes reality, then fixes what has fallen out of step.
-
-It belongs on inspector's side by the same test as everything else here: asking
-whether a document still matches the code needs no knowledge of what was asked
-for. The code is right there. A README promising behavior the code no longer has
-is wrong on its face, and correcting it is repair, not authorship.
+Inspector reads the change and asks whether the project's documentation still
+describes reality, then reports what has fallen out of step. Fabrica applies the
+correction through the same handback loop as every other finding.
 
 Two limits keep it from wandering:
 
-- **Documentation the change made untrue is inspector's to fix.** Documentation
+- **Documentation the change made untrue is Inspector's to report.** Documentation
   the project never had is not - deciding a project needs a guide it has never
   had is a judgment about the product, and that belongs to the Client.
-- **Where a claimed outcome needs describing, the outcome list says what was
-  meant** (section 6). inspector writes the description; it does not invent the
-  intent behind it.
+- **The request says what was meant.** Inspector does not infer intent from a
+  worker's transcript or implementation.
 
 This is worth having for the reason that is easy to underrate: nothing else in
 the pipeline ever notices documentation rot. Tests do not fail because a README
@@ -175,9 +174,9 @@ it, the way a colleague would.
 
 This is the only part that finds what nobody thought to look for. Every other
 check here answers a question someone wrote down first: a test asserts what its
-author imagined, the outcome list covers what was claimed, lint enforces rules
-already agreed. A problem in a path nobody made a claim about is invisible to all
-of them.
+author imagined, the examiner covers request-derived capabilities, and lint
+enforces rules already agreed. A problem in a path nobody made a claim about is
+invisible to all of them.
 
 Three real ones from a single day of Fabrica's own development, none of which
 failed any test:
@@ -199,18 +198,18 @@ That is what section 5 exists to prevent.
 
 **inspector never stops to ask. It reports.**
 
-It runs everything to the end, fixes what it may fix without asking, and turns
-whatever is left into a red with the reasons attached. It does not pause, does
-not queue a question, does not wait. A finding it may not act on is not a
-question - it is part of the result.
+It runs every judgment to the end and attaches the reasons to any blocking
+result. It does not pause, queue a question, wait, or edit the judged project. A
+finding is part of the result, not an intermediate interruption.
 
 **The Client's verdict is the one and only decision point.**
 
     fabrica builds it, hands over
 
-    inspector runs everything - checks, lint, review, docs, outcome tests
-      fixes what it may fix, silently
-      a red result stays local, with its report and reasons
+    inspector checks and examines it without editing the project
+      every finding is retained
+      a red project check stays local
+      the examiner posts its separate blocking status
 
     Fabrica carries those reasons to the Client for a verdict:
       "fix - do the first two, the third is fine as it is"
@@ -230,9 +229,9 @@ no-mistakes blocks mid-run, so getting one pull request finished cost the Client
 roughly fifteen separate interruptions across a single afternoon. One red
 carrying every finding costs him one.
 
-The honest trade: when inspector finishes red, there is no published pull
-request branch for that work. The local report carries the list instead. That
-is the price of not being interrupted, and it is worth paying.
+The honest trade: a red project check does not publish the pull request branch.
+Its local report carries the reasons instead. The examiner's separate status is
+published because found bugs and incomplete examination must remain visible.
 
 ### How many times the Client may say fix
 
@@ -255,57 +254,46 @@ hits. Tracked for Fabrica at github.com/inactdev/fabrica/issues/65.
 
 ## 6. Independent verification
 
-The builder must not write the exam. The Client's ruling, 2026-08-07:
+The builder must not write the exam. The project's own checks still run and
+still gate, but they are builder-authored evidence. Passing them proves only
+that the work matches the builder's tests.
 
-> "I want true separation between the thing building and the thing checking. If
-> fabrica creates the checks, then inspector running them won't make any
-> difference. Each fabrica PR should ship with a list of expected outcomes
-> (specs). Inspector should take those, interpret them however he sees fit, and
-> run end to end tests based on those specs to confirm the functionality that
-> fabrica claims is there actually exists."
+The independent examiner derives observable capabilities from the request
+itself. It receives a feature map and always-true list for project context,
+names-only changed files as signals, and task-starting versions of changed tests.
+It receives no worker-authored outcome list, implementation diff, application
+source, or worker-written file content. A changed pre-task test contributes the
+scenario it protected; a new test with no prior version contributes nothing.
 
-So verification has two layers, and only one of them counts as independent:
+The examiner spends a bounded attempt budget on request-derived scenarios first,
+then nearby feature-map and invariant scenarios. The model proposes capabilities,
+HTTP attempts, and evidence assessments. Inspector records every attempt and
+delivered response per capability and derives each final result itself. No
+capability can be confirmed without successful recorded evidence.
 
-- **The project's own checks still run and still gate.** A red suite is a red
-  result. But they are the builder's tests - passing them proves the work
-  matches the builder's idea of correct, nothing more.
-- **The claimed outcomes get inspector's own tests.** The work ships with a
-  list of expected outcomes: plain statements of observable behavior ("running
-  `x --json` prints the report as JSON"), not implementation ("added a JSON
-  serializer"). inspector interprets that list independently and writes
-  end-to-end tests from its interpretation - driving the real thing: the real
-  app headlessly, the real CLI, the real endpoint. It never reuses the
-  builder's tests as proof of the builder's claims.
+The verdict preserves `confirmed`, `not_confirmed`, and
+`could_not_be_tested` per capability. It also preserves examination
+incompleteness separately, so a confirmed bug cannot hide untested work and
+untested work cannot hide a bug. Missing behavior includes a proposed regression
+line, never a project edit.
 
-The verdict is per-outcome - confirmed, not confirmed, or could not be tested -
-so a red says which claimed capability is missing, not just "something failed".
-Unless every testable outcome is confirmed, the result stays local and no green
-commit status is published.
-
-**This list is the statement of intent, not a second thing beside it.**
-no-mistakes takes an intent - a sentence saying what the work set out to achieve
-rather than a description of the diff - handed to it by whoever starts the run,
-precisely so it never has to guess from a worker's transcript. The outcome list
-is that same statement, made testable. Do not build both.
-
-For Fabrica, the outcome list rides with the delivery
-(github.com/inactdev/fabrica/issues/57), and an outcome Fabrica knows it did
-not deliver belongs in `gaps`, never quietly dropped from the list. For a repo
-with no Fabrica, a human hand-writes the same list.
-
-Interpretation needs the AI, so this lives entirely in the local half. Nothing
-about the cloud gate changes.
+The examiner posts a separate `examiner` status. A bug posts `failure`, including
+when the examination is also incomplete. An otherwise incomplete examination or
+refusal posts `error`. README's Examiner section owns the operational interface,
+input formats, containment boundary, and branch-protection setup.
 
 ## 7. How the gate knows
 
-inspector records its result as a **commit status** - a small record attached to
-one exact commit, posted through the API with a token. Not a comment, not a
-checklist. Text can be typed by anyone; a status cannot.
+The project check records its green result as an `inspector` **commit status** -
+a small record attached to one exact commit, posted through the API with a token.
+The independent examiner records its own `examiner` status. Neither is a comment
+or checklist. Text can be typed by anyone; a status cannot.
 
-For a green result, inspector first stages the commit on a non-branch remote
-ref, then posts its status, and only then moves an explicitly caller-named pull
-request branch. It never infers that destination from checkout, HEAD, tracking
-state, or another ambient source, and refuses the remote default branch even
+For a green project-check result, inspector first stages the commit on a
+non-branch remote ref, then posts its status, and only then moves an explicitly
+caller-named pull request branch. It never infers that destination from
+checkout, HEAD, tracking state, or another ambient source, and refuses the
+remote default branch even
 when named. This is a captain decision that may be overruled: ambient authority
 conflicts with the explicit handoff architecture, and a freshly pulled checkout
 normally points at the default branch. The gate's first run therefore sees the
@@ -336,8 +324,8 @@ posted. If the status request was written but its response was lost, inspector
 reports the third state **stamp sent, outcome unconfirmed**, distinct from both
 confirmed-posted and not-attempted and never presented as green. It identifies
 which later operations were not attempted. These incomplete green publications
-exit `2`; inspector does not compensate or pretend they are refusals. A refusal
-never attempts to push or publish.
+exit `2`; inspector does not compensate or pretend they are refusals. A
+project-check refusal never attempts to push or publish.
 
 - merging stays blocked until inspector has blessed the exact head commit
 - a later branch update without inspector's sequence goes red on its own,
@@ -353,11 +341,12 @@ halves must agree on this name, since inspector-gate reads it by exact match,
 and it is recorded here rather than in either half's code because it is the one
 thing both halves need to agree on independently.
 
-inspector reads its token from the `GITHUB_TOKEN` environment variable and
-posts only for a real green. In v1, red stays local by deliberate policy, and
-a refusal posts nothing; both read as failure by the rule above. Posting is not
-optional for green: a missing token, a failed staging push, or an API refusal
-fails loudly rather than letting a real local green pass silently unrecorded.
+The project-check path reads its token from the `GITHUB_TOKEN` environment
+variable and posts only for a real green. In v1, red stays local by deliberate
+policy, and a project-check refusal posts nothing; both read as failure by the
+rule above. Posting is not optional for green: a missing token, a failed staging
+push, or an API refusal fails loudly rather than letting a real local green pass
+silently unrecorded.
 
 **Honest limit: the token is not an identity boundary.** It cannot tell the
 Client from inspector from a worker. All it buys is that a green result cannot be
@@ -413,9 +402,8 @@ either.
   a personal project is easier to install and explain on someone else's machine.
 - **It ships on its own schedule.** Fabrica has not finished Phase 1. inspector
   needs to be usable now.
-- **Fabrica has no fixer.** The fixer is inspector's, named for inspector, living
-  here. Firstmate has no fixer either - a worker hands off and no-mistakes owns
-  everything after. Same shape.
+- **Fabrica repairs Inspector's findings.** Keeping the fixer with the builder
+  prevents Inspector from becoming both author and judge of the same work.
 
 inspector checking a new version of itself is fine; it is what every test suite
 does.
@@ -428,11 +416,6 @@ Auto-merge stays off deliberately. It fires the instant checks pass, which would
 let a green check close a task before the Client has ruled on it.
 
 ## 11. Deprioritized
-
-**An API-driven fixer.** v1 uses the signed-in CLI, which costs throttling rather
-than money when it runs away. A direct API adapter bills a card per token, so it
-waits until there is a reason to want it. Recorded as a low-priority issue, not a
-gap.
 
 **Anything that makes protected-file changes smoother.** They should be rare. If
 they stop being rare, revisit.
@@ -453,14 +436,13 @@ green; that is issue #9, deliberately deferred.
 **A repo with no check command: refuse.** Running unprotected looks identical to
 running protected until it matters, so the gap must be loud rather than silent.
 
-**inspector keeps a small local report per run.** The green commit status is
-tiny - it carries approval and little else, which is enough to gate a merge.
-A red result stays local, where the report holds the useful part: which claimed
-outcome did not hold, what the fixer tried, and what the failing output said.
-When Fabrica is in the loop, that report travels with the delivery. At the day
-job there is no delivery to carry it, and a bare red mark would mean "something
-failed, re-run it and watch".
+**inspector keeps a small local project-check report per run.** The green commit
+status is tiny - it carries approval and little else, which is enough to gate a
+merge. A red project-check result stays local, where the report holds the
+command, failing output, and verdict needed to act without rerunning it. The
+examiner instead emits its record-derived JSON verdict and posts its separate
+status.
 
-The report is notes, never authority. A green status on the commit, or its
-absence, remains the only result the gate reads and the only thing here that
-decides whether it permits a merge.
+Reports are notes, never authority. A green `inspector` status on the commit, or
+its absence, remains the only result inspector-gate reads. Branch protection
+requires the separate `examiner` status alongside that gate.

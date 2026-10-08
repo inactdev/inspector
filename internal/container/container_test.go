@@ -39,6 +39,26 @@ func TestEnsureAvailable_Live(t *testing.T) {
 	}
 }
 
+func TestEnsureAvailableContext_DeadlineStopsDockerProbe(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := EnsureAvailableContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("EnsureAvailableContext() = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("EnsureAvailableContext() returned after %s, want it bounded by the context", elapsed)
+	}
+}
+
 func TestNew_BuildsExpectedArgs(t *testing.T) {
 	// Pure argument construction - doesn't touch docker, so it runs
 	// without a runtime present.
@@ -100,9 +120,29 @@ func TestCmd_Started(t *testing.T) {
 func TestKillContainer_AlreadyGone(t *testing.T) {
 	requireDocker(t)
 
-	err := killContainer("inspector-container-test-does-not-exist")
+	err := killContainer(context.Background(), "inspector-container-test-does-not-exist")
 	if !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("killContainer(nonexistent) = %v, want os.ErrProcessDone", err)
+	}
+}
+
+func TestKillContainer_DeadlineStopsDockerKill(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := killContainer(ctx, "stalled")
+	if !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("killContainer() = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("killContainer() returned after %s, want it bounded by the context", elapsed)
 	}
 }
 
@@ -121,8 +161,9 @@ func TestKillContainer_NotRunningIsARealError(t *testing.T) {
 
 	cmd := New(context.Background(), Run{RepoRoot: t.TempDir(), Command: "true", Image: "alpine"})
 	defer cmd.Cleanup()
+	cmd.name = name
 
-	err := cmd.kill(name)
+	err := cmd.kill()
 	if err == nil || errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("kill(created-but-never-started) = %v, want a real error", err)
 	}
@@ -175,6 +216,59 @@ func TestNew_BadImageIsNotStarted(t *testing.T) {
 	}
 	if cmd.Started() {
 		t.Fatal("Started() = true for an image docker never managed to run - the cidfile should never have been written")
+	}
+}
+
+func TestNewCommand_TimeoutCleansUpContainerCreatedAfterInitialKill(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	marker := filepath.Join(dir, "container-exists")
+	logPath := filepath.Join(dir, "docker.log")
+	script := `#!/bin/sh
+case "$1" in
+run)
+  /bin/sleep 0.15
+  : > "$MARKER"
+  ;;
+kill)
+  printf 'kill\n' >> "$LOG_PATH"
+  if [ -e "$MARKER" ]; then
+    /bin/rm -f "$MARKER"
+    exit 0
+  fi
+  echo 'No such container' >&2
+  exit 1
+  ;;
+rm)
+  printf 'rm\n' >> "$LOG_PATH"
+  /bin/rm -f "$MARKER"
+  ;;
+esac
+`
+	if err := os.WriteFile(docker, []byte(script), 0o700); err != nil {
+		t.Fatalf("writing fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("MARKER", marker)
+	t.Setenv("LOG_PATH", logPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	cmd := NewCommand(ctx, "test-", "image")
+	defer cmd.Cleanup()
+	_ = cmd.Run()
+	if err := cmd.KillError(); err != nil {
+		t.Fatalf("KillError() = %v, want cleanup after docker run exited", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("late-created container marker still exists: %v", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading fake docker log: %v", err)
+	}
+	if got := strings.Fields(string(logData)); len(got) != 2 || got[0] != "kill" || got[1] != "rm" {
+		t.Fatalf("docker cleanup calls = %q, want initial kill followed by confirmed removal", logData)
 	}
 }
 

@@ -43,6 +43,12 @@ var resolvePublicationTarget = inspector.ResolvePublicationTarget
 var validatePublicationPlatform = inspector.ValidatePublicationPlatform
 
 func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "examine":
+			return runExaminer(args[1:], stdout, stderr)
+		}
+	}
 	fs := flag.NewFlagSet("inspector", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repoPath := fs.String("repo", ".", "path to the repository to inspect")

@@ -2,8 +2,9 @@
 
 # inspector
 
-The shipping gate. It checks that finished work is actually finished, repairs what
-it can, and blocks the merge when it can't.
+The shipping gate. It checks that finished work is actually finished, returns
+findings without editing the judged project, and blocks the merge when it can't
+judge the work.
 
 Read [SPEC.md](SPEC.md) first - it explains why this exists, which is the part that
 matters. The short version: a tool that reports on its own work can tell you what it
@@ -13,14 +14,15 @@ project's own checks rather than anyone's description of them.
 
 It has two halves:
 
-- **inspector** runs on your machine. It runs the project's checks, repairs what it
-  can, re-verifies, records a green result against the exact commit it checked, and
-  only then publishes the explicitly named pull request branch.
+- **inspector** runs on your machine. It runs the project's checks, returns
+  findings without editing the judged project, records a green result against the
+  exact commit it checked, and only then publishes the explicitly named pull request
+  branch.
 - **inspector-gate** runs on GitHub. Small and dumb on purpose: does this commit
   carry a green inspector result, and were any protected files touched.
 
-It runs when something claims to be finished, never on push - a fixer let loose on
-half-written work repairs code that was mid-change.
+It runs when something claims to be finished, never on push - a judgment on
+half-written work would be premature.
 
 It never merges. Green means ready for a verdict, not merged.
 
@@ -312,6 +314,125 @@ What a reader should conclude:
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.
 
+## Examiner
+
+`inspector examine` is the independent outcome judge. It derives scenarios from
+the request, operates an already-running HTTP app, and never reads the judged
+application's implementation or worker-written test content.
+
+The first version drives HTTP backends. It does not drive native iOS screens, so
+an Inkwell examination covers its backend only. The hand-written first
+[Inkwell feature map](examples/inkwell/EXAMINER_GUIDEBOOK.md) and
+[always-true list](examples/inkwell/INKWELL_ALWAYS_TRUE.md) are worked examples.
+Issue #22 will generate confirmed feature maps for other projects, and #24 owns
+the always-true list producer.
+
+Build the trusted runtime once, before examining. This build is local; the
+examination command never builds or pulls an image while it has app access and
+an API key:
+
+```
+internal/examiner/runtime/build.sh
+```
+
+The runtime Dockerfile compiles the reviewed agent source with a pinned,
+multi-architecture Go builder into a digest-pinned Linux base. It works from a
+Linux, macOS, or Windows host without mounting a caller-supplied executable.
+The image is intentionally general-purpose so a future browser driver can live
+there too.
+
+The caller starts the app outside the examiner, then provides the permitted
+input files explicitly:
+
+```
+ANTHROPIC_API_KEY=... GITHUB_TOKEN=... inspector examine \
+  --request /path/to/request.md \
+  --feature-map /path/to/feature-map.md \
+  --always-true /path/to/always-true.md \
+  --changed-files /path/to/changed-files.json \
+  --base-tests /path/to/base-tests.json \
+  --app-url http://host.docker.internal:8080 \
+  --network bridge \
+  --budget 12 \
+  --commit <40-character-commit-sha> \
+  --owner inactdev \
+  --repo inkwell \
+  --model claude-sonnet-4-5
+```
+
+`--request` is the issue or pull request text. `--feature-map` teaches the
+examiner how to drive the app, and `--always-true` names its invariants. The
+per-task `--budget` bounds app-driving attempts: request scenarios come first,
+then nearby feature-map and invariant scenarios, then the examiner stops.
+
+`--changed-files` is Fabrica's names-only list of every worker-changed file:
+
+```json
+{
+  "baseCommit": "<task-starting-commit>",
+  "files": [{"path": "backend/capture_test.go", "change": "modified"}]
+}
+```
+
+It has no file contents or diff. `--base-tests` supplies only the starting-commit
+content of changed test files, never the worker's version:
+
+```json
+{
+  "baseCommit": "<task-starting-commit>",
+  "tests": [{"path": "backend/capture_test.go", "content": "...pre-task test..."}]
+}
+```
+
+A changed test name is a signal. The examiner derives the old test's protected
+scenario and drives it in the app. A new test with no pre-task version triggers
+nothing. Fabrica issue #101 will produce both artifacts; until then, callers
+supply them explicitly. Missing or malformed lists refuse rather than reading as
+no changed tests.
+
+The sealed container receives copies of only these inputs and a writable
+temporary output directory. It has no repository mount or implementation diff.
+The locally built runtime forces the trusted agent entrypoint. The model has no
+shell or arbitrary-network tool: it can call only the supplied app URL, and a
+redirect cannot leave that origin. A local Docker daemon is required because
+bind mounts resolve on the daemon host; remote Docker endpoints are refused.
+Docker `userns-remap` is unsupported for now because private staged inputs
+cannot safely cross that mapping - see [#32](https://github.com/inactdev/inspector/issues/32).
+
+The model proposes capabilities, attempts, and assessments. Inspector records
+which capability each app request drove and what response was delivered, then
+derives every per-capability result from that record. A capability with no
+successful observation is `could_not_be_tested` and cannot be marked confirmed.
+The JSON verdict also carries `examinationIncomplete`, so an untested capability
+never hides a confirmed bug and a bug never hides an incomplete examination.
+Confirmed missing behavior and failed pre-task-test scenarios include proposed
+permanent regression lines; Inspector never edits the project.
+
+The examiner posts its own status under the stable context `examiner`:
+`success` only when every capability is confirmed and the examination completed,
+`failure` when it found a bug, and `error` for an otherwise incomplete or
+explicitly refused examination. When both a bug and incompleteness are present it
+posts `failure` and names both facts. A complete success exits `0`, a found bug
+exits `1`, and an incomplete or refused examination exits `2`. A missing
+`--owner`, `--repo`, or `--commit`, or a malformed `--commit`, exits `2` before
+posting because there is no valid status destination; a status-post failure also
+exits `2`.
+
+Both blocking states are distinct on the pull request page. Branch protection
+must require `examiner` alongside `gate`; the inspector-gate setup below owns the
+repository-setting instructions. An owner can use GitHub's visible admin
+override when that is the right human decision.
+
+This repository temporarily protects `*_test.go` through `.inspector.json` under
+[fabrica#96](https://github.com/inactdev/fabrica/issues/96). A pull request that
+adds or changes required Go tests therefore remains intentionally red at `gate`
+until the owner reviews it and uses that override. A delivery pipeline that
+publishes the branch without Inspector's stage, stamp, then publish sequence also
+leaves that commit without the required `inspector` status. Neither condition is
+a CI defect that a follow-up source change can make green. Do not remove or rename
+tests, weaken the protected-path policy, or create a status merely to make such a
+change green.
+
 ## inspector-gate
 
 `.github/workflows/inspector-gate.yml` is the cloud half (SPEC.md sections 2, 4,
@@ -380,11 +501,13 @@ statuses and needs `statuses: read`, not `statuses: write`.
 only enforces a check once it is a *required* status check:
 
 > Settings -> Branches -> add (or edit) a branch protection rule for the default
-> branch -> enable "Require status checks to pass before merging" -> add **gate**
-> (the job's name) to the list.
+> branch (`main` in this repository) -> enable "Require status checks to pass
+> before merging" -> add **gate** (the job's name) and **examiner** (the separate
+> commit status) to the list.
 
-That is a one-click repository setting this workflow cannot turn on for itself -
-there is no API call or workflow step that does it from here.
+The existing `gate` job continues to require the separate `inspector` status.
+This is a repository setting the workflow cannot turn on for itself - there is
+no API call or workflow step that does it from here.
 
 ## Status
 
@@ -393,7 +516,7 @@ command against HEAD, inside a container (issue #13), and reports green or
 red, refusing loudly when no check command or image is configured, or no
 usable container runtime is found. Inspector-owned publication (issue #18) is
 also built: it stages a green commit, posts its status, then moves an explicitly
-named non-default branch; a red result remains local by v1 policy. The gate
-workflow (issue #4, above) reads that status under the context `inspector`.
-Still to come: the fixer and
-the installer - see [SPEC.md](SPEC.md) and the repo's issues.
+named non-default branch; a red result remains local by v1 policy. The HTTP
+examiner (issue #7, above) and the gate workflow (issue #4) are also built. The
+gate reads the project-check status under the context `inspector`. Still to
+come: the installer - see [SPEC.md](SPEC.md) and the repo's issues.

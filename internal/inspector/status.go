@@ -21,6 +21,10 @@ import (
 // updating all three, or the gate stops finding this result.
 const StatusContext = "inspector"
 
+// ExaminerStatusContext is the separate status the independent examiner posts
+// after judging request-derived outcomes.
+const ExaminerStatusContext = "examiner"
+
 // GitHubTokenEnvVar is the environment variable inspector reads its
 // GitHub token from. SPEC.md section 12 settled where the token lives:
 // v1 posts with the Client's own token rather than a token scoped to
@@ -53,16 +57,16 @@ var statusHTTPClient = &http.Client{
 	},
 }
 
-// StatusState is the state GitHub records for a commit status. v1
-// publishes only success: a red result and a Refused outcome publish
-// neither a branch nor a status, so their absence fails inspector-gate.
-// StatusFailure remains available for a future Client-approved red
-// publication policy.
+// StatusState is the state GitHub records for a commit status. The project
+// check publishes only success under StatusContext. The examiner uses success,
+// failure, or error under ExaminerStatusContext so its judgment and refusals
+// remain separate and visible.
 type StatusState string
 
 const (
 	StatusSuccess StatusState = "success"
 	StatusFailure StatusState = "failure"
+	StatusError   StatusState = "error"
 )
 
 // RepositoryOptions identifies a GitHub repository.
@@ -119,6 +123,10 @@ func RepositoryDefaultBranch(opts RepositoryOptions) (string, error) {
 type PostStatusOptions struct {
 	Owner, Repo, Commit string
 	State               StatusState
+	// Context defaults to StatusContext for the existing project-check status.
+	// The examiner supplies ExaminerStatusContext so GitHub keeps the two
+	// independent judgments separate.
+	Context string
 	// Description is shown next to the status on GitHub. It is not
 	// where the detail lives - SPEC.md keeps the status tiny and the
 	// per-run report (report.go) as the place a reader goes for what
@@ -156,13 +164,17 @@ func PostCommitStatus(opts PostStatusOptions) error {
 		base = defaultStatusAPIBaseURL
 	}
 
+	contextName := opts.Context
+	if contextName == "" {
+		contextName = StatusContext
+	}
 	body, err := json.Marshal(struct {
 		State       string `json:"state"`
 		Context     string `json:"context"`
 		Description string `json:"description,omitempty"`
 	}{
 		State:       string(opts.State),
-		Context:     StatusContext,
+		Context:     contextName,
 		Description: opts.Description,
 	})
 	if err != nil {
