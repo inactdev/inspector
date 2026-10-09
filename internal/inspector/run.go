@@ -22,6 +22,7 @@ const (
 	Red Outcome = "red"
 	// Refused means inspector never reached a verdict on the code - no
 	// check command or image configured, no usable container runtime, a
+	// repo whose git directory cannot be reached inside the container, a
 	// dirty working tree, a check command killed by a signal before it
 	// could finish on its own, or a check command that ran past its
 	// timeout and was killed for it. Those
@@ -141,6 +142,20 @@ func Run(opts Options) (Result, error) {
 	timeout := cfg.Timeout()
 	started := time.Now()
 	checkResult, err := RunCheck(repoRoot, cfg.Check, cfg.Image, cfg.Network, timeout, opts.Stdout, opts.Stderr)
+	if errors.Is(err, container.ErrGitDirUnavailable) {
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%v\n\n"+
+					"inspector mounts that directory into the container read-only, at its own\n"+
+					"path, so a check command can use git from a linked worktree - but it could\n"+
+					"not this time, and a check command whose every git call fails for a reason\n"+
+					"that has nothing to do with the code is not a verdict on the code.",
+				err,
+			),
+		}, nil
+	}
 	if err != nil {
 		return Result{}, fmt.Errorf("running check command: %w", err)
 	}

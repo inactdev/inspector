@@ -49,16 +49,18 @@ type CheckResult struct {
 }
 
 // RunCheck runs command inside a fresh container built from image,
-// bind-mounted to repoRoot (and nothing else on the host) at
-// container.WorkspaceDir, killing the container if it has not finished
-// within timeout. Network access is denied unless network is true - see
-// README.md for that tradeoff. Output is streamed to stdout/stderr live
+// bind-mounted to repoRoot at container.WorkspaceDir - plus, read-only,
+// whatever container.ResolveGitMounts says the repo needs for git to
+// work in there, and nothing else on the host - killing the container
+// if it has not finished within timeout. Network access is denied
+// unless network is true - see README.md for that tradeoff. Output is streamed to stdout/stderr live
 // and also captured for the local report. The two streams are written
 // from different goroutines, but every write - to the capture buffer and
 // to the caller's writers alike - is serialized on one lock, so passing
 // the same writer for both stdout and stderr is safe. The returned error
 // is non-nil only for infrastructure failures (e.g. docker could not be
-// started, or the image could not be run at all) - a failing check is a
+// started, the image could not be run at all, or the repo's git
+// directory could not be made available in there) - a failing check is a
 // normal CheckResult with a non-zero ExitCode, not a Go error. Callers
 // are expected to have already confirmed a usable runtime via
 // container.EnsureAvailable - RunCheck itself does not check again, so
@@ -74,14 +76,26 @@ func RunCheck(repoRoot, command, image string, network bool, timeout time.Durati
 	// concurrent writes.
 	capture := &syncWriter{}
 
+	// Resolved before anything starts, so a repo whose git directory
+	// cannot be reached inside the container is refused rather than
+	// handed a check command whose every git call would fail. The error
+	// wraps container.ErrGitDirUnavailable; Run turns that into a
+	// refusal naming it.
+	gitMounts, err := container.ResolveGitMounts(repoRoot)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	defer gitMounts.Cleanup()
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	run := container.New(ctx, container.Run{
-		RepoRoot: repoRoot,
-		Command:  command,
-		Image:    image,
-		Network:  network,
+		RepoRoot:       repoRoot,
+		Command:        command,
+		Image:          image,
+		Network:        network,
+		ReadOnlyMounts: gitMounts.Mounts,
 	})
 	defer run.Cleanup()
 	run.Stdout = capture.tee(stdout)
@@ -94,7 +108,7 @@ func RunCheck(repoRoot, command, image string, network bool, timeout time.Durati
 	// would hand that draining to the caller, and calling Wait before
 	// the caller has read to EOF is the classic way to truncate output,
 	// since Wait closes the read end once the process exits.
-	err := run.Run()
+	err = run.Run()
 	if err != nil && !run.Started() {
 		// docker never got as far as creating the container - a bad
 		// image, an unreachable registry, the daemon going away mid-
