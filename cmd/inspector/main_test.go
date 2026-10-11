@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -77,9 +78,59 @@ type statusRequest struct {
 	Desc  string `json:"description"`
 }
 
+// pullRequestRecord is one pull request the fake GitHub API has created.
+type pullRequestRecord struct {
+	Head, Base, Title, Body, URL string
+}
+
+// fakePullRequests is the pull-request half of the fake GitHub API: a
+// list endpoint inspector checks before ever creating one, and a create
+// endpoint that records what it was asked to open. Tests read Created and
+// the request counts after runCLI returns, once the HTTP round trip that
+// produced them has already completed.
+type fakePullRequests struct {
+	Created      []pullRequestRecord
+	ListRequests int
+	nextNumber   int
+}
+
+func (p *fakePullRequests) handleList(w http.ResponseWriter, r *http.Request) {
+	p.ListRequests++
+	_, branch, _ := strings.Cut(r.URL.Query().Get("head"), ":")
+	base := r.URL.Query().Get("base")
+	matches := []map[string]string{}
+	for _, rec := range p.Created {
+		if rec.Head == branch && rec.Base == base {
+			matches = append(matches, map[string]string{"html_url": rec.URL})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	data, _ := json.Marshal(matches)
+	_, _ = w.Write(data)
+}
+
+func (p *fakePullRequests) handleCreate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Title string `json:"title"`
+		Head  string `json:"head"`
+		Base  string `json:"base"`
+		Body  string `json:"body"`
+	}
+	raw, _ := io.ReadAll(r.Body)
+	_ = json.Unmarshal(raw, &body)
+	p.nextNumber++
+	url := fmt.Sprintf("https://github.com/inactdev/inspector/pull/%d", p.nextNumber)
+	p.Created = append(p.Created, pullRequestRecord{Head: body.Head, Base: body.Base, Title: body.Title, Body: body.Body, URL: url})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	data, _ := json.Marshal(map[string]string{"html_url": url})
+	_, _ = w.Write(data)
+}
+
 type statusAPIStub struct {
-	Request *statusRequest
-	Remote  string
+	Request      *statusRequest
+	Remote       string
+	PullRequests *fakePullRequests
 }
 
 // stubGitHubStatusAPI points githubAPIBaseURL at a fake GitHub API and gives
@@ -89,13 +140,21 @@ type statusAPIStub struct {
 func stubGitHubStatusAPI(t *testing.T, dir string, statusCode int, responseBody string, observe func(remote string)) *statusAPIStub {
 	t.Helper()
 	stub := &statusAPIStub{
-		Request: &statusRequest{},
-		Remote:  newBareTestRemote(t),
+		Request:      &statusRequest{},
+		Remote:       newBareTestRemote(t),
+		PullRequests: &fakePullRequests{},
 	}
 	configureTestOrigin(t, dir, stub.Remote)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls"):
+			stub.PullRequests.handleList(w, r)
+			return
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			stub.PullRequests.handleCreate(w, r)
+			return
+		case r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"default_branch":"main"}`))
 			return
@@ -689,4 +748,149 @@ func TestPublishGreenRefusesChangedHeadBeforeRemoteSideEffects(t *testing.T) {
 	if _, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
 		t.Fatal("changed HEAD published the named branch")
 	}
+}
+
+// writePRBodyFile writes body to a temp file and returns its path, for
+// -pr-body-file in the pull-request tests below.
+func writePRBodyFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pr-body.md")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("writing pr body file: %v", err)
+	}
+	return path
+}
+
+func TestCLI_GreenWithPRFlagsOpensPullRequest(t *testing.T) {
+	requirePublicationPlatform(t)
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	bodyPath := writePRBodyFile(t, "the login flow is done")
+
+	code, stdout, _ := runCLI(t, dir, "--branch", "feature", "-pr-title", "Implement login", "-pr-body-file", bodyPath)
+	if code != exitGreen {
+		t.Fatalf("exit code = %d, want %d", code, exitGreen)
+	}
+	if len(stub.PullRequests.Created) != 1 {
+		t.Fatalf("created pull requests = %d, want 1: %+v", len(stub.PullRequests.Created), stub.PullRequests.Created)
+	}
+	pr := stub.PullRequests.Created[0]
+	if pr.Head != "feature" || pr.Base != "main" || pr.Title != "Implement login" || pr.Body != "the login flow is done" {
+		t.Fatalf("created pull request = %+v, want head=feature base=main title=%q body=%q", pr, "Implement login", "the login flow is done")
+	}
+	wantLine := "pull request: " + pr.URL
+	if !strings.Contains(stdout, wantLine) {
+		t.Fatalf("stdout = %q, want it to contain %q", stdout, wantLine)
+	}
+	latest, err := os.ReadFile(filepath.Join(dir, inspector.RunsDirName, inspector.LatestReportName))
+	if err != nil {
+		t.Fatalf("reading latest report: %v", err)
+	}
+	var report inspector.Report
+	if err := json.Unmarshal(latest, &report); err != nil {
+		t.Fatalf("decoding latest report: %v", err)
+	}
+	if report.PullRequestURL != pr.URL {
+		t.Fatalf("report.PullRequestURL = %q, want %q", report.PullRequestURL, pr.URL)
+	}
+}
+
+func TestCLI_GreenTwiceOnSameBranchOpensNoSecondPullRequest(t *testing.T) {
+	requirePublicationPlatform(t)
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	bodyPath := writePRBodyFile(t, "the login flow is done")
+
+	firstCode, _, _ := runCLI(t, dir, "--branch", "feature", "-pr-title", "Implement login", "-pr-body-file", bodyPath)
+	if firstCode != exitGreen {
+		t.Fatalf("first run exit code = %d, want %d", firstCode, exitGreen)
+	}
+	if len(stub.PullRequests.Created) != 1 {
+		t.Fatalf("after first run, created pull requests = %d, want 1", len(stub.PullRequests.Created))
+	}
+	firstURL := stub.PullRequests.Created[0].URL
+
+	runGitT(t, dir, "commit", "-q", "--allow-empty", "-m", "more work")
+
+	secondCode, stdout, _ := runCLI(t, dir, "--branch", "feature", "-pr-title", "Implement login", "-pr-body-file", bodyPath)
+	if secondCode != exitGreen {
+		t.Fatalf("second run exit code = %d, want %d", secondCode, exitGreen)
+	}
+	if len(stub.PullRequests.Created) != 1 {
+		t.Fatalf("after second run, created pull requests = %d, want still 1 (no second pull request)", len(stub.PullRequests.Created))
+	}
+	wantLine := "pull request: " + firstURL
+	if !strings.Contains(stdout, wantLine) {
+		t.Fatalf("second run stdout = %q, want it to report the existing pull request %q", stdout, wantLine)
+	}
+}
+
+func TestCLI_RedWithPRFlagsOpensNoPullRequest(t *testing.T) {
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false", "image": "alpine"}`})
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	bodyPath := writePRBodyFile(t, "the login flow is done")
+
+	code, stdout, _ := runCLI(t, dir, "--branch", "feature", "-pr-title", "Implement login", "-pr-body-file", bodyPath)
+	if code != exitRed {
+		t.Fatalf("exit code = %d, want %d", code, exitRed)
+	}
+	if len(stub.PullRequests.Created) != 0 {
+		t.Fatalf("red result created %d pull requests, want 0", len(stub.PullRequests.Created))
+	}
+	if strings.Contains(stdout, "pull request:") {
+		t.Fatalf("stdout = %q, a red result must never mention a pull request", stdout)
+	}
+}
+
+func TestCLI_GreenWithoutPRFlagsOpensNoPullRequest(t *testing.T) {
+	requirePublicationPlatform(t)
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+
+	code, stdout, _ := runCLI(t, dir, "--branch", "feature")
+	if code != exitGreen {
+		t.Fatalf("exit code = %d, want %d", code, exitGreen)
+	}
+	if len(stub.PullRequests.Created) != 0 || stub.PullRequests.ListRequests != 0 {
+		t.Fatalf("green without pr flags made pull request calls: created=%d list=%d, want 0 and 0", len(stub.PullRequests.Created), stub.PullRequests.ListRequests)
+	}
+	if strings.Contains(stdout, "pull request:") {
+		t.Fatalf("stdout = %q, must not mention a pull request when the flags are absent", stdout)
+	}
+}
+
+func TestCLI_RefusesOnePRFlagWithoutTheOther(t *testing.T) {
+	bodyPath := writePRBodyFile(t, "the login flow is done")
+
+	t.Run("title without body file", func(t *testing.T) {
+		dir := newTestRepo(t, nil)
+		code, stdout, stderr := runCLI(t, dir, "--branch", "feature", "-pr-title", "Implement login")
+		if code != exitRefused {
+			t.Fatalf("exit code = %d, want %d", code, exitRefused)
+		}
+		if !strings.Contains(stderr, "-pr-body-file") {
+			t.Fatalf("stderr = %q, want it to name the missing -pr-body-file", stderr)
+		}
+		if strings.Contains(stdout, "green") || strings.Contains(stdout, "red") {
+			t.Fatalf("stdout = %q, must never run a check before this usage error is reported", stdout)
+		}
+	})
+
+	t.Run("body file without title", func(t *testing.T) {
+		dir := newTestRepo(t, nil)
+		code, stdout, stderr := runCLI(t, dir, "--branch", "feature", "-pr-body-file", bodyPath)
+		if code != exitRefused {
+			t.Fatalf("exit code = %d, want %d", code, exitRefused)
+		}
+		if !strings.Contains(stderr, "-pr-title") {
+			t.Fatalf("stderr = %q, want it to name the missing -pr-title", stderr)
+		}
+		if strings.Contains(stdout, "green") || strings.Contains(stdout, "red") {
+			t.Fatalf("stdout = %q, must never run a check before this usage error is reported", stdout)
+		}
+	})
 }

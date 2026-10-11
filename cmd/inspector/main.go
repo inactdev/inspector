@@ -53,6 +53,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	repoPath := fs.String("repo", ".", "path to the repository to inspect")
 	publicationBranch := fs.String("branch", "", "pull request branch to publish after a green result (required)")
+	prTitle := fs.String("pr-title", "", "pull request title to open after a green result (requires -pr-body-file; both or neither)")
+	prBodyFile := fs.String("pr-body-file", "", "path to a file containing the pull request body (requires -pr-title; both or neither)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, `usage: inspector [flags] [claim text...]
 
@@ -62,6 +64,11 @@ request branch that inspector may update after a green result. Inspector
 puts the commit on GitHub, records its status, then updates only that named
 branch, so it needs GITHUB_TOKEN set to a token with commit-status write
 access and a GitHub 'origin' remote. See README.md for setup.
+
+-pr-title and -pr-body-file, given together, open a pull request for that
+branch against the repository's default branch once publication completes;
+given alone, either one is a usage error. Given neither, no pull request is
+opened.
 
 flags:
 `)
@@ -77,6 +84,25 @@ flags:
 	if err := inspector.ValidatePublicationBranch(*publicationBranch); err != nil {
 		fmt.Fprintf(stderr, "refused: invalid publication branch: %v\n", err)
 		return exitRefused
+	}
+	prTitleSet := strings.TrimSpace(*prTitle) != ""
+	prBodyFileSet := strings.TrimSpace(*prBodyFile) != ""
+	openPullRequest := prTitleSet && prBodyFileSet
+	var prBody string
+	switch {
+	case prTitleSet && !prBodyFileSet:
+		fmt.Fprintln(stderr, "refused: -pr-title was given without -pr-body-file; both are required to open a pull request, or neither to skip it")
+		return exitRefused
+	case prBodyFileSet && !prTitleSet:
+		fmt.Fprintln(stderr, "refused: -pr-body-file was given without -pr-title; both are required to open a pull request, or neither to skip it")
+		return exitRefused
+	case openPullRequest:
+		content, err := os.ReadFile(*prBodyFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "refused: reading -pr-body-file %s: %v\n", *prBodyFile, err)
+			return exitRefused
+		}
+		prBody = string(content)
 	}
 	publicationTarget := capturePublicationTarget(*repoPath)
 	opts := inspector.Options{
@@ -111,6 +137,9 @@ flags:
 			fmt.Fprintf(stderr, "\n%s\n%s\n%s\n\n", warningBar, cleanupWarning, warningBar)
 		}
 		fmt.Fprintf(stdout, "\ngreen - %s%s\n", result.Commit, reportSuffix(result.ReportPath))
+		if openPullRequest {
+			openGreenPullRequest(publicationTarget, *publicationBranch, *prTitle, prBody, result, stdout, stderr)
+		}
 		return exitGreen
 	case inspector.Red:
 		// v1 deliberately does not publish red work. The local report and
@@ -262,6 +291,63 @@ func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, 
 		return fmt.Sprintf("inspector published green branch %q, but could not confirm removal of its temporary staging ref: %v", publicationBranch, err), nil
 	}
 	return "", nil
+}
+
+// openGreenPullRequest runs once publishGreen has already completed in full
+// - the branch is pushed and its status is stamped. Opening the pull request
+// is therefore never part of the staging/status/branch sequence itself and
+// never changes the green verdict or exit code: a failure here is reported
+// loudly on stderr as its own warning, distinct from an incomplete
+// publication, because the check and its publication already succeeded.
+// It looks for an existing open pull request first, so a second green run on
+// the same branch reports that one instead of opening a second.
+func openGreenPullRequest(snapshot publicationTargetSnapshot, publicationBranch, title, body string, result inspector.Result, stdout, stderr io.Writer) {
+	token := os.Getenv(inspector.GitHubTokenEnvVar)
+	defaultBranch, err := inspector.RepositoryDefaultBranch(inspector.RepositoryOptions{
+		Owner:      snapshot.target.Owner,
+		Repo:       snapshot.target.Repo,
+		Token:      token,
+		APIBaseURL: githubAPIBaseURL,
+	})
+	if err != nil {
+		printPullRequestFailure(stderr, fmt.Errorf("resolving the default branch to open the pull request against: %w", err))
+		return
+	}
+	prOpts := inspector.PullRequestOptions{
+		Owner:      snapshot.target.Owner,
+		Repo:       snapshot.target.Repo,
+		Head:       publicationBranch,
+		Base:       defaultBranch,
+		Title:      title,
+		Body:       body,
+		Token:      token,
+		APIBaseURL: githubAPIBaseURL,
+	}
+	url, found, err := inspector.FindExistingPullRequest(prOpts)
+	if err != nil {
+		printPullRequestFailure(stderr, fmt.Errorf("checking for an existing pull request: %w", err))
+		return
+	}
+	if !found {
+		url, err = inspector.OpenPullRequest(prOpts)
+		if err != nil {
+			printPullRequestFailure(stderr, fmt.Errorf("opening the pull request: %w", err))
+			return
+		}
+	}
+	fmt.Fprintf(stdout, "pull request: %s\n", url)
+	if err := inspector.RecordPullRequestURL(snapshot.repoRoot, result.ReportPath, url); err != nil {
+		fmt.Fprintf(stderr, "warning: could not record the pull request URL in the local report: %v\n", err)
+	}
+}
+
+// printPullRequestFailure is deliberately distinct from printPublicationFailure:
+// the staging, status, and branch sequence already completed, so this is never
+// an incomplete publication or a refusal, just a loud, separate warning.
+func printPullRequestFailure(stderr io.Writer, err error) {
+	fmt.Fprintf(stderr, "\n%s\ninspector: could not open the pull request: %v\n"+
+		"the check passed and the branch was already published in full; only the pull request could not be confirmed.\n%s\n\n",
+		warningBar, err, warningBar)
 }
 
 // printPublicationFailure makes an incomplete green publication impossible to
