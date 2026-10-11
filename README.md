@@ -151,6 +151,12 @@ publication steps, in this exact order:
 2. It transfers C to a temporary non-branch staging ref on `origin`.
 3. It records C's green commit status.
 4. It updates the explicitly named pull request branch on `origin`.
+5. If both `-pr-title` and `-pr-body-file` were given, it opens a pull
+   request for that branch, or reports the existing one. This step is
+   optional and always comes after the branch has already moved - a failure
+   here is reported as its own warning, never as a red verdict or an
+   incomplete publication, because the check and its publication already
+   succeeded by the time it runs.
 
 Name that destination on every invocation:
 
@@ -266,6 +272,15 @@ Flags:
 
 - `--branch <name>` - required pull request branch to publish after green
 - `--repo <path>` - inspect a repo other than the current directory
+- `-pr-title <text>` and `-pr-body-file <path>` - optional; given together,
+  open a pull request for `--branch` against the repository's default branch
+  once a green result is published, or report the existing one if that
+  branch already has an open pull request. Given alone, either flag is a
+  usage error, refused at flag-parsing time before any check runs or
+  anything is pushed. Given neither, no pull request is opened and every
+  existing caller is unaffected. On success inspector prints `pull request:
+  <url>` on its own line and records the URL in the local report JSON. Red
+  and refused results never open a pull request.
 
 Anything after the flags is a free-text claim, recorded for context and not acted
 on:

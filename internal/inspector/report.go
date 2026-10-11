@@ -32,6 +32,11 @@ type Report struct {
 	Signal       string    `json:"signal,omitempty"`
 	TimedOut     bool      `json:"timedOut,omitempty"`
 	Output       string    `json:"output"`
+	// PullRequestURL is set after the fact, once a green run has opened
+	// or found the pull request for its published branch - WriteReport
+	// runs before that step even exists, so RecordPullRequestURL is what
+	// patches it into both this file and LatestReportName afterward.
+	PullRequestURL string `json:"pullRequestURL,omitempty"`
 }
 
 // WriteReport persists r under repoRoot/RunsDirName/runs/ and refreshes
@@ -117,6 +122,42 @@ func writeNewFile(dir, base string, data []byte) (string, error) {
 		}
 		return path, nil
 	}
+}
+
+// RecordPullRequestURL patches a just-opened (or just-found) pull request's
+// URL into the report already written for this run at reportPath, and into
+// LatestReportName alongside it, so a reader of either file sees it without
+// re-running inspector. A no-op when reportPath is empty - the report save
+// itself already failed, and the local report is notes, never authority.
+func RecordPullRequestURL(repoRoot, reportPath, url string) error {
+	if reportPath == "" {
+		return nil
+	}
+	if err := patchReportPullRequestURL(reportPath, url); err != nil {
+		return err
+	}
+	return patchReportPullRequestURL(filepath.Join(repoRoot, RunsDirName, LatestReportName), url)
+}
+
+func patchReportPullRequestURL(path, url string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	var report Report
+	if err := json.Unmarshal(data, &report); err != nil {
+		return fmt.Errorf("decoding %s: %w", path, err)
+	}
+	report.PullRequestURL = url
+	encoded, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding %s: %w", path, err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(path, encoded, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
 }
 
 func shortSHA(sha string) string {
