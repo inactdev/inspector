@@ -94,9 +94,9 @@ func TestNew_NoNetworkByDefault(t *testing.T) {
 }
 
 func TestNew_NetworkOptsIn(t *testing.T) {
-	// Temporary opt-in (issue #43's deferred fourth requirement): keep
-	// honoring it until projects commit their own image with
-	// dependencies baked in. See Run.Network's own doc comment.
+	// Temporary opt-in: keep honoring it until projects commit their
+	// own image with dependencies baked in (issue #47). See
+	// Run.Network's own doc comment.
 	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine", Network: true})
 
 	if strings.Contains(strings.Join(cmd.Args, " "), "--network none") {

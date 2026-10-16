@@ -123,10 +123,10 @@ That default is deliberate, not incidental: the same container that keeps a
 hostile or broken check command from reaching the rest of your machine is also
 the thing standing between it and the network, which is how it would exfiltrate
 anything it found. `network` is honored for now, but it is a deliberately
-temporary opt-in, not a settled design: issue #43's eventual intent is that
-nothing inside the check container ever needs the network at all, once a
-project commits its own image with its dependencies already baked in rather
-than installing them at check time (a separate, not-yet-built issue - see
+temporary opt-in, not a settled design: the eventual intent is that nothing
+inside the check container ever needs the network at all, once a project
+commits its own image with its dependencies already baked in rather than
+installing them at check time - tracked as issue #47, not yet built (see
 "Status" below). Every run that uses `network: true` logs that on stderr, in
 the report alongside the check's own output, as a standing reminder that it is
 going away. Turning it on trusts the check command with outbound access in the
@@ -602,7 +602,7 @@ usable container runtime is found. That container is memory-, CPU-, and
 process-bounded and runs as the inviting host user rather than root (issue
 #43); it has no network access by default, with a temporary `network: true`
 opt-in still honored until projects commit their own image with dependencies
-baked in - a separate, not-yet-built issue. Inspector-owned publication (issue
+baked in - issue #47, not yet built. Inspector-owned publication (issue
 #18) is
 also built: it stages a green commit, posts its status, then moves an explicitly
 named non-default branch; a red result remains local by v1 policy. The HTTP

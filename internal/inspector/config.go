@@ -55,8 +55,8 @@ type Config struct {
 	// nothing else. This is a deliberately temporary opt-in - Fabrica's
 	// own check currently needs it for `npm ci` when node_modules is
 	// missing - that goes away once projects commit their own image
-	// with dependencies baked in (issue #43's deferred fourth
-	// requirement); every run that uses it logs as much. See README.md.
+	// with dependencies baked in (issue #47); every run that uses it
+	// logs as much. See README.md.
 	Network bool `json:"network,omitempty"`
 	// Memory, CPUs, and PIDsLimit bound the resources the check
 	// container's cgroup may use - docker run's own --memory, --cpus,

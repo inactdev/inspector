@@ -114,8 +114,8 @@ type Run struct {
 	// of the default `--network none`. This is a deliberately
 	// temporary opt-in (see .inspector.json's "network" field and
 	// check.go's RunCheck): it exists only until projects commit their
-	// own image with dependencies baked in, at which point nothing
-	// inside the container will need the network for anything.
+	// own image with dependencies baked in (issue #47), at which point
+	// nothing inside the container will need the network for anything.
 	Network bool
 }
 
