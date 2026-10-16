@@ -285,7 +285,7 @@ func newContainerCommand(ctx context.Context, opts containerOptions, runtimeImag
 
 func runtimeIsolationArgs(user string) []string {
 	if user == "" {
-		user = containerHostUser()
+		user = container.HostUser()
 	}
 	return []string{
 		"--pull", "never",
@@ -298,74 +298,13 @@ func runtimeIsolationArgs(user string) []string {
 	}
 }
 
+// localDockerRuntimeUser delegates to container.ResolveUser: issue #43
+// gave Inspector's own check container the identical need to run as
+// the inviting host user rather than an image's default, so the
+// decision (including the local-endpoint refusal and rootless
+// detection) now lives there instead of being duplicated here. See
+// CLAUDE.md's required-tools.sh note for why a second hand-maintained
+// copy of the same list/logic is the thing to avoid.
 func localDockerRuntimeUser(ctx context.Context) (string, error) {
-	if _, err := exec.LookPath("docker"); err != nil {
-		return "", container.ErrNotInstalled
-	}
-	address, err := effectiveDockerEndpoint(ctx)
-	if err != nil {
-		return "", err
-	}
-	if !strings.HasPrefix(address, "unix://") && !strings.HasPrefix(address, "npipe://") {
-		return "", fmt.Errorf("remote Docker endpoint %q cannot safely use host bind mounts", address)
-	}
-	if err := container.EnsureAvailableContext(ctx); err != nil {
-		return "", err
-	}
-	output, err := dockerOutput(ctx, "reading Docker security options", "info", "--format", "{{json .SecurityOptions}}")
-	if err != nil {
-		return "", err
-	}
-	var securityOptions []string
-	if err := json.Unmarshal(bytes.TrimSpace(output), &securityOptions); err != nil {
-		return "", fmt.Errorf("reading Docker security options: invalid response: %w", err)
-	}
-	for _, option := range securityOptions {
-		for _, field := range strings.Split(option, ",") {
-			if field == "rootless" || field == "name=rootless" {
-				return "0:0", nil
-			}
-		}
-	}
-	return containerHostUser(), nil
-}
-
-func effectiveDockerEndpoint(ctx context.Context) (string, error) {
-	contextName := strings.TrimSpace(os.Getenv("DOCKER_CONTEXT"))
-	if contextName == "" {
-		if address := strings.TrimSpace(os.Getenv("DOCKER_HOST")); address != "" {
-			return address, nil
-		}
-	}
-	args := []string{"context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"}
-	if contextName != "" {
-		args = []string{"context", "inspect", contextName, "--format", "{{json .Endpoints.docker.Host}}"}
-	}
-	endpoint, err := dockerOutput(ctx, "reading Docker endpoint", args...)
-	if err != nil {
-		return "", err
-	}
-	var address string
-	if err := json.Unmarshal(bytes.TrimSpace(endpoint), &address); err != nil {
-		return "", fmt.Errorf("reading Docker endpoint: invalid response: %w", err)
-	}
-	return address, nil
-}
-
-func dockerOutput(ctx context.Context, operation string, args ...string) ([]byte, error) {
-	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
-	if err == nil {
-		return output, nil
-	}
-	if ctx.Err() != nil {
-		return nil, fmt.Errorf("%s: %w", operation, ctx.Err())
-	}
-	detail := strings.TrimSpace(stderr.String())
-	if detail == "" {
-		detail = err.Error()
-	}
-	return nil, fmt.Errorf("%s: %s", operation, detail)
+	return container.ResolveUser(ctx)
 }

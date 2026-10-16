@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,31 @@ import (
 // and the check command's working directory. Fixed rather than
 // configurable: the container has nothing else to run from.
 const WorkspaceDir = "/workspace"
+
+// DefaultMemory, DefaultCPUs, and DefaultPIDsLimit match Fabrica's own
+// worker box (`--memory 2g --cpus 2 --pids-limit 512`), so a runaway
+// test or fork bomb in a project's check command cannot exhaust the
+// host the same way issue #43 found Fabrica's worker already guards
+// against. New applies these whenever a Run leaves the matching field
+// at its Go zero value; a project raises or lowers any of them via
+// .inspector.json.
+const (
+	DefaultMemory    = "2g"
+	DefaultCPUs      = "2"
+	DefaultPIDsLimit = 512
+)
+
+// Limits bounds the cgroup resources a container Run may use. A zero
+// field (the Go zero value, meaning "not set") falls back to the
+// matching Default* constant above rather than running unbounded.
+type Limits struct {
+	// Memory is docker run's own --memory value, e.g. "2g".
+	Memory string
+	// CPUs is docker run's own --cpus value, e.g. "2".
+	CPUs string
+	// PIDsLimit is docker run's own --pids-limit value.
+	PIDsLimit int
+}
 
 // ErrNotInstalled means the docker CLI itself is not on PATH.
 var ErrNotInstalled = errors.New("docker not found on PATH - install Docker (https://docs.docker.com/get-docker/) so check commands can run in a container instead of on this machine")
@@ -77,11 +103,13 @@ type Run struct {
 	// never guesses a check command: the project's toolchain has to be
 	// in it or nothing runs.
 	Image string
-	// Network, when false (the default), runs the container with no
-	// network access at all. A check command that needs the network -
-	// installing dependencies is the common case - must opt in via
-	// .inspector.json; see README.md for the tradeoff.
-	Network bool
+	// Limits bounds the container's memory, CPU, and process count.
+	// See Limits and the Default* constants above.
+	Limits Limits
+	// User is the docker run `--user` value ("uid:gid") the container
+	// runs as. Empty leaves the image's own default user (commonly
+	// root). See ResolveUser - New never guesses this on its own.
+	User string
 }
 
 // Cmd is one containerized run in progress: the *exec.Cmd for the
@@ -127,23 +155,65 @@ func New(ctx context.Context, r Run) *Cmd {
 	// Everything mounted here is owned by whoever ran inspector, while
 	// the image picks its own user - so on Linux, where bind-mounted
 	// files keep their host ownership, git would refuse to look at the
-	// repository at all ("detected dubious ownership", verified). The
-	// ownership check exists to stop you running a stranger's
-	// repository's config and hooks as yourself; inside this container
-	// the repository and the command inspecting it are the same
-	// project's code, and the container is the trust boundary, so the
-	// check has nothing left to protect. This is git's own documented
-	// escape hatch and it has to be passed as environment - git honors
+	// repository at all ("detected dubious ownership", verified) unless
+	// User (ResolveUser) already matches that ownership. Declared
+	// unconditionally anyway, scoped to exactly the paths mounted above
+	// rather than widened to `*`: git's own documented escape hatch for
+	// this, kept as defense in depth for whatever ownership mismatch a
+	// given host/Docker combination still produces (rootless remapping,
+	// a macOS filesystem-sharing backend, ResolveUser falling back to
+	// "0:0"), without trusting a directory inspector never mounted. This
+	// has to be environment, not a config file - git honors
 	// safe.directory only from protected configuration, never from a
 	// repository's own config file.
-	args = append(args,
-		"-e", "GIT_CONFIG_COUNT=1",
-		"-e", "GIT_CONFIG_KEY_0=safe.directory",
-		"-e", "GIT_CONFIG_VALUE_0=*",
-	)
-	if !r.Network {
-		args = append(args, "--network", "none")
+	safeDirs := []string{WorkspaceDir}
+	for _, mount := range r.ReadOnlyMounts {
+		safeDirs = append(safeDirs, mount.Target)
 	}
+	args = append(args, "-e", fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(safeDirs)))
+	for i, dir := range safeDirs {
+		args = append(args,
+			"-e", fmt.Sprintf("GIT_CONFIG_KEY_%d=safe.directory", i),
+			"-e", fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, dir),
+		)
+	}
+
+	memory := r.Limits.Memory
+	if memory == "" {
+		memory = DefaultMemory
+	}
+	cpus := r.Limits.CPUs
+	if cpus == "" {
+		cpus = DefaultCPUs
+	}
+	pidsLimit := r.Limits.PIDsLimit
+	if pidsLimit == 0 {
+		pidsLimit = DefaultPIDsLimit
+	}
+	args = append(args,
+		"--memory", memory,
+		"--cpus", cpus,
+		"--pids-limit", strconv.Itoa(pidsLimit),
+	)
+
+	if r.User != "" {
+		// Many images default HOME to a directory only their own
+		// default user (commonly root) can write - /root is the usual
+		// case - which would otherwise break any check command whose
+		// toolchain writes a cache there (go, npm, pip) the moment it
+		// runs as a different, unprivileged uid. /tmp is writable by
+		// everyone in every image this has been tried against and is
+		// thrown away with the container, so it is the one path safe
+		// to assume regardless of which uid ends up running as.
+		args = append(args, "--user", r.User, "-e", "HOME=/tmp")
+	}
+
+	// Issue #43: the check container's judgment never depends on
+	// anything outside it, so it is sealed off the network
+	// unconditionally - there is no opt-in, and none is coming back
+	// (see README.md and the ruling recorded there).
+	args = append(args, "--network", "none")
+
 	args = append(args, r.Image, "sh", "-c", r.Command)
 	return NewCommand(ctx, "inspector-check-", args...)
 }

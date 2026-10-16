@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/inactdev/inspector/internal/container"
 )
 
 // ConfigFileName is the project-level config inspector reads to learn the
@@ -29,6 +31,15 @@ var ErrNoCheckCommand = errors.New("no check command configured")
 // the project's own toolchain has to be in the image or nothing runs.
 var ErrNoImage = errors.New("no container image configured")
 
+// ErrNetworkRemoved means the config still sets the "network" key.
+// Issue #43 sealed the check container off the network
+// unconditionally - no model or anything else inside it ever needs
+// one - and there is no opt-in to restore, so a stale "network" key
+// doing nothing would be exactly the kind of silent behavior change
+// this project refuses elsewhere. LoadConfig refuses outright instead
+// of quietly ignoring it.
+var ErrNetworkRemoved = errors.New(`"network" is no longer configurable: issue #43 denies the check container all network access, with no opt-in - remove the "network" key from ` + ConfigFileName)
+
 // DefaultTimeout bounds how long a check command may run when the
 // project doesn't set timeoutSeconds. SPEC.md has Fabrica invoking
 // inspector unattended, where a stuck check must produce a refusal
@@ -48,11 +59,17 @@ type Config struct {
 	// toolchain, declared the same way Check itself is. inspector builds
 	// nothing and ships nothing; see README.md.
 	Image string `json:"image"`
-	// Network, when true, gives the container network access. Default
-	// false: the check command can reach the bind-mounted repo and
-	// nothing else. See README.md for why that's the default rather
-	// than an opt-out.
-	Network bool `json:"network,omitempty"`
+	// Network exists only so LoadConfig can detect and refuse a stale
+	// "network" key; see ErrNetworkRemoved. Never read for its value.
+	Network *bool `json:"network,omitempty"`
+	// Memory, CPUs, and PIDsLimit bound the resources the check
+	// container's cgroup may use - docker run's own --memory, --cpus,
+	// and --pids-limit values. Empty/zero (the default) leaves
+	// container.New to apply its own Default* constants, which match
+	// Fabrica's worker box; see issue #43.
+	Memory    string `json:"memory,omitempty"`
+	CPUs      string `json:"cpus,omitempty"`
+	PIDsLimit int    `json:"pidsLimit,omitempty"`
 	// TimeoutSeconds bounds how long Check may run before inspector
 	// kills it and refuses rather than hanging forever. Zero (unset)
 	// uses DefaultTimeout.
@@ -74,6 +91,12 @@ func (c *Config) Timeout() time.Duration {
 		return DefaultTimeout
 	}
 	return time.Duration(c.TimeoutSeconds) * time.Second
+}
+
+// Limits returns the configured resource bounds for container.New,
+// which applies its own defaults to whichever fields are left unset.
+func (c *Config) Limits() container.Limits {
+	return container.Limits{Memory: c.Memory, CPUs: c.CPUs, PIDsLimit: c.PIDsLimit}
 }
 
 // LoadConfig reads ConfigFileName from repoRoot. It returns
@@ -98,6 +121,9 @@ func LoadConfig(repoRoot string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.Image) == "" {
 		return nil, ErrNoImage
+	}
+	if cfg.Network != nil {
+		return nil, ErrNetworkRemoved
 	}
 	return &cfg, nil
 }

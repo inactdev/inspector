@@ -73,6 +73,9 @@ func TestNew_BuildsExpectedArgs(t *testing.T) {
 		"docker run --rm",
 		"-v /host/repo:" + WorkspaceDir,
 		"-w " + WorkspaceDir,
+		"--memory " + DefaultMemory,
+		"--cpus " + DefaultCPUs,
+		"--pids-limit 512",
 		"--network none",
 		"golang:1.22 sh -c go test ./...",
 	} {
@@ -82,11 +85,69 @@ func TestNew_BuildsExpectedArgs(t *testing.T) {
 	}
 }
 
-func TestNew_NetworkOptsIn(t *testing.T) {
-	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine", Network: true})
+func TestNew_NetworkIsAlwaysBlocked(t *testing.T) {
+	// Issue #43: there is no opt-in left - the check container is
+	// sealed off the network unconditionally, in every Run.
+	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine"})
 
-	if strings.Contains(strings.Join(cmd.Args, " "), "--network none") {
-		t.Fatalf("docker args = %q, should not restrict network when Network is true", cmd.Args)
+	if !strings.Contains(strings.Join(cmd.Args, " "), "--network none") {
+		t.Fatalf("docker args = %q, want --network none unconditionally", cmd.Args)
+	}
+}
+
+func TestNew_LimitsOverrideDefaults(t *testing.T) {
+	cmd := New(context.Background(), Run{
+		RepoRoot: "/host/repo",
+		Command:  "true",
+		Image:    "alpine",
+		Limits:   Limits{Memory: "4g", CPUs: "1.5", PIDsLimit: 128},
+	})
+
+	args := strings.Join(cmd.Args, " ")
+	for _, want := range []string{"--memory 4g", "--cpus 1.5", "--pids-limit 128"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("docker args = %q, want it to contain %q", args, want)
+		}
+	}
+}
+
+func TestNew_UserSetsHomeAndSafeDirectory(t *testing.T) {
+	cmd := New(context.Background(), Run{
+		RepoRoot:       "/host/repo",
+		Command:        "true",
+		Image:          "alpine",
+		User:           "1000:1000",
+		ReadOnlyMounts: []Mount{{Source: "/host/.git", Target: "/git/common"}},
+	})
+
+	args := strings.Join(cmd.Args, " ")
+	for _, want := range []string{
+		"--user 1000:1000",
+		"-e HOME=/tmp",
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=safe.directory",
+		"GIT_CONFIG_VALUE_0=" + WorkspaceDir,
+		"GIT_CONFIG_KEY_1=safe.directory",
+		"GIT_CONFIG_VALUE_1=/git/common",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("docker args = %q, want it to contain %q", args, want)
+		}
+	}
+	if strings.Contains(args, "safe.directory=*") {
+		t.Fatalf("docker args = %q, want safe.directory scoped to known mounts, not widened to *", args)
+	}
+}
+
+func TestNew_NoUserOmitsUserFlag(t *testing.T) {
+	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine"})
+
+	args := strings.Join(cmd.Args, " ")
+	if strings.Contains(args, "--user") {
+		t.Fatalf("docker args = %q, should not pass --user when Run.User is empty", args)
+	}
+	if strings.Contains(args, "HOME=/tmp") {
+		t.Fatalf("docker args = %q, should not override HOME when not running as a resolved user", args)
 	}
 }
 

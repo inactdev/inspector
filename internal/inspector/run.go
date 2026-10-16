@@ -141,7 +141,7 @@ func Run(opts Options) (Result, error) {
 
 	timeout := cfg.Timeout()
 	started := time.Now()
-	checkResult, err := RunCheck(repoRoot, cfg.Check, cfg.Image, cfg.Network, timeout, opts.Stdout, opts.Stderr)
+	checkResult, err := RunCheck(repoRoot, cfg.Check, cfg.Image, cfg.Limits(), timeout, opts.Stdout, opts.Stderr)
 	if errors.Is(err, container.ErrGitDirUnavailable) {
 		return Result{
 			Outcome: Refused,
@@ -152,6 +152,21 @@ func Run(opts Options) (Result, error) {
 					"path, so a check command can use git from a linked worktree - but it could\n"+
 					"not this time, and a check command whose every git call fails for a reason\n"+
 					"that has nothing to do with the code is not a verdict on the code.",
+				err,
+			),
+		}, nil
+	}
+	if errors.Is(err, container.ErrRemoteDocker) {
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%v\n\n"+
+					"inspector runs the check command as the inviting host user instead of the\n"+
+					"image's own default, so a runaway check cannot own anything on the host it\n"+
+					"didn't already own - but that only means something when the container and\n"+
+					"this machine share one filesystem and user namespace, which a remote Docker\n"+
+					"endpoint does not.",
 				err,
 			),
 		}, nil

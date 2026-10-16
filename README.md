@@ -108,22 +108,50 @@ repository) or forwarded (a future key's value may not be credential-free),
 and so is a worktree whose git directory cannot be reached at all: a refusal
 and exit `2`, never a red.
 
-The container gets no network access by default. A check command that needs
-it - installing dependencies is the common case - has to opt in:
+The container gets no network access, period - `--network none`, unconditionally,
+with no opt-in. This is issue #43's ruling: nothing inside the check container
+ever needs a model or anything else outside it to judge a project's own check
+command, so there is nothing to trade that access for, and an installer step
+that needs the network (`npm install` and the like) has to run as part of
+building the project's own image instead of inside the check itself.
+
+The container also runs as the host user who invoked inspector rather than the
+image's own default (commonly root) - `docker run --user <uid>:<gid>` - so a
+runaway or hostile check command cannot write into the repo, or anything else
+it can reach, as anyone it wasn't already running as. A rootless Docker daemon
+is detected and left alone (it already maps its own root to your unprivileged
+account). This is also why the git directory trust from above is scoped rather
+than wide open: inspector declares `safe.directory` for exactly the paths it
+mounted - the repo and, when present, the shared git directory of a linked
+worktree - instead of git's wildcard `*`, so running as the matching host user
+is reinforced by an allowlist rather than a blanket trust that would cover any
+directory, not only the ones inspector chose to mount. If the project's own
+image assumes it always runs as root (an entrypoint that `chown`s something, a
+tool that refuses to run as an arbitrary uid), this is where that would show up
+as a check failure - the fix belongs in the image, not in loosening this.
+
+The container's memory, CPU, and process count are bounded the same way
+Fabrica's own worker box is bounded, so a runaway test or a fork bomb in a
+project's check command cannot exhaust the host it's checked on. The defaults -
+2 GB of memory, 2 CPUs, and 512 processes - are enough for an ordinary test
+suite; a project whose checks legitimately need more raises any of them in
+`.inspector.json`:
 
 ```json
 {
-  "check": "npm install && npm test && npm run lint",
-  "image": "node:20",
-  "network": true
+  "check": "go test ./...",
+  "image": "golang:1.22",
+  "memory": "4g",
+  "cpus": "4",
+  "pidsLimit": 1024
 }
 ```
 
-That default is deliberate, not incidental: the same container that keeps a
-hostile or broken check command from reaching the rest of your machine is also
-the thing standing between it and the network, which is how it would exfiltrate
-anything it found. Turning `network` on trusts the check command with outbound
-access; leave it off for anything you haven't read.
+`memory` and `cpus` are passed straight through to docker run's own `--memory`
+and `--cpus` flags, in their own syntax; `pidsLimit` is `--pids-limit`, a plain
+integer. Omitting any of the three uses the default above, not "unlimited" -
+there is no way to ask for unlimited here, the same way there is no way to ask
+for network back.
 
 The check command has 15 minutes to finish before inspector kills the
 container - including anything it started, like a compound command's children
@@ -139,7 +167,7 @@ your own:
 }
 ```
 
-A third field, `protectedPaths`, is read only by inspector-gate, never by
+One more field, `protectedPaths`, is read only by inspector-gate, never by
 inspector itself - see the "inspector-gate" section below.
 
 The order is commit, then inspect. inspector refuses to run against an
@@ -554,7 +582,11 @@ no API call or workflow step that does it from here.
 The check (issue #1) is built: locally, `inspector` runs a project's own check
 command against HEAD, inside a container (issue #13), and reports green or
 red, refusing loudly when no check command or image is configured, or no
-usable container runtime is found. Inspector-owned publication (issue #18) is
+usable container runtime is found. That container is memory-, CPU-, and
+process-bounded, runs as the inviting host user rather than root, and has no
+network access at all (issue #43's container hardening; its remaining piece,
+refusing a project with no committed Docker image to build from, is not yet
+built). Inspector-owned publication (issue #18) is
 also built: it stages a green commit, posts its status, then moves an explicitly
 named non-default branch; a red result remains local by v1 policy. The HTTP
 examiner (issue #7, above) and the gate workflow (issue #4) are also built. The
