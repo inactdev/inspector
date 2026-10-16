@@ -43,3 +43,6 @@ go test -race ./...
 
 echo "==> inspector-gate tests"
 .github/scripts/inspector-gate_test.sh
+
+echo "==> fabrica-contract-check tests"
+.github/scripts/fabrica-contract-check_test.sh
