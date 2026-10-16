@@ -17,3 +17,18 @@ jobs:
         with:
           go-version-file: go.mod
       - run: script/check
+
+  # fabrica-contract (issue #109, "Inspector side"): the only way
+  # cmd/inspector/testdata/fabrica-consumer-contract.json may change is a
+  # Fabrica-made pull request replacing it wholesale with Fabrica's own
+  # src/inspector/consumer-contract.json. This job is what makes a
+  # hand edit fail: it fetches Fabrica's file from Fabrica's default
+  # branch and fails, printing the diff, if the two no longer match. See
+  # .github/scripts/fabrica-contract-check.sh for the full reasoning.
+  fabrica-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/fabrica-contract-check.sh
