@@ -405,6 +405,21 @@ examiner how to drive the app, and `--always-true` names its invariants. The
 per-task `--budget` bounds app-driving attempts: request scenarios come first,
 then nearby feature-map and invariant scenarios, then the examiner stops.
 
+`--vendor` picks which model vendor the examiner asks, through one small
+seam (`internal/llm`) shared with every other AI-using part of Inspector.
+Omit it and Inspector uses `anthropic`, exactly as before. Naming any other
+vendor - `xai`, `openrouter`, a local `ollama` - switches to an
+OpenAI-compatible adapter that works against any endpoint speaking that
+request shape, never one vendor only. Secrets reach the adapter by name from
+the environment, never on the command line, under one fixed rule with no
+per-vendor table: uppercase the vendor name and append `_API_KEY`, and for
+every vendor except `anthropic` also `_BASE_URL`. `--vendor openrouter` reads
+`OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`; a missing one refuses, naming
+the exact variable. Whichever vendor ran - including the unflagged default -
+is recorded as `vendor: anthropic (default, no flag given)` or `vendor:
+<name>` in both the printed JSON report and the posted `examiner` status, so
+the choice is never silent.
+
 `--changed-files` is Fabrica's names-only list of every worker-changed file:
 
 ```json

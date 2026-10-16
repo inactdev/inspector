@@ -88,6 +88,62 @@ func TestExaminer_IncompleteWithoutFindingPostsError(t *testing.T) {
 	}
 }
 
+func TestExaminer_VendorIsNeverSilentInReportAndStamp(t *testing.T) {
+	var got struct {
+		Description string `json:"description"`
+	}
+	server := statusServer(t, &got)
+	defer server.Close()
+	withExaminerRun(t, examiner.Result{Kind: examiner.Green, Verdict: examiner.Verdict{
+		Outcomes: []examiner.Outcome{{Claim: "captures can be listed", Verdict: examiner.Confirmed, Scenario: "GET /inklings", Evidence: "200"}},
+	}})
+	withStatusServer(t, server)
+
+	var stdout, stderr bytes.Buffer
+	if code := run(examinerArgs(), &stdout, &stderr); code != exitGreen {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitGreen, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "vendor: anthropic (default, no flag given)") {
+		t.Fatalf("stdout = %q, want the default vendor named explicitly", stdout.String())
+	}
+	if !strings.HasPrefix(got.Description, "vendor: anthropic (default, no flag given)") {
+		t.Fatalf("posted status description = %q, want it to lead with the default vendor", got.Description)
+	}
+}
+
+func TestExaminer_VendorFlagOverridesTheDefaultEverywhere(t *testing.T) {
+	var got struct {
+		Description string `json:"description"`
+	}
+	server := statusServer(t, &got)
+	defer server.Close()
+	var capturedVendor string
+	previous := runExamination
+	runExamination = func(_ context.Context, opts examiner.RunOptions) (examiner.Result, error) {
+		capturedVendor = opts.Vendor
+		return examiner.Result{Kind: examiner.Green, Verdict: examiner.Verdict{
+			Outcomes: []examiner.Outcome{{Claim: "captures can be listed", Verdict: examiner.Confirmed, Scenario: "GET /inklings", Evidence: "200"}},
+		}}, nil
+	}
+	t.Cleanup(func() { runExamination = previous })
+	withStatusServer(t, server)
+
+	args := append(append([]string{}, examinerArgs()...), "--vendor", "openrouter")
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != exitGreen {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, exitGreen, stderr.String())
+	}
+	if capturedVendor != "openrouter" {
+		t.Fatalf("RunOptions.Vendor = %q, want openrouter forwarded from the flag", capturedVendor)
+	}
+	if !strings.Contains(stdout.String(), "vendor: openrouter\n") {
+		t.Fatalf("stdout = %q, want the explicit vendor named without a default marker", stdout.String())
+	}
+	if !strings.HasPrefix(got.Description, "vendor: openrouter;") {
+		t.Fatalf("posted status description = %q, want it to lead with the explicit vendor", got.Description)
+	}
+}
+
 func TestExaminer_MissingOperationalInputPostsErrorStatus(t *testing.T) {
 	var got struct {
 		State   string `json:"state"`

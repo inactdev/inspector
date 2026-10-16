@@ -321,6 +321,65 @@ func TestDriveApp_RejectsRedirectToAnotherOrigin(t *testing.T) {
 	}
 }
 
+func TestRunAgent_OpenAICompatibleVendorDerivesAConfirmedOutcome(t *testing.T) {
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/inklings" {
+			t.Errorf("app request = %s %s, want GET /inklings", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"one","text":"hello"}]`))
+	}))
+	defer app.Close()
+
+	modelCalls := 0
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelCalls++
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("model request path = %q, want /chat/completions", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Errorf("Authorization = %q, want Bearer test-key", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch modelCalls {
+		case 1:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"propose-1","type":"function","function":{"name":"propose_capabilities","arguments":"{\"capabilities\":[{\"id\":\"list\",\"claim\":\"saved inklings can be listed\",\"scenario\":\"GET /inklings\"}]}"}}]}}]}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"drive-1","type":"function","function":{"name":"drive_app","arguments":"{\"capabilityId\":\"list\",\"request\":{\"method\":\"GET\",\"path\":\"/inklings\"}}"}}]}}]}`))
+		case 3:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"assess-1","type":"function","function":{"name":"assess_capabilities","arguments":"{\"assessments\":[{\"capabilityId\":\"list\",\"verdict\":\"confirmed\",\"evidence\":\"200 response contained the saved inkling\"}]}"}}]}}]}`))
+		case 4:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"finish-1","type":"function","function":{"name":"finish_examination","arguments":"{}"}}]}}]}`))
+		default:
+			t.Errorf("unexpected model call %d", modelCalls)
+		}
+	}))
+	defer model.Close()
+
+	inputDir, outputDir := agentDirectories(t)
+	t.Setenv("FAKEVENDOR_API_KEY", "test-key")
+	t.Setenv("FAKEVENDOR_BASE_URL", model.URL)
+	if err := RunAgent(context.Background(), AgentOptions{
+		InputDir: inputDir, OutputDir: outputDir, AppURL: app.URL, Vendor: "fakevendor", Model: "test-model", Budget: 4,
+	}); err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(outputDir, VerdictName))
+	if err != nil {
+		t.Fatalf("reading verdict: %v", err)
+	}
+	var result Result
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("decoding verdict: %v", err)
+	}
+	if result.Kind != Green || result.Verdict.Outcomes[0].Verdict != Confirmed {
+		t.Fatalf("verdict = %#v, want a record-derived confirmation via the OpenAI-compatible vendor", result)
+	}
+	if modelCalls != 4 {
+		t.Fatalf("model calls = %d, want 4", modelCalls)
+	}
+}
+
 func agentDirectories(t *testing.T) (string, string) {
 	t.Helper()
 	inputDir := t.TempDir()

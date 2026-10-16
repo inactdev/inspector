@@ -59,6 +59,46 @@ func TestNewContainerCommand_OnlyMountsAllowedResources(t *testing.T) {
 	}
 }
 
+func TestNewContainerCommand_ForwardsVendorEnvNamesAndFlag(t *testing.T) {
+	inputDir := t.TempDir()
+	outputDir := t.TempDir()
+	cmd := newContainerCommand(context.Background(), containerOptions{
+		InputDir: inputDir, OutputDir: outputDir, AppURL: "http://app:8080", Model: "test-model",
+		Vendor: "openrouter", APIKeyVar: "OPENROUTER_API_KEY", BaseURLVar: "OPENROUTER_BASE_URL",
+		Network: "examiner-test", Timeout: 23 * time.Minute, Budget: 7,
+	}, testRuntimeImageID)
+	defer cmd.Cleanup()
+
+	joined := strings.Join(cmd.Args, "\x00")
+	for _, want := range []string{"--env\x00OPENROUTER_API_KEY", "--env\x00OPENROUTER_BASE_URL", "--vendor\x00openrouter"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("container command = %q, want %q", cmd.Args, want)
+		}
+	}
+	if strings.Contains(joined, "openrouter") == false {
+		t.Fatalf("container command %q never names the vendor", cmd.Args)
+	}
+}
+
+func TestNewContainerCommand_OmitsBaseURLEnvForAnthropic(t *testing.T) {
+	inputDir := t.TempDir()
+	outputDir := t.TempDir()
+	cmd := newContainerCommand(context.Background(), containerOptions{
+		InputDir: inputDir, OutputDir: outputDir, AppURL: "http://app:8080", Model: "test-model",
+		Vendor: "anthropic", APIKeyVar: "ANTHROPIC_API_KEY", BaseURLVar: "",
+		Network: "examiner-test", Timeout: 23 * time.Minute, Budget: 7,
+	}, testRuntimeImageID)
+	defer cmd.Cleanup()
+
+	joined := strings.Join(cmd.Args, "\x00")
+	if !strings.Contains(joined, "--env\x00ANTHROPIC_API_KEY") {
+		t.Fatalf("container command = %q, want ANTHROPIC_API_KEY forwarded", cmd.Args)
+	}
+	if strings.Contains(joined, "_BASE_URL") {
+		t.Fatalf("container command = %q, anthropic must not forward a base URL env var", cmd.Args)
+	}
+}
+
 func TestNewContainerCommand_RejectsEveryOtherMountSpelling(t *testing.T) {
 	cmd := newContainerCommand(context.Background(), containerOptions{
 		InputDir: "/private/input", OutputDir: "/private/output", AppURL: "http://app:8080", Model: "test-model", Network: "none",

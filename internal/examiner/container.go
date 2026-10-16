@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/inactdev/inspector/internal/container"
+	"github.com/inactdev/inspector/internal/llm"
 )
 
 const (
@@ -30,6 +31,7 @@ const (
 type RunOptions struct {
 	Inputs  Inputs
 	AppURL  string
+	Vendor  string // raw --vendor flag value; empty selects Anthropic.
 	Model   string
 	Network string
 	Timeout time.Duration
@@ -60,8 +62,14 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	if strings.TrimSpace(opts.Model) == "" {
 		return Result{Kind: Refused, Message: "no model was configured"}, nil
 	}
-	if _, ok := os.LookupEnv(AnthropicAPIKeyEnvVar); !ok {
-		return Result{Kind: Refused, Message: fmt.Sprintf("%s is not set", AnthropicAPIKeyEnvVar)}, nil
+	vendor, apiKeyVar, baseURLVar := llm.EnvVarNames(opts.Vendor)
+	if _, ok := os.LookupEnv(apiKeyVar); !ok {
+		return Result{Kind: Refused, Message: fmt.Sprintf("%s is not set", apiKeyVar)}, nil
+	}
+	if baseURLVar != "" {
+		if _, ok := os.LookupEnv(baseURLVar); !ok {
+			return Result{Kind: Refused, Message: fmt.Sprintf("%s is not set", baseURLVar)}, nil
+		}
 	}
 	runtimeUser, err := localDockerRuntimeUser(runCtx)
 	if err != nil {
@@ -88,14 +96,17 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 	}
 
 	cmd := newContainerCommand(runCtx, containerOptions{
-		InputDir:  prepared.Dir,
-		OutputDir: outputDir,
-		AppURL:    opts.AppURL,
-		Model:     opts.Model,
-		Network:   network,
-		Timeout:   timeout,
-		Budget:    budget,
-		User:      runtimeUser,
+		InputDir:   prepared.Dir,
+		OutputDir:  outputDir,
+		AppURL:     opts.AppURL,
+		Vendor:     vendor,
+		APIKeyVar:  apiKeyVar,
+		BaseURLVar: baseURLVar,
+		Model:      opts.Model,
+		Network:    network,
+		Timeout:    timeout,
+		Budget:     budget,
+		User:       runtimeUser,
 	}, runtimeImage)
 	defer cmd.Cleanup()
 	cmd.Stdout = opts.Stdout
@@ -232,12 +243,14 @@ func prepareOutput() (string, string, func(), error) {
 }
 
 type containerOptions struct {
-	InputDir, OutputDir string
-	AppURL, Model       string
-	Network             string
-	Timeout             time.Duration
-	Budget              int
-	User                string
+	InputDir, OutputDir   string
+	AppURL, Model         string
+	Vendor                string
+	APIKeyVar, BaseURLVar string
+	Network               string
+	Timeout               time.Duration
+	Budget                int
+	User                  string
 }
 
 func jsonUnmarshalStrict(data []byte, target any) error {
@@ -270,12 +283,18 @@ func newContainerCommand(ctx context.Context, opts containerOptions, runtimeImag
 		"--mount", "type=bind,src="+opts.OutputDir+",dst=/examiner/output",
 		"--workdir", "/examiner",
 		"--network", opts.Network,
-		"--env", AnthropicAPIKeyEnvVar,
+		"--env", opts.APIKeyVar,
+	)
+	if opts.BaseURLVar != "" {
+		args = append(args, "--env", opts.BaseURLVar)
+	}
+	args = append(args,
 		"--entrypoint", "/usr/local/bin/examiner-agent",
 		runtimeImageID,
 		"--input-dir", "/examiner/input",
 		"--output-dir", "/examiner/output",
 		"--app-url", opts.AppURL,
+		"--vendor", opts.Vendor,
 		"--model", opts.Model,
 		"--timeout", timeout.String(),
 		"--budget", fmt.Sprintf("%d", budget),

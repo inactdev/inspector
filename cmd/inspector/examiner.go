@@ -12,6 +12,7 @@ import (
 
 	"github.com/inactdev/inspector/internal/examiner"
 	"github.com/inactdev/inspector/internal/inspector"
+	"github.com/inactdev/inspector/internal/llm"
 )
 
 var runExamination = examiner.Run
@@ -28,7 +29,8 @@ func runExaminer(args []string, stdout, stderr io.Writer) int {
 	commit := fs.String("commit", "", "commit the examiner status belongs to (required)")
 	owner := fs.String("owner", "", "GitHub repository owner (required)")
 	repo := fs.String("repo", "", "GitHub repository name (required)")
-	model := fs.String("model", "", "Anthropic model for deriving and driving scenarios (required)")
+	vendor := fs.String("vendor", "", "model vendor (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment")
+	model := fs.String("model", "", "model name for the selected vendor, for deriving and driving scenarios (required)")
 	network := fs.String("network", examiner.DefaultNetwork, "Docker network that reaches the running app")
 	timeout := fs.Duration("timeout", examiner.DefaultTimeout, "maximum examination duration")
 	budget := fs.Int("budget", examiner.DefaultBudget, "maximum app-driving attempts")
@@ -46,6 +48,7 @@ mounts the judged repository or implementation.
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
+	vendorDescription := llm.Describe(*vendor)
 	if fs.NArg() != 0 {
 		fmt.Fprintln(stderr, "refused: inspector examine does not accept claim text; it derives outcomes from --request")
 		return exitRefused
@@ -68,7 +71,7 @@ mounts the judged repository or implementation.
 	} {
 		if strings.TrimSpace(required.value) == "" {
 			result := examiner.Result{Kind: examiner.Refused, Message: fmt.Sprintf("missing required %s", required.name)}
-			return finishExaminer(*owner, *repo, *commit, stdout, stderr, result)
+			return finishExaminer(*owner, *repo, *commit, vendorDescription, stdout, stderr, result)
 		}
 	}
 
@@ -81,6 +84,7 @@ mounts the judged repository or implementation.
 			BaseTestsPath:    *baseTestsPath,
 		},
 		AppURL:  *appURL,
+		Vendor:  *vendor,
 		Model:   *model,
 		Network: *network,
 		Timeout: *timeout,
@@ -91,10 +95,11 @@ mounts the judged repository or implementation.
 	if err != nil {
 		result = examiner.Result{Kind: examiner.Refused, Message: fmt.Sprintf("examiner could not start: %v", err)}
 	}
-	return finishExaminer(*owner, *repo, *commit, stdout, stderr, result)
+	return finishExaminer(*owner, *repo, *commit, vendorDescription, stdout, stderr, result)
 }
 
-func finishExaminer(owner, repo, commit string, stdout, stderr io.Writer, result examiner.Result) int {
+func finishExaminer(owner, repo, commit, vendorDescription string, stdout, stderr io.Writer, result examiner.Result) int {
+	result.Vendor = vendorDescription
 	printExaminerResult(stdout, stderr, result)
 	if err := postExaminerStatus(owner, repo, commit, result); err != nil {
 		fmt.Fprintf(stderr, "refused: examiner reached a %s result but could not post its separate status: %v\n", result.Kind, err)
@@ -132,6 +137,7 @@ func postExaminerStatus(owner, repo, commit string, result examiner.Result) erro
 		state = inspector.StatusError
 		description = "examiner: could not be tested"
 	}
+	description = statusDescription(fmt.Sprintf("vendor: %s; %s", result.Vendor, description))
 	return inspector.PostCommitStatus(inspector.PostStatusOptions{
 		Owner:       owner,
 		Repo:        repo,
@@ -162,13 +168,13 @@ func examinerFailureDescription(result examiner.Result) string {
 		missing = "requested behavior was not confirmed"
 	}
 	if result.Verdict.ExaminationIncomplete {
-		return statusDescription("examiner: missing behavior; examination incomplete; missing " + missing + "; " + untestedClaims(result))
+		return "examiner: missing behavior; examination incomplete; missing " + missing + "; " + untestedClaims(result)
 	}
-	return statusDescription("examiner: missing " + missing)
+	return "examiner: missing " + missing
 }
 
 func examinerIncompleteDescription(result examiner.Result) string {
-	return statusDescription("examiner: examination incomplete: " + untestedClaims(result))
+	return "examiner: examination incomplete: " + untestedClaims(result)
 }
 
 func untestedClaims(result examiner.Result) string {
@@ -193,6 +199,7 @@ func printExaminerResult(stdout, stderr io.Writer, result examiner.Result) {
 	if err == nil {
 		fmt.Fprintln(stdout, string(data))
 	}
+	fmt.Fprintf(stdout, "vendor: %s\n", result.Vendor)
 	for _, outcome := range result.Verdict.Outcomes {
 		switch outcome.Verdict {
 		case examiner.Confirmed:
