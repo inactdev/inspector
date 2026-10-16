@@ -85,13 +85,22 @@ func TestNew_BuildsExpectedArgs(t *testing.T) {
 	}
 }
 
-func TestNew_NetworkIsAlwaysBlocked(t *testing.T) {
-	// Issue #43: there is no opt-in left - the check container is
-	// sealed off the network unconditionally, in every Run.
+func TestNew_NoNetworkByDefault(t *testing.T) {
 	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine"})
 
 	if !strings.Contains(strings.Join(cmd.Args, " "), "--network none") {
-		t.Fatalf("docker args = %q, want --network none unconditionally", cmd.Args)
+		t.Fatalf("docker args = %q, want --network none by default", cmd.Args)
+	}
+}
+
+func TestNew_NetworkOptsIn(t *testing.T) {
+	// Temporary opt-in (issue #43's deferred fourth requirement): keep
+	// honoring it until projects commit their own image with
+	// dependencies baked in. See Run.Network's own doc comment.
+	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine", Network: true})
+
+	if strings.Contains(strings.Join(cmd.Args, " "), "--network none") {
+		t.Fatalf("docker args = %q, should not restrict network when Network is true", cmd.Args)
 	}
 }
 

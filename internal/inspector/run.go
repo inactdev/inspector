@@ -141,7 +141,7 @@ func Run(opts Options) (Result, error) {
 
 	timeout := cfg.Timeout()
 	started := time.Now()
-	checkResult, err := RunCheck(repoRoot, cfg.Check, cfg.Image, cfg.Limits(), timeout, opts.Stdout, opts.Stderr)
+	checkResult, err := RunCheck(repoRoot, cfg.Check, cfg.Image, cfg.Limits(), cfg.Network, timeout, opts.Stdout, opts.Stderr)
 	if errors.Is(err, container.ErrGitDirUnavailable) {
 		return Result{
 			Outcome: Refused,

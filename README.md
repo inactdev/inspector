@@ -108,12 +108,29 @@ repository) or forwarded (a future key's value may not be credential-free),
 and so is a worktree whose git directory cannot be reached at all: a refusal
 and exit `2`, never a red.
 
-The container gets no network access, period - `--network none`, unconditionally,
-with no opt-in. This is issue #43's ruling: nothing inside the check container
-ever needs a model or anything else outside it to judge a project's own check
-command, so there is nothing to trade that access for, and an installer step
-that needs the network (`npm install` and the like) has to run as part of
-building the project's own image instead of inside the check itself.
+The container gets no network access by default. A check command that needs
+it - installing dependencies is the common case - has to opt in:
+
+```json
+{
+  "check": "npm ci && npm test && npm run lint",
+  "image": "node:20",
+  "network": true
+}
+```
+
+That default is deliberate, not incidental: the same container that keeps a
+hostile or broken check command from reaching the rest of your machine is also
+the thing standing between it and the network, which is how it would exfiltrate
+anything it found. `network` is honored for now, but it is a deliberately
+temporary opt-in, not a settled design: issue #43's eventual intent is that
+nothing inside the check container ever needs the network at all, once a
+project commits its own image with its dependencies already baked in rather
+than installing them at check time (a separate, not-yet-built issue - see
+"Status" below). Every run that uses `network: true` logs that on stderr, in
+the report alongside the check's own output, as a standing reminder that it is
+going away. Turning it on trusts the check command with outbound access in the
+meantime; leave it off for anything you haven't read.
 
 The container also runs as the host user who invoked inspector rather than the
 image's own default (commonly root) - `docker run --user <uid>:<gid>` - so a
@@ -150,8 +167,7 @@ suite; a project whose checks legitimately need more raises any of them in
 `memory` and `cpus` are passed straight through to docker run's own `--memory`
 and `--cpus` flags, in their own syntax; `pidsLimit` is `--pids-limit`, a plain
 integer. Omitting any of the three uses the default above, not "unlimited" -
-there is no way to ask for unlimited here, the same way there is no way to ask
-for network back.
+there is no way to ask for unlimited here.
 
 The check command has 15 minutes to finish before inspector kills the
 container - including anything it started, like a compound command's children
@@ -583,10 +599,11 @@ The check (issue #1) is built: locally, `inspector` runs a project's own check
 command against HEAD, inside a container (issue #13), and reports green or
 red, refusing loudly when no check command or image is configured, or no
 usable container runtime is found. That container is memory-, CPU-, and
-process-bounded, runs as the inviting host user rather than root, and has no
-network access at all (issue #43's container hardening; its remaining piece,
-refusing a project with no committed Docker image to build from, is not yet
-built). Inspector-owned publication (issue #18) is
+process-bounded and runs as the inviting host user rather than root (issue
+#43); it has no network access by default, with a temporary `network: true`
+opt-in still honored until projects commit their own image with dependencies
+baked in - a separate, not-yet-built issue. Inspector-owned publication (issue
+#18) is
 also built: it stages a green commit, posts its status, then moves an explicitly
 named non-default branch; a red result remains local by v1 policy. The HTTP
 examiner (issue #7, above) and the gate workflow (issue #4) are also built. The

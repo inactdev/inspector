@@ -31,15 +31,6 @@ var ErrNoCheckCommand = errors.New("no check command configured")
 // the project's own toolchain has to be in the image or nothing runs.
 var ErrNoImage = errors.New("no container image configured")
 
-// ErrNetworkRemoved means the config still sets the "network" key.
-// Issue #43 sealed the check container off the network
-// unconditionally - no model or anything else inside it ever needs
-// one - and there is no opt-in to restore, so a stale "network" key
-// doing nothing would be exactly the kind of silent behavior change
-// this project refuses elsewhere. LoadConfig refuses outright instead
-// of quietly ignoring it.
-var ErrNetworkRemoved = errors.New(`"network" is no longer configurable: issue #43 denies the check container all network access, with no opt-in - remove the "network" key from ` + ConfigFileName)
-
 // DefaultTimeout bounds how long a check command may run when the
 // project doesn't set timeoutSeconds. SPEC.md has Fabrica invoking
 // inspector unattended, where a stuck check must produce a refusal
@@ -59,9 +50,14 @@ type Config struct {
 	// toolchain, declared the same way Check itself is. inspector builds
 	// nothing and ships nothing; see README.md.
 	Image string `json:"image"`
-	// Network exists only so LoadConfig can detect and refuse a stale
-	// "network" key; see ErrNetworkRemoved. Never read for its value.
-	Network *bool `json:"network,omitempty"`
+	// Network, when true, gives the container network access. Default
+	// false: the check command can reach the bind-mounted repo and
+	// nothing else. This is a deliberately temporary opt-in - Fabrica's
+	// own check currently needs it for `npm ci` when node_modules is
+	// missing - that goes away once projects commit their own image
+	// with dependencies baked in (issue #43's deferred fourth
+	// requirement); every run that uses it logs as much. See README.md.
+	Network bool `json:"network,omitempty"`
 	// Memory, CPUs, and PIDsLimit bound the resources the check
 	// container's cgroup may use - docker run's own --memory, --cpus,
 	// and --pids-limit values. Empty/zero (the default) leaves
@@ -121,9 +117,6 @@ func LoadConfig(repoRoot string) (*Config, error) {
 	}
 	if strings.TrimSpace(cfg.Image) == "" {
 		return nil, ErrNoImage
-	}
-	if cfg.Network != nil {
-		return nil, ErrNetworkRemoved
 	}
 	return &cfg, nil
 }

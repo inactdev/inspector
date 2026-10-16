@@ -110,6 +110,13 @@ type Run struct {
 	// runs as. Empty leaves the image's own default user (commonly
 	// root). See ResolveUser - New never guesses this on its own.
 	User string
+	// Network, when true, gives the container network access instead
+	// of the default `--network none`. This is a deliberately
+	// temporary opt-in (see .inspector.json's "network" field and
+	// check.go's RunCheck): it exists only until projects commit their
+	// own image with dependencies baked in, at which point nothing
+	// inside the container will need the network for anything.
+	Network bool
 }
 
 // Cmd is one containerized run in progress: the *exec.Cmd for the
@@ -208,11 +215,14 @@ func New(ctx context.Context, r Run) *Cmd {
 		args = append(args, "--user", r.User, "-e", "HOME=/tmp")
 	}
 
-	// Issue #43: the check container's judgment never depends on
-	// anything outside it, so it is sealed off the network
-	// unconditionally - there is no opt-in, and none is coming back
-	// (see README.md and the ruling recorded there).
-	args = append(args, "--network", "none")
+	// Denied by default - the same containment this package exists
+	// for otherwise would stop at the repo's own files and let the
+	// network stand between a hostile check and exfiltrating whatever
+	// it found. Network opts out of that; see its own doc comment for
+	// why that opt-in is temporary.
+	if !r.Network {
+		args = append(args, "--network", "none")
+	}
 
 	args = append(args, r.Image, "sh", "-c", r.Command)
 	return NewCommand(ctx, "inspector-check-", args...)

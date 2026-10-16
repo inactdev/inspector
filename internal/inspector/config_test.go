@@ -65,36 +65,29 @@ func TestLoadConfig_EmptyImage(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_RefusesStaleNetworkTrue(t *testing.T) {
+func TestLoadConfig_ReadsNetwork(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "network": true}`})
 
-	_, err := LoadConfig(dir)
-	if !errors.Is(err, ErrNetworkRemoved) {
-		t.Fatalf("expected ErrNetworkRemoved, got %v", err)
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.Network {
+		t.Fatal("Network = false, want true")
 	}
 }
 
-func TestLoadConfig_RefusesStaleNetworkFalse(t *testing.T) {
-	// Issue #43: there is no opt-in left, so even the previously-inert
-	// "network": false must be refused - a present key that used to do
-	// something and now silently does nothing is exactly the kind of
-	// quiet behavior change this project refuses elsewhere.
-	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "network": false}`})
-
-	_, err := LoadConfig(dir)
-	if !errors.Is(err, ErrNetworkRemoved) {
-		t.Fatalf("expected ErrNetworkRemoved, got %v", err)
-	}
-}
-
-func TestLoadConfig_NoNetworkKeyIsFine(t *testing.T) {
+func TestLoadConfig_NetworkDefaultsFalse(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine"}`})
 
-	if _, err := LoadConfig(dir); err != nil {
+	cfg, err := LoadConfig(dir)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Network {
+		t.Fatal("Network = true, want false (the check command must opt in)")
 	}
 }
 
