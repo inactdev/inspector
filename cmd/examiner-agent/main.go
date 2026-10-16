@@ -28,7 +28,8 @@ func run(args []string) int {
 	inputDir := fs.String("input-dir", "", "sealed input directory")
 	outputDir := fs.String("output-dir", "", "sealed output directory")
 	appURL := fs.String("app-url", "", "running app URL")
-	model := fs.String("model", "", "Anthropic model")
+	vendor := fs.String("vendor", "", "model vendor (default: anthropic)")
+	model := fs.String("model", "", "model name for the selected vendor")
 	timeout := fs.Duration("timeout", defaultTimeout, "maximum examination duration")
 	budget := fs.Int("budget", examiner.DefaultBudget, "maximum app-driving attempts")
 	runtimeFingerprint := fs.Bool("runtime-fingerprint", false, "print the compiled examiner source fingerprint")
@@ -50,7 +51,7 @@ func run(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	if err := examiner.RunAgent(ctx, examiner.AgentOptions{
-		InputDir: *inputDir, OutputDir: *outputDir, AppURL: *appURL, Model: *model, Budget: *budget,
+		InputDir: *inputDir, OutputDir: *outputDir, AppURL: *appURL, Vendor: *vendor, Model: *model, Budget: *budget,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "examiner-agent: %v\n", err)
 		return exitRefused

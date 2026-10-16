@@ -1,7 +1,6 @@
 package examiner
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,11 +12,14 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/inactdev/inspector/internal/llm"
 )
 
 const (
+	// AnthropicAPIKeyEnvVar names the default vendor's secret, per the fixed
+	// uppercase-vendor-name-plus-_API_KEY rule in internal/llm.
 	AnthropicAPIKeyEnvVar = "ANTHROPIC_API_KEY"
-	defaultAnthropicURL   = "https://api.anthropic.com/v1/messages"
 	maxAppResponseBytes   = 64 << 10
 	maxAgentTurns         = 32
 )
@@ -28,40 +30,10 @@ type AgentOptions struct {
 	InputDir   string
 	OutputDir  string
 	AppURL     string
+	Vendor     string // raw --vendor flag value; empty selects Anthropic.
 	Model      string
-	APIBaseURL string // test-only override; inspector examine never accepts one.
+	APIBaseURL string // test-only Anthropic override; inspector examine never accepts one.
 	Budget     int
-}
-
-type anthropicMessageRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system"`
-	Tools     []anthropicTool    `json:"tools"`
-	Messages  []anthropicMessage `json:"messages"`
-}
-
-type anthropicTool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"input_schema"`
-}
-
-type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
-}
-
-type anthropicResponse struct {
-	Content []anthropicBlock `json:"content"`
-}
-
-type anthropicBlock struct {
-	Type  string          `json:"type"`
-	ID    string          `json:"id,omitempty"`
-	Name  string          `json:"name,omitempty"`
-	Input json.RawMessage `json:"input,omitempty"`
-	Text  string          `json:"text,omitempty"`
 }
 
 // RunAgent asks the model to propose scenarios and operate the running app
@@ -70,6 +42,13 @@ type anthropicBlock struct {
 func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 	if strings.TrimSpace(opts.Model) == "" {
 		return errors.New("no model was configured")
+	}
+	adapter, _, err := llm.Resolve(opts.Vendor, opts.Model)
+	if err != nil {
+		return err
+	}
+	if anthropic, ok := adapter.(*llm.AnthropicAdapter); ok && opts.APIBaseURL != "" {
+		anthropic.BaseURL = opts.APIBaseURL
 	}
 	baseURL, err := validAppURL(opts.AppURL)
 	if err != nil {
@@ -111,7 +90,7 @@ func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 	}
 
 	initial := fmt.Sprintf("REQUEST (derive the requested capabilities from this, never a worker checklist):\n%s\n\nFEATURE MAP (features and how to drive the running app):\n%s\n\nALWAYS-TRUE LIST (project invariants):\n%s\n\nCHANGED FILE NAMES (worker output, names only):\n%s\n\nPRE-TASK CHANGED TESTS (from the task starting commit, never worker content):\n%s", request, featureMap, alwaysTrue, changedFilesData, baseTestsData)
-	messages := []anthropicMessage{{Role: "user", Content: initial}}
+	messages := []llm.Message{{Role: "user", Content: []llm.Block{{Type: llm.Text, Text: initial}}}}
 	record := NewExaminationRecord(opts.Budget)
 	defer func() {
 		if runErr == nil || len(record.Capabilities) == 0 {
@@ -127,36 +106,36 @@ func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 	}
 
 	for turn := 0; turn < maxAgentTurns; turn++ {
-		response, err := askModel(ctx, opts, messages)
+		blocks, err := adapter.Ask(ctx, agentSystemPrompt, agentTools, messages)
 		if err != nil {
 			return err
 		}
-		if len(response.Content) == 0 {
+		if len(blocks) == 0 {
 			return errors.New("model returned no content")
 		}
-		messages = append(messages, anthropicMessage{Role: "assistant", Content: response.Content})
+		messages = append(messages, llm.Message{Role: "assistant", Content: blocks})
 
-		toolResults := make([]map[string]any, 0, len(response.Content))
+		toolResults := make([]llm.Block, 0, len(blocks))
 		pendingObservations := make([]Observation, 0)
 		finishResultIndexes := make([]int, 0)
 		operationRejected := false
 		finish := false
-		for _, block := range response.Content {
-			if block.Type != "tool_use" {
+		for _, block := range blocks {
+			if block.Type != llm.ToolUse {
 				continue
 			}
-			switch block.Name {
+			switch block.ToolName {
 			case "propose_capabilities":
-				answer, proposalErr := addCapabilities(record, block.Input, baseTestPaths)
+				answer, proposalErr := addCapabilities(record, block.ToolInput, baseTestPaths)
 				if proposalErr != nil {
 					operationRejected = true
 					answer = "proposal rejected: " + proposalErr.Error()
 				} else if err := writeDerivedResult(opts.OutputDir, record); err != nil {
 					return err
 				}
-				toolResults = append(toolResults, toolResult(block.ID, answer))
+				toolResults = append(toolResults, toolResult(block.ToolUseID, answer))
 			case "drive_app":
-				answer, observation, accepted, err := driveCapability(ctx, record, baseURL, block.Input, func() error {
+				answer, observation, accepted, err := driveCapability(ctx, record, baseURL, block.ToolInput, func() error {
 					return writeDerivedResult(opts.OutputDir, record)
 				})
 				if err != nil {
@@ -168,23 +147,23 @@ func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 				if observation != nil {
 					pendingObservations = append(pendingObservations, *observation)
 				}
-				toolResults = append(toolResults, toolResult(block.ID, answer))
+				toolResults = append(toolResults, toolResult(block.ToolUseID, answer))
 			case "assess_capabilities":
-				answer, assessmentErr := addAssessments(record, block.Input)
+				answer, assessmentErr := addAssessments(record, block.ToolInput)
 				if assessmentErr != nil {
 					operationRejected = true
 					answer = "assessment rejected: " + assessmentErr.Error()
 				} else if err := writeDerivedResult(opts.OutputDir, record); err != nil {
 					return err
 				}
-				toolResults = append(toolResults, toolResult(block.ID, answer))
+				toolResults = append(toolResults, toolResult(block.ToolUseID, answer))
 			case "finish_examination":
 				finish = true
 				finishResultIndexes = append(finishResultIndexes, len(toolResults))
-				toolResults = append(toolResults, toolResult(block.ID, "the examination record will now derive every outcome"))
+				toolResults = append(toolResults, toolResult(block.ToolUseID, "the examination record will now derive every outcome"))
 			default:
 				operationRejected = true
-				toolResults = append(toolResults, toolResult(block.ID, "tool is not available"))
+				toolResults = append(toolResults, toolResult(block.ToolUseID, "tool is not available"))
 			}
 		}
 		if len(toolResults) == 0 {
@@ -193,10 +172,10 @@ func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 		if finish && operationRejected {
 			finish = false
 			for _, index := range finishResultIndexes {
-				toolResults[index]["content"] = "finish rejected because another tool operation in this turn was rejected"
+				toolResults[index].ToolResult = "finish rejected because another tool operation in this turn was rejected"
 			}
 		}
-		messages = append(messages, anthropicMessage{Role: "user", Content: toolResults})
+		messages = append(messages, llm.Message{Role: "user", Content: toolResults})
 		// Observations become available only after their tool result was added
 		// to messages, so an assessment in the same model response cannot race
 		// a request whose response it has not seen.
@@ -387,105 +366,55 @@ func markExaminationIncomplete(result *Result, message string) {
 	}
 }
 
-func askModel(ctx context.Context, opts AgentOptions, messages []anthropicMessage) (anthropicResponse, error) {
-	key := os.Getenv(AnthropicAPIKeyEnvVar)
-	if strings.TrimSpace(key) == "" {
-		return anthropicResponse{}, fmt.Errorf("%s is not set", AnthropicAPIKeyEnvVar)
-	}
-	body, err := json.Marshal(anthropicMessageRequest{
-		Model:     opts.Model,
-		MaxTokens: 4096,
-		System:    `You are Inspector's independent examiner. Derive observable capabilities from REQUEST first, nearby scenarios from FEATURE MAP and ALWAYS-TRUE LIST within the stated attempt budget, and one test-protection scenario for every entry in PRE-TASK CHANGED TESTS. Changed file names are signals only. Never infer application source. Propose every capability with propose_capabilities before driving it. Call drive_app with that capability id. A successful response will be delivered in a later turn; only then may you assess it with assess_capabilities. You never submit a verdict: after attempts and assessments, call finish_examination and Inspector derives each outcome from the record. For an unresponsive app, still propose every capability, try it, then finish so each becomes could_not_be_tested. A not-confirmed assessment needs a proposed permanent regression line. Never edit project files.`,
-		Tools: []anthropicTool{
-			{
-				Name:        "propose_capabilities",
-				Description: "Record request-derived, nearby, invariant, or pre-task-test scenarios before driving them. testPath is only for a supplied pre-task test.",
-				InputSchema: map[string]any{"type": "object", "properties": map[string]any{
-					"capabilities": map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "object", "properties": map[string]any{
-						"id":       map[string]any{"type": "string"},
-						"claim":    map[string]any{"type": "string"},
-						"scenario": map[string]any{"type": "string"},
-						"testPath": map[string]any{"type": "string"},
-					}, "required": []string{"id", "claim", "scenario"}}},
-				}, "required": []string{"capabilities"}},
-			},
-			{
-				Name:        "drive_app",
-				Description: "Make one HTTP request for an already-proposed capability. path must be relative to the configured app URL.",
-				InputSchema: map[string]any{"type": "object", "properties": map[string]any{
-					"capabilityId": map[string]any{"type": "string"},
-					"request": map[string]any{"type": "object", "properties": map[string]any{
-						"method":  map[string]any{"type": "string", "enum": []string{"GET", "POST", "PUT", "PATCH", "DELETE"}},
-						"path":    map[string]any{"type": "string"},
-						"headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
-						"body":    map[string]any{"type": "string"},
-					}, "required": []string{"method", "path"}},
-				}, "required": []string{"capabilityId", "request"}},
-			},
-			{
-				Name:        "assess_capabilities",
-				Description: "Interpret one or more successful, earlier-turn app observations. Assessment is a proposal; Inspector derives the verdict from its record.",
-				InputSchema: map[string]any{"type": "object", "properties": map[string]any{
-					"assessments": map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "object", "properties": map[string]any{
-						"capabilityId":       map[string]any{"type": "string"},
-						"verdict":            map[string]any{"type": "string", "enum": []string{string(Confirmed), string(NotConfirmed)}},
-						"evidence":           map[string]any{"type": "string"},
-						"proposedRegression": map[string]any{"type": "string"},
-					}, "required": []string{"capabilityId", "verdict", "evidence"}}},
-				}, "required": []string{"assessments"}},
-			},
-			{
-				Name:        "finish_examination",
-				Description: "Finish. Inspector derives every per-capability outcome, findings, and incompleteness from the record.",
-				InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-			},
-		},
-		Messages: messages,
-	})
-	if err != nil {
-		return anthropicResponse{}, fmt.Errorf("encoding model request: %w", err)
-	}
-	endpoint := opts.APIBaseURL
-	if endpoint == "" {
-		endpoint = defaultAnthropicURL
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return anthropicResponse{}, fmt.Errorf("building model request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", key)
-	req.Header.Set("anthropic-version", "2023-06-01")
-	client := &http.Client{
-		Timeout: 60 * time.Second,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			return fmt.Errorf("model API redirected to %s", req.URL.Redacted())
-		},
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return anthropicResponse{}, fmt.Errorf("calling model: %w", err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxInputBytes+1))
-	if err != nil {
-		return anthropicResponse{}, fmt.Errorf("reading model response: %w", err)
-	}
-	if len(data) > maxInputBytes {
-		return anthropicResponse{}, errors.New("model response exceeds the examiner input limit")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return anthropicResponse{}, fmt.Errorf("model returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
-	}
-	var result anthropicResponse
-	if err := json.Unmarshal(data, &result); err != nil {
-		return anthropicResponse{}, fmt.Errorf("decoding model response: %w", err)
-	}
-	return result, nil
+const agentSystemPrompt = `You are Inspector's independent examiner. Derive observable capabilities from REQUEST first, nearby scenarios from FEATURE MAP and ALWAYS-TRUE LIST within the stated attempt budget, and one test-protection scenario for every entry in PRE-TASK CHANGED TESTS. Changed file names are signals only. Never infer application source. Propose every capability with propose_capabilities before driving it. Call drive_app with that capability id. A successful response will be delivered in a later turn; only then may you assess it with assess_capabilities. You never submit a verdict: after attempts and assessments, call finish_examination and Inspector derives each outcome from the record. For an unresponsive app, still propose every capability, try it, then finish so each becomes could_not_be_tested. A not-confirmed assessment needs a proposed permanent regression line. Never edit project files.`
+
+var agentTools = []llm.Tool{
+	{
+		Name:        "propose_capabilities",
+		Description: "Record request-derived, nearby, invariant, or pre-task-test scenarios before driving them. testPath is only for a supplied pre-task test.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"capabilities": map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "object", "properties": map[string]any{
+				"id":       map[string]any{"type": "string"},
+				"claim":    map[string]any{"type": "string"},
+				"scenario": map[string]any{"type": "string"},
+				"testPath": map[string]any{"type": "string"},
+			}, "required": []string{"id", "claim", "scenario"}}},
+		}, "required": []string{"capabilities"}},
+	},
+	{
+		Name:        "drive_app",
+		Description: "Make one HTTP request for an already-proposed capability. path must be relative to the configured app URL.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"capabilityId": map[string]any{"type": "string"},
+			"request": map[string]any{"type": "object", "properties": map[string]any{
+				"method":  map[string]any{"type": "string", "enum": []string{"GET", "POST", "PUT", "PATCH", "DELETE"}},
+				"path":    map[string]any{"type": "string"},
+				"headers": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+				"body":    map[string]any{"type": "string"},
+			}, "required": []string{"method", "path"}},
+		}, "required": []string{"capabilityId", "request"}},
+	},
+	{
+		Name:        "assess_capabilities",
+		Description: "Interpret one or more successful, earlier-turn app observations. Assessment is a proposal; Inspector derives the verdict from its record.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"assessments": map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "object", "properties": map[string]any{
+				"capabilityId":       map[string]any{"type": "string"},
+				"verdict":            map[string]any{"type": "string", "enum": []string{string(Confirmed), string(NotConfirmed)}},
+				"evidence":           map[string]any{"type": "string"},
+				"proposedRegression": map[string]any{"type": "string"},
+			}, "required": []string{"capabilityId", "verdict", "evidence"}}},
+		}, "required": []string{"assessments"}},
+	},
+	{
+		Name:        "finish_examination",
+		Description: "Finish. Inspector derives every per-capability outcome, findings, and incompleteness from the record.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+	},
 }
 
-func toolResult(id, content string) map[string]any {
-	return map[string]any{"type": "tool_result", "tool_use_id": id, "content": content}
+func toolResult(id, content string) llm.Block {
+	return llm.Block{Type: llm.ToolResult, ToolUseID: id, ToolResult: content}
 }
 
 func validAppURL(raw string) (*url.URL, error) {

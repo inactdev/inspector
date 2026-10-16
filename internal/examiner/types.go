@@ -84,10 +84,14 @@ const (
 // publication result. Red and Incomplete can both be true: a real bug remains
 // a failure even when another capability could not be tested.
 type Result struct {
-	Kind               ResultKind `json:"kind"`
-	Verdict            Verdict    `json:"verdict"`
-	Message            string     `json:"message,omitempty"`
-	RuntimeFingerprint string     `json:"runtimeFingerprint"`
+	Kind    ResultKind `json:"kind"`
+	Verdict Verdict    `json:"verdict"`
+	Message string     `json:"message,omitempty"`
+	// Vendor names which model vendor produced this result, e.g. "anthropic
+	// (default, no flag given)" or "openrouter" - set by the caller so the
+	// choice is never silent in the report or the posted stamp.
+	Vendor             string `json:"vendor,omitempty"`
+	RuntimeFingerprint string `json:"runtimeFingerprint"`
 }
 
 // ChangedFileList is Fabrica's names-only record of every worker-changed file.
