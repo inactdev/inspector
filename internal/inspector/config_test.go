@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/inactdev/inspector/internal/container"
 )
 
 func TestLoadConfig_Missing(t *testing.T) {
@@ -86,6 +88,28 @@ func TestLoadConfig_NetworkDefaultsFalse(t *testing.T) {
 	}
 	if cfg.Network {
 		t.Fatal("Network = true, want false (the check command must opt in)")
+	}
+}
+
+func TestConfig_Limits_Defaults(t *testing.T) {
+	cfg := &Config{Check: "true"}
+	got := cfg.Limits()
+	if got.Memory != "" || got.CPUs != "" || got.PIDsLimit != 0 {
+		t.Fatalf("Limits() = %+v, want the zero value so container.New applies its own defaults", got)
+	}
+}
+
+func TestLoadConfig_ReadsLimits(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "memory": "4g", "cpus": "1", "pidsLimit": 64}`})
+
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := container.Limits{Memory: "4g", CPUs: "1", PIDsLimit: 64}
+	if got := cfg.Limits(); got != want {
+		t.Fatalf("Limits() = %+v, want %+v", got, want)
 	}
 }
 

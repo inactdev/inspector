@@ -52,15 +52,20 @@ type CheckResult struct {
 // bind-mounted to repoRoot at container.WorkspaceDir - plus, read-only,
 // whatever container.ResolveGitMounts says the repo needs for git to
 // work in there, and nothing else on the host - killing the container
-// if it has not finished within timeout. Network access is denied
-// unless network is true - see README.md for that tradeoff. Output is streamed to stdout/stderr live
+// if it has not finished within timeout. The container is bounded by
+// limits (see container.Limits and its Default* constants), runs as
+// the host user ResolveUser resolves rather than the image's own
+// default, and is denied network access unless network is true - a
+// deliberately temporary opt-in; see README.md and Config.Network's
+// own doc comment. Output is streamed to stdout/stderr live
 // and also captured for the local report. The two streams are written
 // from different goroutines, but every write - to the capture buffer and
 // to the caller's writers alike - is serialized on one lock, so passing
 // the same writer for both stdout and stderr is safe. The returned error
 // is non-nil only for infrastructure failures (e.g. docker could not be
-// started, the image could not be run at all, or the repo's git
-// directory could not be made available in there) - a failing check is a
+// started, the image could not be run at all, the repo's git directory
+// could not be made available in there, or the host user to run as could
+// not be resolved) - a failing check is a
 // normal CheckResult with a non-zero ExitCode, not a Go error. Callers
 // are expected to have already confirmed a usable runtime via
 // container.EnsureAvailable - RunCheck itself does not check again, so
@@ -69,7 +74,7 @@ type CheckResult struct {
 // could not be stopped at the deadline is not one of them: that stays a
 // TimedOut CheckResult, with docker's own refusal reported on stderr and
 // kept in Output.
-func RunCheck(repoRoot, command, image string, network bool, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
+func RunCheck(repoRoot, command, image string, limits container.Limits, network bool, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
 	// os/exec copies stdout and stderr on separate goroutines unless the
 	// two writers are the identical value, and tee never is, so the shared
 	// capture buffer and the caller's writers all have to be safe for
@@ -90,16 +95,36 @@ func RunCheck(repoRoot, command, image string, network bool, timeout time.Durati
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	// Resolved before anything starts, for the same reason as
+	// gitMounts: a host user the container cannot actually be run as
+	// (e.g. a remote Docker endpoint) is refused rather than discovered
+	// mid-run. The error wraps container.ErrRemoteDocker; Run turns
+	// that into a refusal naming it.
+	user, err := container.ResolveUser(ctx)
+	if err != nil {
+		return CheckResult{}, err
+	}
+
 	run := container.New(ctx, container.Run{
 		RepoRoot:       repoRoot,
 		Command:        command,
 		Image:          image,
+		Limits:         limits,
+		User:           user,
 		Network:        network,
 		ReadOnlyMounts: gitMounts.Mounts,
 	})
 	defer run.Cleanup()
 	run.Stdout = capture.tee(stdout)
 	run.Stderr = capture.tee(stderr)
+
+	if network {
+		// Logged on every such run, not just once: this opt-in is
+		// temporary (see Config.Network's own doc comment) and the
+		// person reading a report is the one who needs reminding, not
+		// just whoever first wrote "network": true into .inspector.json.
+		fmt.Fprintln(run.Stderr, "inspector: \"network\": true is honored for now, but this opt-in goes away once your project commits its own image with dependencies baked in - plan to stop relying on it.")
+	}
 
 	// cmd.Stdout/cmd.Stderr are io.Writer values, not *os.File, so
 	// os/exec owns the pipes itself: it copies through its own
