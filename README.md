@@ -398,6 +398,36 @@ What a reader should conclude:
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.
 
+## Reviewer
+
+`inspector review` is the independent code reviewer (SPEC.md's "The reviewer").
+It reads a change and reports anything that looks wrong, each finding pointing
+at an exact file and line - the way a colleague reading the diff would. It
+never runs the reviewed application and never edits the reviewed project, and
+it finds what nobody wrote a test or a feature map for: the only check here
+that answers a question nobody asked first.
+
+```
+ANTHROPIC_API_KEY=... inspector review --diff /path/to/change.diff --model claude-sonnet-4-5
+```
+
+`--diff` is a unified diff of the change (`git diff` output); inspector never
+computes it from a repository mount. Each line inspector shows the model is
+annotated with the line number a finding must cite - the same number the new
+file will actually have - so a finding's pointer never depends on the model's
+own diff arithmetic. A finding naming a file outside the diff, or missing a
+line or summary, is rejected rather than recorded.
+
+`--vendor` selects the model vendor through the same `internal/llm` seam the
+examiner uses (see below), so the reviewer can be told a vendor different from
+whichever one wrote the change. Omit it and inspector uses `anthropic`, exactly
+as `inspector examine` does; the vendor is always named explicitly, never
+silently, in the printed result.
+
+The reviewer reports; it never gates a merge or posts a commit status. Like
+every inspector finding, what to do about one is the Client's call, carried
+back through Fabrica's handback loop - not a decision inspector makes for him.
+
 ## Examiner
 
 `inspector examine` is the independent outcome judge. It derives scenarios from
@@ -621,5 +651,7 @@ baked in - issue #47, not yet built. Inspector-owned publication (issue #18) is
 also built: it stages a green commit, posts its status, then moves an explicitly
 named non-default branch; a red result remains local by v1 policy. The HTTP
 examiner (issue #7, above) and the gate workflow (issue #4) are also built. The
-gate reads the project-check status under the context `inspector`. Still to
-come: the installer - see [SPEC.md](SPEC.md) and the repo's issues.
+gate reads the project-check status under the context `inspector`. The code
+reviewer (issue #34, above) is also built: it shares the `internal/llm` vendor
+seam with the examiner. Still to come: the installer - see
+[SPEC.md](SPEC.md) and the repo's issues.
