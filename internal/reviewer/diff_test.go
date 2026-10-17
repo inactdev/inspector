@@ -70,6 +70,9 @@ index 0000000..abc1234
 	if len(files[0].Lines) != 2 || files[0].Lines[0].NewLine != 1 || files[0].Lines[0].OldLine != 0 {
 		t.Fatalf("lines = %#v, want two added lines starting at new line 1", files[0].Lines)
 	}
+	if !files[0].Added || files[0].Deleted {
+		t.Fatalf("file = %#v, want it recorded as added and not deleted", files[0])
+	}
 }
 
 func TestParseUnifiedDiff_DeletedFileKeepsItsPathFromTheOldSide(t *testing.T) {
@@ -91,6 +94,30 @@ index abc1234..0000000
 	}
 	if len(files[0].Lines) != 2 || files[0].Lines[0].Kind != Removed || files[0].Lines[0].OldLine != 1 {
 		t.Fatalf("lines = %#v, want two removed lines starting at old line 1", files[0].Lines)
+	}
+	if !files[0].Deleted || files[0].Added {
+		t.Fatalf("file = %#v, want it recorded as deleted and not added", files[0])
+	}
+}
+
+func TestParseUnifiedDiff_PureDeletionHunkIsNotADeletedFile(t *testing.T) {
+	// Generated with no context, every line of this hunk is a removal - the
+	// one case where reading added/deleted off the line kinds would call a
+	// surviving file deleted.
+	diff := `diff --git a/keep_test.go b/keep_test.go
+index abc1234..def5678 100644
+--- a/keep_test.go
++++ b/keep_test.go
+@@ -4,2 +3,0 @@
+-	if got != want {
+-		t.Fatal("mismatch")
+`
+	files, err := ParseUnifiedDiff([]byte(diff))
+	if err != nil {
+		t.Fatalf("ParseUnifiedDiff() error = %v", err)
+	}
+	if len(files) != 1 || files[0].Added || files[0].Deleted {
+		t.Fatalf("files = %#v, want one file recorded as neither added nor deleted", files)
 	}
 }
 
