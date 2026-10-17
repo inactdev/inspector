@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/inactdev/inspector/internal/container"
 )
 
 // ConfigFileName is the project-level config inspector reads to learn the
@@ -50,9 +52,20 @@ type Config struct {
 	Image string `json:"image"`
 	// Network, when true, gives the container network access. Default
 	// false: the check command can reach the bind-mounted repo and
-	// nothing else. See README.md for why that's the default rather
-	// than an opt-out.
+	// nothing else. This is a deliberately temporary opt-in - Fabrica's
+	// own check currently needs it for `npm ci` when node_modules is
+	// missing - that goes away once projects commit their own image
+	// with dependencies baked in (issue #47); every run that uses it
+	// logs as much. See README.md.
 	Network bool `json:"network,omitempty"`
+	// Memory, CPUs, and PIDsLimit bound the resources the check
+	// container's cgroup may use - docker run's own --memory, --cpus,
+	// and --pids-limit values. Empty/zero (the default) leaves
+	// container.New to apply its own Default* constants, which match
+	// Fabrica's worker box; see issue #43.
+	Memory    string `json:"memory,omitempty"`
+	CPUs      string `json:"cpus,omitempty"`
+	PIDsLimit int    `json:"pidsLimit,omitempty"`
 	// TimeoutSeconds bounds how long Check may run before inspector
 	// kills it and refuses rather than hanging forever. Zero (unset)
 	// uses DefaultTimeout.
@@ -74,6 +87,12 @@ func (c *Config) Timeout() time.Duration {
 		return DefaultTimeout
 	}
 	return time.Duration(c.TimeoutSeconds) * time.Second
+}
+
+// Limits returns the configured resource bounds for container.New,
+// which applies its own defaults to whichever fields are left unset.
+func (c *Config) Limits() container.Limits {
+	return container.Limits{Memory: c.Memory, CPUs: c.CPUs, PIDsLimit: c.PIDsLimit}
 }
 
 // LoadConfig reads ConfigFileName from repoRoot. It returns
