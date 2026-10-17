@@ -428,6 +428,52 @@ The reviewer reports; it never gates a merge or posts a commit status. Like
 every inspector finding, what to do about one is the Client's call, carried
 back through Fabrica's handback loop - not a decision inspector makes for him.
 
+### Judging test changes
+
+The cheapest way to make a failing check stop failing is to change the exam
+rather than the code, and it is the most ordinary thing a builder under pressure
+does (SPEC.md section 8). `--test-paths` tells the reviewer which files in the
+change are tests, and it then judges each one:
+
+```
+ANTHROPIC_API_KEY=... inspector review --diff change.diff --model claude-sonnet-4-5 \
+  --test-paths '*_test.go'
+```
+
+One comma-separated list of glob patterns, matched with inspector-gate's
+semantics rather than Go's: `*` matches `/` as well, so `internal/*_test.go`
+covers every depth under `internal/`. A pattern using a bracket expression or a
+backslash is refused by name - those mean something in the gate's matcher that
+this one does not reproduce, and a pattern that matches differently in the two
+halves is worse than one you are told to rewrite.
+
+Inspector decides which files are tests and whether each was added, deleted, or
+modified, reading both from the diff; the model judges only what the change did
+to the exam, one file at a time, and cannot finish the review while any of them
+is unjudged. Inspector then derives the run's single verdict:
+
+| verdict | meaning |
+| --- | --- |
+| `test_change_judgment_not_requested` | no `--test-paths` was given, so no test change was judged - printed on every such run |
+| `no_test_changes` | patterns were given and the change touched no file matching them |
+| `test_changes_keep_the_exam_intact` | every changed test still proves at least what it proved before |
+| `test_changes_weaken_the_exam` | at least one change removes, loosens, skips, or narrows what its test proved |
+| `test_changes_unjudged` | at least one changed test carries no judgment or an explicit `cannot_tell`, and none was judged weakened |
+
+An unjudged test change can never read as an intact one, and a model that
+answers `cannot_tell` lands here rather than being forced into a guess - the
+same separation the examiner keeps between a found bug and untested work. A
+second judgment for a path already judged is rejected rather than replacing the
+first, so a weakened verdict cannot be written over with an intact one.
+
+This changes nothing about the gate. A weakened exam is a finding that travels
+with the delivery for the Client to rule on, not a merge block: the exit code
+stays green for any completed review, and SPEC.md section 8's gate stays
+AI-free. In this repository the blanket `*_test.go` entry under `protectedPaths`
+is what blocks the merge; this judgment is what tells the owner whether to use
+his bypass, and it is a stopgap for exactly as long as that entry is
+([fabrica#96](https://github.com/inactdev/fabrica/issues/96)).
+
 ## Examiner
 
 `inspector examine` is the independent outcome judge. It derives scenarios from
@@ -560,7 +606,9 @@ publishes the branch without Inspector's stage, stamp, then publish sequence als
 leaves that commit without the required `inspector` status. Neither condition is
 a CI defect that a follow-up source change can make green. Do not remove or rename
 tests, weaken the protected-path policy, or create a status merely to make such a
-change green.
+change green. What the reviewer's `--test-paths` judgment adds is the reason for
+that override, not a way around it - run it with `--test-paths '*_test.go'` on
+such a change and the verdict says whether the exam survived.
 
 ## inspector-gate
 
@@ -653,5 +701,7 @@ named non-default branch; a red result remains local by v1 policy. The HTTP
 examiner (issue #7, above) and the gate workflow (issue #4) are also built. The
 gate reads the project-check status under the context `inspector`. The code
 reviewer (issue #34, above) is also built: it shares the `internal/llm` vendor
-seam with the examiner. Still to come: the installer - see
+seam with the examiner, and with `--test-paths` it judges the change's test
+files for a weakened exam as a stopgap for the blanket test protection below
+(issue #44). Still to come: the installer - see
 [SPEC.md](SPEC.md) and the repo's issues.
