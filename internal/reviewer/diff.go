@@ -28,10 +28,15 @@ type Line struct {
 	Text    string
 }
 
-// File is one changed file's annotated lines.
+// File is one changed file's annotated lines. Added and Deleted come from
+// the diff's own /dev/null sides rather than from guessing at the lines: a
+// pure-deletion hunk generated with no context is indistinguishable from a
+// deleted file by line kinds alone.
 type File struct {
-	Path  string
-	Lines []Line
+	Path    string
+	Added   bool
+	Deleted bool
+	Lines   []Line
 }
 
 // ParseUnifiedDiff reads a git-style unified diff into per-file line
@@ -41,6 +46,7 @@ func ParseUnifiedDiff(diff []byte) ([]File, error) {
 	var files []File
 	var current *File
 	var pendingOldPath string
+	var pendingAdded bool
 	var newLine, oldLine int
 	inHunk := false
 
@@ -54,11 +60,13 @@ func ParseUnifiedDiff(diff []byte) ([]File, error) {
 			// deleted file (whose "+++" side is /dev/null) still gets its
 			// one real path from here instead of a second, empty entry.
 			pendingOldPath = oldFilePath(line)
+			pendingAdded = pendingOldPath == ""
 			current = nil
 			inHunk = false
 		case strings.HasPrefix(line, "+++ "):
 			path := newFilePath(line)
-			if path == "" {
+			deleted := path == ""
+			if deleted {
 				path = pendingOldPath
 			}
 			if path == "" {
@@ -66,7 +74,7 @@ func ParseUnifiedDiff(diff []byte) ([]File, error) {
 				inHunk = false
 				continue
 			}
-			files = append(files, File{Path: path})
+			files = append(files, File{Path: path, Added: pendingAdded, Deleted: deleted})
 			current = &files[len(files)-1]
 			inHunk = false
 		case strings.HasPrefix(line, "@@ "):
