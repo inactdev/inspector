@@ -566,7 +566,7 @@ func TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails(t *testing.T) {
 	runGitT(t, dir, "push", "-q", "origin", "HEAD:refs/heads/"+branch)
 	runGitT(t, dir, "reset", "-q", "--hard", commit)
 
-	_, _, err := publishGreen(capturePublicationTarget(dir), branch, inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
+	_, _, err := publishGreen(capturePublicationTarget(dir), publicationBranchTarget{Branch: branch}, inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil {
 		t.Fatal("expected non-fast-forward branch move to fail")
 	}
@@ -578,6 +578,227 @@ func TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails(t *testing.T) {
 	}
 	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); !exists || got != commit {
 		t.Fatalf("staging ref after failed move = (%q, %t), want (%q, true)", got, exists, commit)
+	}
+}
+
+// rewriteRemoteBranch leaves dir's HEAD holding a commit the remote branch
+// does not contain - what a rebase produces - and returns the commit the
+// remote branch points at and the rewritten local one.
+func rewriteRemoteBranch(t *testing.T, dir, remote, branch string) (remoteCommit, rewritten string) {
+	t.Helper()
+	remoteCommit = strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	runGitT(t, dir, "push", "-q", remote, remoteCommit+":refs/heads/"+branch)
+	runGitT(t, dir, "commit", "-q", "--amend", "--allow-empty", "-m", "rebased")
+	rewritten = strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	if rewritten == remoteCommit {
+		t.Fatal("test setup: amending produced the same commit, so nothing was rewritten")
+	}
+	return remoteCommit, rewritten
+}
+
+func TestCLI_GreenWithExpectedTipPublishesRebasedBranch(t *testing.T) {
+	requirePublicationPlatform(t)
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	remoteCommit, rewritten := rewriteRemoteBranch(t, dir, stub.Remote, "feature")
+
+	code, stdout, stderr := runCLI(t, dir, "--branch", "feature", "--expected-tip", remoteCommit)
+	if code != exitGreen {
+		t.Fatalf("exit code = %d, want %d (stderr=%q)", code, exitGreen, stderr)
+	}
+	if !strings.Contains(stdout, "green - "+rewritten) {
+		t.Fatalf("stdout = %q, want green on the rebased commit %s", stdout, rewritten)
+	}
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); !exists || got != rewritten {
+		t.Fatalf("published branch = (%q, %t), want (%q, true)", got, exists, rewritten)
+	}
+	if status, posted := stub.statusFor("inspector"); !posted || status.State != "success" {
+		t.Fatalf("inspector status = (%+v, %t), want a posted success", status, posted)
+	}
+	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(rewritten)); exists {
+		t.Fatal("temporary staging ref still exists after publication")
+	}
+}
+
+// TestCLI_GreenWithoutExpectedTipLeavesARebasedBranchUnpublished pins the
+// behavior the flag exists to opt out of: with no lease named, the branch
+// update is fast-forward only, so a rebased commit gets its green stamp and
+// then cannot move the branch - an incomplete publication, never a green exit.
+func TestCLI_GreenWithoutExpectedTipLeavesARebasedBranchUnpublished(t *testing.T) {
+	requirePublicationPlatform(t)
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	remoteCommit, _ := rewriteRemoteBranch(t, dir, stub.Remote, "feature")
+
+	code, _, stderr := runCLI(t, dir, "--branch", "feature")
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	}
+	if !strings.Contains(stderr, "incomplete publication") {
+		t.Fatalf("stderr = %q, want it reported as an incomplete publication", stderr)
+	}
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); !exists || got != remoteCommit {
+		t.Fatalf("remote branch = (%q, %t), want it left at %s", got, exists, remoteCommit)
+	}
+}
+
+func TestCLI_RefusesAnExpectedTipThatIsNotAFullSHA(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+
+	code, stdout, stderr := runCLI(t, dir, "--branch", "feature", "--expected-tip", "HEAD~1")
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	}
+	if !strings.Contains(stderr, "--expected-tip") || !strings.Contains(stderr, "complete lowercase hexadecimal commit SHA") {
+		t.Fatalf("stderr = %q, want it to name the flag and what it requires", stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want nothing run for an unusable lease", stdout)
+	}
+}
+
+// TestPublishGreenPublishesARebasedBranchUnderItsLease is the publication
+// sequence itself, without the container a full CLI run needs: a commit whose
+// history the remote branch does not contain still gets staged, stamped, and
+// then moved onto that branch, in that order.
+func TestPublishGreenPublishesARebasedBranchUnderItsLease(t *testing.T) {
+	requirePublicationPlatform(t)
+	dir := newTestRepo(t, nil)
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	remoteCommit, rewritten := rewriteRemoteBranch(t, dir, stub.Remote, "feature")
+
+	_, _, err := publishGreen(
+		capturePublicationTarget(dir),
+		publicationBranchTarget{Branch: "feature", ExpectedTip: remoteCommit},
+		inspector.Result{Outcome: inspector.Green, Commit: rewritten},
+		testJudgmentOptions{},
+	)
+	if err != nil {
+		t.Fatalf("publishGreen on a rebased branch: %v", err)
+	}
+	if stub.Request.State != "success" {
+		t.Fatalf("posted status state = %q, want success", stub.Request.State)
+	}
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); !exists || got != rewritten {
+		t.Fatalf("published branch = (%q, %t), want (%q, true)", got, exists, rewritten)
+	}
+	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(rewritten)); exists {
+		t.Fatal("temporary staging ref still exists after publication")
+	}
+}
+
+func TestPublishGreenRefusesAnExpectedTipTheRemoteLeft(t *testing.T) {
+	requirePublicationPlatform(t)
+	dir := newTestRepo(t, nil)
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	remoteCommit, rewritten := rewriteRemoteBranch(t, dir, stub.Remote, "feature")
+	staleTip := strings.Repeat("a", len(remoteCommit))
+
+	_, _, err := publishGreen(
+		capturePublicationTarget(dir),
+		publicationBranchTarget{Branch: "feature", ExpectedTip: staleTip},
+		inspector.Result{Outcome: inspector.Green, Commit: rewritten},
+		testJudgmentOptions{},
+	)
+	if err == nil {
+		t.Fatal("expected a refusal when the remote is not at the expected tip")
+	}
+	var publicationErr *publicationError
+	if !errors.As(err, &publicationErr) || publicationErr.attempted {
+		t.Fatalf("error = %v, want a refusal that attempted no remote write", err)
+	}
+	if !strings.Contains(err.Error(), remoteCommit) || !strings.Contains(err.Error(), staleTip) {
+		t.Fatalf("error = %q, want it to name both the remote commit and the expected tip", err.Error())
+	}
+	if stub.Request.State != "" {
+		t.Fatalf("expected-tip mismatch posted status state %q", stub.Request.State)
+	}
+	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(rewritten)); exists {
+		t.Fatal("expected-tip mismatch published a staging ref")
+	}
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); !exists || got != remoteCommit {
+		t.Fatalf("remote branch = (%q, %t), want it left at %s", got, exists, remoteCommit)
+	}
+}
+
+// TestPublishGreenReportsALeaseLostDuringPublication closes the gap the
+// pre-flight read cannot: the remote branch moves after inspector read it and
+// before the branch push runs. The lease on the push is what catches that, and
+// because the remote answered, the report says the branch did not move rather
+// than that the outcome is unknown. The status post is the hook that lets the
+// test land its change in exactly that window.
+func TestPublishGreenReportsALeaseLostDuringPublication(t *testing.T) {
+	requirePublicationPlatform(t)
+	dir := newTestRepo(t, nil)
+	var remotePath, moved string
+	// This runs on the stub server's own goroutine, so it reports with
+	// t.Errorf rather than the t.Fatalf runGitT uses.
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", func(remote string) {
+		cmd := exec.Command("git", "--git-dir", remotePath, "update-ref", "refs/heads/feature", moved)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("moving the remote branch mid-publication: %v\n%s", err, out)
+		}
+	})
+	remotePath = stub.Remote
+
+	// A commit someone else lands on the branch, parked in the remote's
+	// object store so the window below only has to move the ref.
+	if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("other work"), 0o644); err != nil {
+		t.Fatalf("writing the other commit: %v", err)
+	}
+	runGitT(t, dir, "add", "other.txt")
+	runGitT(t, dir, "commit", "-q", "-m", "someone else")
+	moved = strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	runGitT(t, dir, "push", "-q", stub.Remote, moved+":refs/heads/other-work")
+	runGitT(t, dir, "reset", "-q", "--hard", "HEAD~1")
+	remoteCommit, rewritten := rewriteRemoteBranch(t, dir, stub.Remote, "feature")
+
+	_, _, err := publishGreen(
+		capturePublicationTarget(dir),
+		publicationBranchTarget{Branch: "feature", ExpectedTip: remoteCommit},
+		inspector.Result{Outcome: inspector.Green, Commit: rewritten},
+		testJudgmentOptions{},
+	)
+	if err == nil {
+		t.Fatal("expected the lease to stop a branch that moved mid-publication")
+	}
+	var publicationErr *publicationError
+	if !errors.As(err, &publicationErr) || !publicationErr.attempted {
+		t.Fatalf("error = %v, want an incomplete publication, not a refusal", err)
+	}
+	if !strings.Contains(err.Error(), "was not moved") || strings.Contains(err.Error(), "is unknown") {
+		t.Fatalf("error = %q, want it to state the branch did not move rather than that the outcome is unknown", err.Error())
+	}
+	if stub.Request.State != "success" {
+		t.Fatalf("posted status state = %q, want the green status recorded before the branch move", stub.Request.State)
+	}
+	if got, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); !exists || got != moved {
+		t.Fatalf("remote branch = (%q, %t), want the other commit %s untouched", got, exists, moved)
+	}
+}
+
+func TestPublishGreenRefusesAnExpectedTipForABranchThatIsNotThere(t *testing.T) {
+	requirePublicationPlatform(t)
+	dir := newTestRepo(t, nil)
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+
+	_, _, err := publishGreen(
+		capturePublicationTarget(dir),
+		publicationBranchTarget{Branch: "feature", ExpectedTip: strings.Repeat("a", len(commit))},
+		inspector.Result{Outcome: inspector.Green, Commit: commit},
+		testJudgmentOptions{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not exist on the remote") {
+		t.Fatalf("error = %v, want a refusal naming the missing branch", err)
+	}
+	if stub.Request.State != "" {
+		t.Fatalf("missing branch posted status state %q", stub.Request.State)
+	}
+	if _, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
+		t.Fatal("a lease that could not hold created the branch anyway")
 	}
 }
 
@@ -612,7 +833,7 @@ func TestPublishGreenReportsLostStatusResponseAsUnconfirmed(t *testing.T) {
 	t.Cleanup(func() { resolvePublicationTarget = previousResolvePublicationTarget })
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
-	_, _, err := publishGreen(capturePublicationTarget(dir), "feature", inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
+	_, _, err := publishGreen(capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"}, inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil || !strings.Contains(err.Error(), "stamp sent, outcome unconfirmed") {
 		t.Fatalf("error = %v, want the distinct unconfirmed stamp state", err)
 	}
@@ -636,7 +857,7 @@ func TestPublishGreenRefusesUnsupportedPlatformBeforePublication(t *testing.T) {
 	}
 	t.Cleanup(func() { resolvePublicationTarget = previousResolvePublicationTarget })
 
-	_, _, err := publishGreen(publicationTargetSnapshot{repoRoot: t.TempDir()}, "feature", inspector.Result{Outcome: inspector.Green, Commit: "abc"}, testJudgmentOptions{})
+	_, _, err := publishGreen(publicationTargetSnapshot{repoRoot: t.TempDir()}, publicationBranchTarget{Branch: "feature"}, inspector.Result{Outcome: inspector.Green, Commit: "abc"}, testJudgmentOptions{})
 	if err == nil || !strings.Contains(err.Error(), "publication unsupported") {
 		t.Fatalf("error = %v, want unsupported-platform publication refusal", err)
 	}
@@ -651,7 +872,7 @@ func TestPublishGreenRefusesRemoteDefaultBranch(t *testing.T) {
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
-	_, _, err := publishGreen(capturePublicationTarget(dir), "main", inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
+	_, _, err := publishGreen(capturePublicationTarget(dir), publicationBranchTarget{Branch: "main"}, inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil || !strings.Contains(err.Error(), "default branch") {
 		t.Fatalf("error = %v, want remote default branch refusal", err)
 	}
@@ -739,7 +960,7 @@ func TestPublishGreenRefusesRetargetedOriginBeforeRemoteSideEffects(t *testing.T
 	runGitT(t, dir, "remote", "set-url", "--push", "origin", "https://github.com/attacker/redirected.git")
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
-	_, _, err := publishGreen(snapshot, "feature", inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
+	_, _, err := publishGreen(snapshot, publicationBranchTarget{Branch: "feature"}, inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil || !strings.Contains(err.Error(), "publication target changed during inspection") {
 		t.Fatalf("error = %v, want publication-target change refusal", err)
 	}
@@ -756,7 +977,7 @@ func TestPublishGreenRefusesChangedHeadBeforeRemoteSideEffects(t *testing.T) {
 	runGitT(t, dir, "add", "changed.txt")
 	runGitT(t, dir, "commit", "-q", "-m", "changed")
 
-	_, _, err := publishGreen(capturePublicationTarget(dir), "feature", inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
+	_, _, err := publishGreen(capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"}, inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil {
 		t.Fatal("expected changed HEAD to stop publication")
 	}

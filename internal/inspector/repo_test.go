@@ -1,6 +1,7 @@
 package inspector
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -710,6 +711,156 @@ func TestPushRefRedactsCredentialsFromGitError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "example.com") {
 		t.Fatalf("error = %q, want the remote host preserved", err.Error())
+	}
+}
+
+// newRewrittenBranchRemote models what a rebase leaves behind: a bare remote
+// whose refs/heads/feature holds the pre-rebase commit, and a repo whose HEAD
+// is the rewritten one, which does not contain it. It returns the remote, the
+// commit the remote branch points at, and the rewritten local commit.
+func newRewrittenBranchRemote(t *testing.T) (remote, remoteCommit, rewritten, repoRoot string) {
+	t.Helper()
+	dir := newTestRepo(t, map[string]string{"tracked.txt": "content"})
+	remoteCommit = strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	remote = filepath.Join(t.TempDir(), "origin.git")
+	if out, err := exec.Command("git", "init", "--bare", "--quiet", remote).CombinedOutput(); err != nil {
+		t.Fatalf("creating bare remote: %v\n%s", err, out)
+	}
+	runGitT(t, dir, "push", "-q", remote, remoteCommit+":refs/heads/feature")
+	runGitT(t, dir, "commit", "-q", "--amend", "-m", "rebased")
+	rewritten = strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	if rewritten == remoteCommit {
+		t.Fatal("test setup: amending produced the same commit, so nothing was rewritten")
+	}
+	return remote, remoteCommit, rewritten, dir
+}
+
+func TestPushRefRefusesRewrittenHistoryWithoutALease(t *testing.T) {
+	requirePublicationPlatform(t)
+	remote, remoteCommit, rewritten, dir := newRewrittenBranchRemote(t)
+
+	if err := PushRefToRemote(dir, remote, rewritten, "refs/heads/feature"); err == nil {
+		t.Fatal("unleased push replaced a history the remote branch had; it must stay fast-forward only")
+	}
+	out, err := exec.Command("git", "--git-dir", remote, "rev-parse", "--verify", "refs/heads/feature").Output()
+	if err != nil || strings.TrimSpace(string(out)) != remoteCommit {
+		t.Fatalf("remote branch = %q, %v; want it left at %s", strings.TrimSpace(string(out)), err, remoteCommit)
+	}
+}
+
+func TestForcePushRefWithLeaseReplacesRewrittenHistory(t *testing.T) {
+	requirePublicationPlatform(t)
+	remote, remoteCommit, rewritten, dir := newRewrittenBranchRemote(t)
+
+	if err := ForcePushRefWithLease(dir, remote, rewritten, "refs/heads/feature", remoteCommit); err != nil {
+		t.Fatalf("leased push of a rebased branch failed: %v", err)
+	}
+	out, err := exec.Command("git", "--git-dir", remote, "rev-parse", "--verify", "refs/heads/feature").Output()
+	if err != nil || strings.TrimSpace(string(out)) != rewritten {
+		t.Fatalf("remote branch = %q, %v; want %s", strings.TrimSpace(string(out)), err, rewritten)
+	}
+}
+
+func TestForcePushRefWithLeaseRefusesARemoteThatMoved(t *testing.T) {
+	requirePublicationPlatform(t)
+	remote, remoteCommit, rewritten, dir := newRewrittenBranchRemote(t)
+	// Someone else's commit lands on the branch, so the lease the caller
+	// asked for no longer describes what is there.
+	writeFiles(t, dir, map[string]string{"other.txt": "other work"})
+	runGitT(t, dir, "add", "-A")
+	runGitT(t, dir, "commit", "-q", "-m", "someone else")
+	moved := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	runGitT(t, dir, "push", "-q", "--force", remote, moved+":refs/heads/feature")
+
+	err := ForcePushRefWithLease(dir, remote, rewritten, "refs/heads/feature", remoteCommit)
+	if err == nil {
+		t.Fatal("leased push overwrote a remote commit the caller never accounted for")
+	}
+	if !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("error = %v, want it to report a stale lease as certain rather than unknown", err)
+	}
+	if !strings.Contains(err.Error(), remoteCommit) {
+		t.Fatalf("error = %q, want it to name the expected tip %s", err.Error(), remoteCommit)
+	}
+	out, err := exec.Command("git", "--git-dir", remote, "rev-parse", "--verify", "refs/heads/feature").Output()
+	if err != nil || strings.TrimSpace(string(out)) != moved {
+		t.Fatalf("remote branch = %q, %v; want the other commit %s untouched", strings.TrimSpace(string(out)), err, moved)
+	}
+}
+
+func TestForcePushRefWithLeaseRejectsIncompleteExpectedTipBeforeStartingGit(t *testing.T) {
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-started")
+	fakeGit := filepath.Join(binDir, "git")
+	script := "#!/bin/sh\ntouch \"$GIT_STARTED_MARKER\"\n"
+	if err := os.WriteFile(fakeGit, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake git: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_STARTED_MARKER", marker)
+
+	err := ForcePushRefWithLease(t.TempDir(), "origin", "abc", "refs/heads/feature", "--force")
+	if err == nil || !strings.Contains(err.Error(), "complete lowercase hexadecimal commit SHA") {
+		t.Fatalf("error = %v, want an unusable-lease refusal", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("git ran with a lease value inspector could not vouch for")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("checking git start marker: %v", err)
+	}
+}
+
+func TestValidateExpectedTip(t *testing.T) {
+	sha1 := strings.Repeat("a", 40)
+	sha256Name := strings.Repeat("b", 64)
+	for _, tc := range []struct {
+		name  string
+		value string
+		ok    bool
+	}{
+		{"full sha-1 name", sha1, true},
+		{"full sha-256 name", sha256Name, true},
+		{"empty", "", false},
+		{"abbreviated", sha1[:12], false},
+		{"too long", sha1 + "a", false},
+		{"uppercase", strings.ToUpper(sha1), false},
+		{"branch name", "feature", false},
+		{"option", "--force", false},
+		{"surrounding space", " " + sha1 + " ", false},
+		{"non-hex character", strings.Repeat("a", 39) + "z", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateExpectedTip(tc.value)
+			if tc.ok && err != nil {
+				t.Fatalf("ValidateExpectedTip(%q) = %v, want it accepted", tc.value, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("ValidateExpectedTip(%q) = nil, want it refused", tc.value)
+			}
+		})
+	}
+}
+
+func TestStaleLeaseRejection(t *testing.T) {
+	const destination = "refs/heads/feature"
+	rejected := "To origin\n!\tabc:" + destination + "\t[rejected] (stale info)\nDone\n"
+	for _, tc := range []struct {
+		name      string
+		porcelain string
+		want      bool
+	}{
+		{"remote refused this ref for a stale lease", rejected, true},
+		{"carriage returns", strings.ReplaceAll(rejected, "\n", "\r\n"), true},
+		{"no output at all, as a lost response leaves", "", false},
+		{"a different ref went stale", strings.ReplaceAll(rejected, destination, "refs/heads/other"), false},
+		{"rejected for some other reason", "To origin\n!\tabc:" + destination + "\t[rejected] (fetch first)\nDone\n", false},
+		{"this ref was updated", "To origin\n+\tabc:" + destination + "\tabc...def (forced update)\nDone\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := staleLeaseRejection(tc.porcelain, destination); got != tc.want {
+				t.Fatalf("staleLeaseRejection = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }
 

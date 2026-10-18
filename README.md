@@ -202,7 +202,9 @@ publication steps, in this exact order:
 5. If step 2 produced a judgment, it records that as C's `inspector-tests`
    status - before the branch moves, so the gate's first look at the pull
    request already sees both.
-6. It updates the explicitly named pull request branch on `origin`.
+6. It updates the explicitly named pull request branch on `origin`,
+   fast-forward only unless `--expected-tip` authorized replacing the history
+   that branch currently has.
 7. If both `-pr-title` and `-pr-body-file` were given, it opens a pull
    request for that branch, or reports the existing one. This step is
    optional and always comes after the branch has already moved - a failure
@@ -246,6 +248,45 @@ refuses the remote default branch even when explicitly named. This is a captain
 decision that may be overruled: ambient destination authority conflicts with
 the architecture's explicit handoff, and a freshly pulled checkout is normally
 on the default branch, where an inferred push would bypass the pull request.
+
+#### Publishing a rebased branch: `--expected-tip`
+
+The branch update in step 6 is fast-forward only. That is the right default,
+and it is also why a branch whose history was rewritten locally - rebased onto
+a moved base, for instance - cannot be published: C does not contain what the
+remote branch already holds, so the push is rejected and the run ends as an
+incomplete publication, with C's green status recorded and the branch left
+behind.
+
+`--expected-tip <sha>` is how a caller authorizes that rewrite, one run at a
+time:
+
+```
+inspector --branch my-feature --expected-tip 0b5a1c9e4d3f27a86b40ff51c2d9e7a3418bc6d2
+```
+
+It names the full commit SHA the branch must still point at on `origin`.
+Inspector reads the remote branch before anything is pushed and refuses, naming
+both commits, if it is anywhere else - or if it does not exist at all. The push
+itself then carries a lease on that same commit, so if the branch moves in the
+window between that read and that push, the remote refuses it and the branch
+keeps the other commit. A rejected lease is one of the few remote outcomes
+inspector can report as certain rather than unknown: the remote answered, so
+the branch did not move.
+
+The flag takes a complete 40- or 64-character lowercase hexadecimal object
+name. An abbreviation, a branch name, or `HEAD~1` is refused before the check
+runs - a lease is only worth having if the commit it protects is unambiguous.
+
+Naming the right tip never costs anything: an ordinary fast-forward satisfies
+the lease too, so a caller that knows the branch's remote tip may pass it on
+every run rather than only after a rebase.
+
+Omit it and nothing changes: the branch update stays fast-forward only, and a
+caller that never rebases never needs the flag. The remote is deliberately not
+read for the caller, since a lease against whatever inspector happened to
+observe seconds earlier would quietly overwrite work nobody accounted for,
+including on a mistyped `--branch`.
 
 The staging ref exists only so GitHub has C when it receives the status. After
 the named branch moves, Inspector attempts to remove the staging ref and warns
@@ -293,7 +334,8 @@ Exit codes reserve `0`, `1`, and `2` for verdict attempts:
     This includes local-check failures such as missing configuration, an unusable
     container runtime, a dirty working tree, a timeout, or infrastructure
     failure, and green-publication preflight failures such as an unsupported
-    platform, missing token, invalid remote, or default-branch target. A refusal
+    platform, missing token, invalid remote, default-branch target, or a
+    `--expected-tip` the remote branch is not at. A refusal
     never attempts a staging push, status publication, or branch update.
   - **incomplete green publication** - the local check passed and publication
     began with the staging push, but inspector could not confirm the complete
@@ -323,6 +365,10 @@ Exit codes reserve `0`, `1`, and `2` for verdict attempts:
 Flags:
 
 - `--branch <name>` - required pull request branch to publish after green
+- `--expected-tip <sha>` - optional; the full commit SHA that branch must still
+  point at on `origin`, which authorizes replacing a history it already holds
+  (see [Publishing a rebased branch](#publishing-a-rebased-branch---expected-tip)).
+  Omitted, the branch update stays fast-forward only.
 - `--repo <path>` - inspect a repo other than the current directory
 - `-pr-title <text>` and `-pr-body-file <path>` - optional; given together,
   open a pull request for `--branch` against the repository's default branch
@@ -385,7 +431,10 @@ Once publication starts, inspector does not try to erase partial remote state.
 A failed network operation can mean either that GitHub rejected the operation or
 that GitHub completed it but the client lost the response. Inspector therefore
 reports uncertain remote state honestly: a failed staging push may have created
-the staging ref, and a failed final push may have moved the named branch. An
+the staging ref, and a failed final push may have moved the named branch. The
+one exception is a `--expected-tip` lease the remote refused, which proves the
+remote answered and the branch did not move; inspector reports that as certain.
+An
 explicit GitHub rejection confirms that no status was posted. If the status
 request was written but its response was lost, inspector reports the distinct
 state **stamp sent, outcome unconfirmed** - never green, never silent, and
@@ -780,7 +829,9 @@ process-bounded and runs as the inviting host user rather than root (issue
 opt-in still honored until projects commit their own image with dependencies
 baked in - issue #47, not yet built. Inspector-owned publication (issue #18) is
 also built: it stages a green commit, posts its status, then moves an explicitly
-named non-default branch; a red result remains local by v1 policy. The HTTP
+named non-default branch; a red result remains local by v1 policy. That branch
+update is fast-forward only unless the caller authorizes replacing its history
+with `--expected-tip`, which is what lets a rebased branch be published. The HTTP
 examiner (issue #7, above) and the gate workflow (issue #4) are also built. The
 gate reads the project-check status under the context `inspector`. The code
 reviewer (issue #34, above) is also built: it shares the `internal/llm` vendor
