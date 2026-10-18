@@ -42,6 +42,39 @@ func StagingRefForCommit(commit string) string {
 	return "refs/inspector/staging/" + commit
 }
 
+// RemoteTrackingRef names the local tracking ref for one of origin's
+// branches. "origin" is the one remote inspector publishes to (see
+// ResolvePublicationTarget), so it is the one remote whose branches inspector
+// can compare a checked commit against.
+func RemoteTrackingRef(branch string) string {
+	return "refs/remotes/origin/" + branch
+}
+
+// CommitDiffAgainstBase returns the unified diff that takes baseRef's merge
+// base with commit to commit - the change a pull request for commit against
+// that base actually proposes, which is what the gate judges too.
+//
+// It diffs against the merge base rather than baseRef's tip so unrelated
+// commits that landed on the base meanwhile are not read as part of this
+// change, and it passes --no-renames so a deleted test shows up as a deletion
+// rather than being folded into a rename of some other file: the whole point
+// of reading this diff is noticing what was removed.
+func CommitDiffAgainstBase(repoRoot, commit, baseRef string) ([]byte, error) {
+	out, err := runValidationGit(repoRoot, "merge-base", baseRef, commit)
+	if err != nil {
+		return nil, fmt.Errorf("finding the merge base of %s and %s: %w", baseRef, commit, err)
+	}
+	mergeBase := strings.TrimSpace(out)
+	if mergeBase == "" {
+		return nil, fmt.Errorf("git named no merge base of %s and %s", baseRef, commit)
+	}
+	diff, err := runValidationGit(repoRoot, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=3", mergeBase, commit, "--")
+	if err != nil {
+		return nil, fmt.Errorf("diffing %s against %s: %w", commit, mergeBase, err)
+	}
+	return []byte(diff), nil
+}
+
 // ValidatePublicationBranch accepts only a full, unambiguous branch name.
 func ValidatePublicationBranch(branch string) error {
 	if branch == "" || strings.TrimSpace(branch) != branch {

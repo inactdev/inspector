@@ -57,6 +57,11 @@ type Result struct {
 	// but not for a Refused that never ran a check at all, and not when
 	// Warning is set (the save itself is what failed).
 	ReportPath string
+	// TestPaths carries the project's own testPaths patterns through to
+	// publication, so the caller that posts TestsStatusContext reads them
+	// from the same config load the check itself ran under rather than
+	// re-reading .inspector.json after the check (issue #44).
+	TestPaths []string
 	// Warning is set when the check reached a real verdict (Green or
 	// Red) but something worth loudly flagging happened alongside it -
 	// currently, only that the local report could not be saved. Green
@@ -199,7 +204,7 @@ func Run(opts Options) (Result, error) {
 		Output:       checkResult.Output,
 	}
 
-	result := Result{Outcome: outcome, Commit: commit}
+	result := Result{Outcome: outcome, Commit: commit, TestPaths: cfg.TestPaths}
 	reportPath, writeErr := WriteReport(repoRoot, report)
 
 	switch {

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/inactdev/inspector/internal/inspector"
+	"github.com/inactdev/inspector/internal/llm"
 )
 
 // Exit codes reserve 0, 1, and 2 for verdict attempts: 0 green, 1 red,
@@ -57,6 +58,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	publicationBranch := fs.String("branch", "", "pull request branch to publish after a green result (required)")
 	prTitle := fs.String("pr-title", "", "pull request title to open after a green result (requires -pr-body-file; both or neither)")
 	prBodyFile := fs.String("pr-body-file", "", "path to a file containing the pull request body (requires -pr-title; both or neither)")
+	vendor := fs.String("vendor", "", "model vendor for judging changed test files (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment")
+	model := fs.String("model", "", "model name for judging changed test files; required only when this project declares testPaths in .inspector.json")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, `usage: inspector [flags] [claim text...]
 
@@ -71,6 +74,14 @@ access and a GitHub 'origin' remote. See README.md for setup.
 branch against the repository's default branch once publication completes;
 given alone, either one is a usage error. Given neither, no pull request is
 opened.
+
+When the project declares testPaths in .inspector.json and this commit's
+change touches one of those files, inspector also judges whether any changed
+or removed test undercuts what the request asked for, and posts that as a
+separate "inspector-tests" commit status - success only when every changed
+test is confirmed intact. That judgment needs --model (and optionally
+--vendor); without one it posts a failure saying so, which is what
+inspector-gate reads before letting a changed test file through.
 
 flags:
 `)
@@ -128,9 +139,11 @@ flags:
 		fmt.Fprintf(stderr, "\n%s\n%s\n%s\n\n", warningBar, result.Warning, warningBar)
 	}
 
+	judgment := testJudgmentOptions{Vendor: *vendor, Model: *model, VendorDescription: llm.Describe(*vendor)}
+
 	switch result.Outcome {
 	case inspector.Green:
-		cleanupWarning, err := publishGreen(publicationTarget, *publicationBranch, result)
+		cleanupWarning, tests, err := publishGreen(publicationTarget, *publicationBranch, result, judgment)
 		if err != nil {
 			printPublicationFailure(stderr, err)
 			return exitRefused
@@ -139,6 +152,7 @@ flags:
 			fmt.Fprintf(stderr, "\n%s\n%s\n%s\n\n", warningBar, cleanupWarning, warningBar)
 		}
 		fmt.Fprintf(stdout, "\ngreen - %s%s\n", result.Commit, reportSuffix(result.ReportPath))
+		printTestJudgment(stdout, stderr, tests)
 		if openPullRequest {
 			openGreenPullRequest(publicationTarget, *publicationBranch, *prTitle, prBody, result, stdout, stderr)
 		}
@@ -213,35 +227,41 @@ func incompletePublication(err error) error {
 
 // publishGreen performs the publication order that keeps inspector-gate from
 // observing a pull-request branch without an inspector status: stage the
-// checked commit remotely, record its green status, then move the branch.
+// checked commit remotely, record its green status, record the changed-test
+// judgment beside it, then move the branch.
 // The stage is a non-branch ref; its deletion is attempted once the branch moves.
-func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, result inspector.Result) (cleanupWarning string, err error) {
+//
+// The test judgment is computed before any remote step and posted after the
+// green status but before the branch moves, so the gate's very first look at
+// the pull request already sees both statuses - the same reason the green
+// status itself precedes the branch move.
+func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, result inspector.Result, judgment testJudgmentOptions) (cleanupWarning string, tests testJudgment, err error) {
 	if err := validatePublicationPlatform(); err != nil {
-		return "", publicationRefusal(err)
+		return "", testJudgment{}, publicationRefusal(err)
 	}
 	if err := inspector.ValidatePublicationBranch(publicationBranch); err != nil {
-		return "", publicationRefusal(err)
+		return "", testJudgment{}, publicationRefusal(err)
 	}
 	token := os.Getenv(inspector.GitHubTokenEnvVar)
 	if strings.TrimSpace(token) == "" {
-		return "", publicationRefusal(fmt.Errorf("%s is not set - inspector needs a GitHub token with commit-status write access to publish a green result", inspector.GitHubTokenEnvVar))
+		return "", testJudgment{}, publicationRefusal(fmt.Errorf("%s is not set - inspector needs a GitHub token with commit-status write access to publish a green result", inspector.GitHubTokenEnvVar))
 	}
 
 	if snapshot.targetErr != nil {
-		return "", publicationRefusal(snapshot.targetErr)
+		return "", testJudgment{}, publicationRefusal(snapshot.targetErr)
 	}
 	if snapshot.validationError != nil {
-		return "", publicationRefusal(snapshot.validationError)
+		return "", testJudgment{}, publicationRefusal(snapshot.validationError)
 	}
 	if err := inspector.ValidatePublicationCommit(snapshot.repoRoot, result.Commit, snapshot.validation); err != nil {
-		return "", publicationRefusal(err)
+		return "", testJudgment{}, publicationRefusal(err)
 	}
 	currentTarget, err := resolvePublicationTarget(snapshot.repoRoot)
 	if err != nil {
-		return "", publicationRefusal(fmt.Errorf("publication target changed during inspection: %w", err))
+		return "", testJudgment{}, publicationRefusal(fmt.Errorf("publication target changed during inspection: %w", err))
 	}
 	if currentTarget != snapshot.target {
-		return "", publicationRefusal(fmt.Errorf("publication target changed during inspection; refusing to publish to either destination"))
+		return "", testJudgment{}, publicationRefusal(fmt.Errorf("publication target changed during inspection; refusing to publish to either destination"))
 	}
 	defaultBranch, err := inspector.RepositoryDefaultBranch(inspector.RepositoryOptions{
 		Owner:      snapshot.target.Owner,
@@ -250,24 +270,29 @@ func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, 
 		APIBaseURL: githubAPIBaseURL,
 	})
 	if err != nil {
-		return "", publicationRefusal(err)
+		return "", testJudgment{}, publicationRefusal(err)
 	}
 	if publicationBranch == defaultBranch {
-		return "", publicationRefusal(fmt.Errorf("publication branch %q is the remote default branch; inspector may update only a pull request branch", publicationBranch))
+		return "", testJudgment{}, publicationRefusal(fmt.Errorf("publication branch %q is the remote default branch; inspector may update only a pull request branch", publicationBranch))
 	}
 
 	branchRef := "refs/heads/" + publicationBranch
 	remoteCommit, exists, err := inspector.RemoteRefCommit(snapshot.repoRoot, snapshot.target.PushURL, branchRef)
 	if err != nil {
-		return "", publicationRefusal(fmt.Errorf("checking publication branch %q before staging: %w", publicationBranch, err))
+		return "", testJudgment{}, publicationRefusal(fmt.Errorf("checking publication branch %q before staging: %w", publicationBranch, err))
 	}
 	if exists && remoteCommit == result.Commit {
-		return "", publicationRefusal(fmt.Errorf("publication branch %q already points at checked commit %s; inspector will not retroactively stamp a commit published before its required staging, status, and branch-update sequence; make the correction as a new local commit and hand that commit to inspector before anything publishes it", publicationBranch, result.Commit))
+		return "", testJudgment{}, publicationRefusal(fmt.Errorf("publication branch %q already points at checked commit %s; inspector will not retroactively stamp a commit published before its required staging, status, and branch-update sequence; make the correction as a new local commit and hand that commit to inspector before anything publishes it", publicationBranch, result.Commit))
 	}
+
+	// Judged before the first remote step, so a slow or failing model leaves
+	// no half-published state behind. It can only produce a status, never a
+	// refusal - see judgeChangedTests.
+	tests = judgeChangedTests(snapshot.repoRoot, result.Commit, defaultBranch, result.TestPaths, judgment)
 
 	stagingRef := inspector.StagingRefForCommit(result.Commit)
 	if err := inspector.PushRefToRemote(snapshot.repoRoot, snapshot.target.PushURL, result.Commit, stagingRef); err != nil {
-		return "", incompletePublication(fmt.Errorf("staging push failed; whether temporary staging ref %s was updated is unknown, and no status post or branch move was attempted: %w", stagingRef, err))
+		return "", tests, incompletePublication(fmt.Errorf("staging push failed; whether temporary staging ref %s was updated is unknown, and no status post or branch move was attempted: %w", stagingRef, err))
 	}
 
 	description := "inspector: green"
@@ -283,16 +308,46 @@ func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, 
 		Token:       token,
 		APIBaseURL:  githubAPIBaseURL,
 	}); err != nil {
-		return "", incompletePublication(fmt.Errorf("recording the green status did not complete; temporary staging ref %s was created, and branch %q was not attempted: %w", stagingRef, publicationBranch, err))
+		return "", tests, incompletePublication(fmt.Errorf("recording the green status did not complete; temporary staging ref %s was created, and branch %q was not attempted: %w", stagingRef, publicationBranch, err))
+	}
+
+	if tests.Posted {
+		if err := inspector.PostCommitStatus(inspector.PostStatusOptions{
+			Owner:       snapshot.target.Owner,
+			Repo:        snapshot.target.Repo,
+			Commit:      result.Commit,
+			State:       tests.State,
+			Context:     inspector.TestsStatusContext,
+			Description: tests.Description,
+			Token:       token,
+			APIBaseURL:  githubAPIBaseURL,
+		}); err != nil {
+			return "", tests, incompletePublication(fmt.Errorf("recording the %q status did not complete; the green status was recorded, temporary staging ref %s was created, and branch %q was not attempted: %w", inspector.TestsStatusContext, stagingRef, publicationBranch, err))
+		}
 	}
 
 	if err := inspector.PushRefToRemote(snapshot.repoRoot, snapshot.target.PushURL, result.Commit, branchRef); err != nil {
-		return "", incompletePublication(fmt.Errorf("moving branch %q failed after the green status was recorded; whether the remote branch moved is unknown, and temporary staging ref %s may remain: %w", publicationBranch, stagingRef, err))
+		return "", tests, incompletePublication(fmt.Errorf("moving branch %q failed after the green status was recorded; whether the remote branch moved is unknown, and temporary staging ref %s may remain: %w", publicationBranch, stagingRef, err))
 	}
 	if err := inspector.DeleteRefFromRemote(snapshot.repoRoot, snapshot.target.PushURL, stagingRef); err != nil {
-		return fmt.Sprintf("inspector published green branch %q, but could not confirm removal of its temporary staging ref: %v", publicationBranch, err), nil
+		return fmt.Sprintf("inspector published green branch %q, but could not confirm removal of its temporary staging ref: %v", publicationBranch, err), tests, nil
 	}
-	return "", nil
+	return "", tests, nil
+}
+
+// printTestJudgment reports the changed-test status on stdout and, for
+// anything other than success, repeats it loudly on stderr. A green run that
+// posted a failing inspector-tests status is still a run the gate will hold
+// back, so it must not be possible to read the "green" line alone and think
+// the pull request is through.
+func printTestJudgment(stdout, stderr io.Writer, tests testJudgment) {
+	if !tests.Posted {
+		return
+	}
+	fmt.Fprintf(stdout, "%s: %s - %s\n", inspector.TestsStatusContext, tests.State, tests.Summary)
+	if tests.State != inspector.StatusSuccess {
+		fmt.Fprintf(stderr, "\n%s\n%s\n%s\n\n", warningBar, tests.Warning, warningBar)
+	}
 }
 
 // openGreenPullRequest runs once publishGreen has already completed in full

@@ -25,6 +25,16 @@ const StatusContext = "inspector"
 // after judging request-derived outcomes.
 const ExaminerStatusContext = "examiner"
 
+// TestsStatusContext is the separate status inspector posts for the checked
+// commit's changed test files (issue #44): success when every one of them was
+// judged to keep its exam intact, failure when one weakens it or could not be
+// judged, and nothing at all when the change touched no test file. It is the
+// only status inspector-gate will let a protected test file through on, so -
+// like StatusContext - renaming it means renaming it in the gate script's
+// TESTS_STATUS_CONTEXT env value too, or the gate stops finding this result
+// and every changed test goes back to being red.
+const TestsStatusContext = "inspector-tests"
+
 // GitHubTokenEnvVar is the environment variable inspector reads its
 // GitHub token from. SPEC.md section 12 settled where the token lives:
 // v1 posts with the Client's own token rather than a token scoped to
