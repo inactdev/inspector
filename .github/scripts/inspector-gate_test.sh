@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Unit tests for inspector-gate.sh's pure decision functions
-# (status_verdict, find_protected_match, listing_count_check,
-# gh_api_failure_reason, protected_paths_from_response). These take plain
+# (status_verdict, state_for_context, matches_any_pattern,
+# each_touched_candidate, protected_match_kind,
+# classify_protected_matches, listing_count_check, gh_api_failure_reason,
+# and config_paths_from_response via both its wrappers). These take plain
 # strings in and print
 # plain strings out - no network, no GitHub API, no environment variables -
 # so they can run anywhere, including here. The last one takes a raw API
@@ -56,35 +58,189 @@ assert_eq "pending state is red" \
   "$(printf 'red\tthe "inspector" status on this commit is "pending", not "success"')" \
   "$(status_verdict "pending" "inspector")"
 
-# --- find_protected_match ---
+# The same function answers the changed-test question (issue #44), so the
+# wording follows the context it was asked about rather than being hardcoded
+# to "inspector" - a worker reading it has to know WHICH status is missing.
+assert_eq "an absent inspector-tests status is red, naming that context" \
+  "$(printf 'red\tno "inspector-tests" status has been posted to this commit at all')" \
+  "$(status_verdict "" "inspector-tests")"
+
+assert_eq "a failing inspector-tests status is red, naming that context" \
+  "$(printf 'red\tthe "inspector-tests" status on this commit is "failure", not "success"')" \
+  "$(status_verdict "failure" "inspector-tests")"
+
+# --- state_for_context ---
+#
+# The statuses list endpoint returns every status ever posted, newest first
+# and never deduped by context, so the first line naming a context is its
+# current state.
+
+statuses_listing=$'inspector-tests\tsuccess\ninspector\tsuccess\ninspector\tfailure\nexaminer\terror'
+
+assert_eq "a context's newest state is the one read" \
+  "success" "$(state_for_context "$statuses_listing" "inspector")"
+
+assert_eq "a second context is read independently of the first" \
+  "success" "$(state_for_context "$statuses_listing" "inspector-tests")"
+
+assert_eq "an unrelated context is not confused for a prefix match" \
+  "" "$(state_for_context "$statuses_listing" "inspector-")"
+
+assert_eq "a never-posted context reads as empty, which status_verdict calls red" \
+  "" "$(state_for_context "$statuses_listing" "inspector-tests-extra")"
+
+assert_eq "no statuses at all reads as empty" \
+  "" "$(state_for_context "" "inspector")"
+
+assert_eq "an older state does not shadow the newest one" \
+  "$(printf 'green\t')" \
+  "$(status_verdict "$(state_for_context "$statuses_listing" "inspector")" "inspector")"
+
+# --- protected-path matching ---
+#
+# These five assertions predate issue #44, when one function
+# (find_protected_match) answered "is any protected path touched" by
+# printing the first match. main() now needs every match AND what can clear
+# each one, so classify_protected_matches replaced it and the unused
+# function was removed rather than left behind. The claims are unchanged -
+# the same five pull requests, the same five protected paths found - and
+# each now also pins the kind, which is what decides the verdict. An empty
+# test-pattern list is passed here deliberately: with no testPaths declared,
+# every protected match must come back "blocked", which is the gate's
+# behavior before this exception existed.
 
 touched_clean=$'src/main.go\t\nREADME.md\t'
 touched_dirty=$'src/main.go\t\n.inspector.json\t'
 touched_workflow_edit=$'.github/workflows/inspector-gate.yml\t'
 touched_rename=$'newname.txt\told-protected.txt'
 
-if out=$(find_protected_match "$touched_clean" "$ALWAYS_PROTECTED"); then
-  echo "FAIL: clean pull request should not match any protected path (matched \"$out\")"
-  failures=$((failures + 1))
-else
-  echo "ok: clean pull request matches nothing"
-fi
+assert_eq "clean pull request matches nothing" \
+  "" \
+  "$(classify_protected_matches "$touched_clean" "$ALWAYS_PROTECTED" "" "")"
 
 assert_eq "editing .inspector.json is caught" \
-  ".inspector.json" \
-  "$(find_protected_match "$touched_dirty" "$ALWAYS_PROTECTED")"
+  "$(printf 'blocked\t.inspector.json')" \
+  "$(classify_protected_matches "$touched_dirty" "$ALWAYS_PROTECTED" "" "")"
 
 assert_eq "editing a workflow file is caught" \
-  ".github/workflows/inspector-gate.yml" \
-  "$(find_protected_match "$touched_workflow_edit" "$ALWAYS_PROTECTED")"
+  "$(printf 'blocked\t.github/workflows/inspector-gate.yml')" \
+  "$(classify_protected_matches "$touched_workflow_edit" "$ALWAYS_PROTECTED" "" "")"
 
 assert_eq "renaming a protected file away is caught via previous_filename" \
-  "old-protected.txt" \
-  "$(find_protected_match "$touched_rename" "$(printf 'old-protected.txt')")"
+  "$(printf 'blocked\told-protected.txt')" \
+  "$(classify_protected_matches "$touched_rename" "" "$(printf 'old-protected.txt')" "")"
 
 assert_eq "a project's own protectedPaths entry is honored" \
-  "script/check" \
-  "$(find_protected_match "$(printf 'script/check\t')" "$(printf 'script/check')")"
+  "$(printf 'blocked\tscript/check')" \
+  "$(classify_protected_matches "$(printf 'script/check\t')" "" "$(printf 'script/check')" "")"
+
+# --- each_touched_candidate ---
+
+assert_eq "both halves of a rename entry are candidates, in order" \
+  "$(printf 'newname.txt\nold-protected.txt')" \
+  "$(each_touched_candidate "$touched_rename")"
+
+assert_eq "an ordinary entry contributes only its filename" \
+  "$(printf 'src/main.go\nREADME.md')" \
+  "$(each_touched_candidate "$touched_clean")"
+
+assert_eq "an empty listing contributes no candidates" \
+  "" \
+  "$(each_touched_candidate "")"
+
+# --- matches_any_pattern ---
+
+assert_matches() {
+  local desc="$1" candidate="$2" patterns="$3" want="$4"
+  local got=no
+  if matches_any_pattern "$candidate" "$patterns"; then got=yes; fi
+  assert_eq "$desc" "$want" "$got"
+}
+
+assert_matches "a glob matches across directory separators" \
+  ".github/workflows/x.yml" "$ALWAYS_PROTECTED" "yes"
+assert_matches "an unprotected path matches nothing" \
+  "src/main.go" "$ALWAYS_PROTECTED" "no"
+assert_matches "an empty pattern list matches nothing" \
+  ".inspector.json" "" "no"
+assert_matches "a blank line in the pattern list is not a match-anything pattern" \
+  "src/main.go" "$(printf '\n\n')" "no"
+assert_matches "a pattern containing a space is matched whole, not word-split" \
+  "docs/my notes.md" "$(printf 'docs/my notes.md')" "yes"
+
+# --- protected_match_kind / classify_protected_matches ---
+#
+# Issue #44's stopgap lives here: a protected path the project itself
+# declares a test is "test" (clearable by a green inspector-tests status);
+# everything else protected is "blocked" (nothing clears it).
+
+project_paths_fixture=$(printf 'script/check\n*_test.go')
+test_patterns_fixture=$(printf '*_test.go')
+
+assert_kind() {
+  local desc="$1" candidate="$2" want="$3"
+  local got
+  if ! got=$(protected_match_kind "$candidate" "$ALWAYS_PROTECTED" "$project_paths_fixture" "$test_patterns_fixture"); then
+    got="(unprotected)"
+  fi
+  assert_eq "$desc" "$want" "$got"
+}
+
+assert_kind "a changed test file the project protects is clearable by the test status" \
+  "internal/reviewer/tests_test.go" "test"
+assert_kind "a protected non-test file is blocked outright" \
+  "script/check" "blocked"
+assert_kind "an unprotected file is not a match at all" \
+  "internal/reviewer/tests.go" "(unprotected)"
+
+# The floor outranks testPaths, always. Otherwise a project could declare
+# ".github/**" a test path and hand the gate's own definition to a model's
+# judgment - which is exactly what ALWAYS_PROTECTED exists to prevent.
+assert_eq "ALWAYS_PROTECTED is never clearable, even when a project calls it a test path" \
+  "blocked" \
+  "$(protected_match_kind ".github/workflows/inspector-gate.yml" "$ALWAYS_PROTECTED" "$(printf '.github/**')" "$(printf '.github/**')")"
+
+assert_eq ".inspector.json is never clearable by the test status either" \
+  "blocked" \
+  "$(protected_match_kind ".inspector.json" "$ALWAYS_PROTECTED" "$(printf '.inspector.json')" "$(printf '.inspector.json')")"
+
+# A project that declares no testPaths gets no exception: its protected
+# test files stay blocked, exactly as they were before this existed.
+assert_eq "with no testPaths declared, a protected test file stays blocked" \
+  "blocked" \
+  "$(protected_match_kind "pkg/thing_test.go" "$ALWAYS_PROTECTED" "$project_paths_fixture" "")"
+
+assert_eq "a test file nobody protected needs no clearing - it was never blocked" \
+  "" \
+  "$(protected_match_kind "pkg/thing_test.go" "$ALWAYS_PROTECTED" "" "$test_patterns_fixture" || true)"
+
+# Issue #44's second Done-when case, gate side: a pull request whose only
+# protected touch is a changed test file is classified as clearable, so a
+# green inspector-tests status lets it through without the Client's override.
+assert_eq "a pull request adding only a test file yields one clearable match" \
+  "$(printf 'test\tpkg/rounding_test.go')" \
+  "$(classify_protected_matches "$(printf 'pkg/rounding_test.go\t\npkg/rounding.go\t')" "$ALWAYS_PROTECTED" "$project_paths_fixture" "$test_patterns_fixture")"
+
+# Issue #44's first Done-when case, gate side: the deleted test is still a
+# touch, so it is still a match - it just becomes the one the inspector-tests
+# status decides, and that status is a failure when the exam was weakened.
+assert_eq "a deleted test file is a clearable match, decided by the test status" \
+  "$(printf 'test\tfeature_test.go')" \
+  "$(classify_protected_matches "$(printf 'feature_test.go\t')" "$ALWAYS_PROTECTED" "$project_paths_fixture" "$test_patterns_fixture")"
+
+assert_eq "every protected path is reported, not just the first" \
+  "$(printf 'blocked\tscript/check\ntest\tpkg/a_test.go')" \
+  "$(classify_protected_matches "$(printf 'script/check\t\npkg/a_test.go\t\nREADME.md\t')" "$ALWAYS_PROTECTED" "$project_paths_fixture" "$test_patterns_fixture")"
+
+assert_eq "a clean pull request yields no matches at all" \
+  "" \
+  "$(classify_protected_matches "$touched_clean" "$ALWAYS_PROTECTED" "$project_paths_fixture" "$test_patterns_fixture")"
+
+# Renaming a protected test away is a touch of the old path, so it is
+# classified from previous_filename rather than vanishing.
+assert_eq "renaming a protected test away is caught via previous_filename" \
+  "$(printf 'test\tfeature_test.go')" \
+  "$(classify_protected_matches "$(printf 'renamed.go\tfeature_test.go')" "$ALWAYS_PROTECTED" "$project_paths_fixture" "$test_patterns_fixture")"
 
 # --- listing_count_check ---
 
@@ -254,6 +410,76 @@ assert_patterns "check is never read even when it is not a string - only protect
 assert_patterns "protectedPaths entries come back regardless of what check contains" \
   "$(inspector_json_response '{"check": "script/check", "protectedPaths": ["script/check", "ci/**"]}')" \
   "$(printf 'script/check\nci/**')"
+
+# --- test_paths_from_response ---
+#
+# The same reader, one field over (issue #44). testPaths is what decides
+# which protected path a green inspector-tests status may clear, so it fails
+# closed on exactly the same things protectedPaths does - a testPaths read
+# that quietly came back empty would leave a changed test blocked forever,
+# and one that quietly came back wrong would clear the wrong file.
+
+assert_test_patterns() {
+  local desc="$1" raw="$2" expected="$3"
+  local out rc=0
+  out=$(test_paths_from_response "$raw") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: $desc - failed closed instead of succeeding: $out"
+    failures=$((failures + 1))
+    return
+  fi
+  assert_eq "$desc" "$expected" "$out"
+}
+
+assert_test_fails_closed() {
+  local desc="$1" raw="$2" expected_substring="$3"
+  local out rc=0
+  out=$(test_paths_from_response "$raw") || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "FAIL: $desc - returned success instead of failing closed (patterns: \"$out\")"
+    failures=$((failures + 1))
+    return
+  fi
+  case "$out" in
+  *"$expected_substring"*) echo "ok: $desc" ;;
+  *)
+    echo "FAIL: $desc - failed closed, but the reason did not mention \"$expected_substring\""
+    echo "  actual: $out"
+    failures=$((failures + 1))
+    ;;
+  esac
+}
+
+assert_test_patterns "testPaths entries come back one per line" \
+  "$(inspector_json_response '{"protectedPaths": ["*_test.go"], "testPaths": ["*_test.go", "spec/**"]}')" \
+  "$(printf '*_test.go\nspec/**')"
+
+assert_test_patterns "a config with no testPaths declares no test paths" \
+  "$(inspector_json_response '{"protectedPaths": ["*_test.go"]}')" \
+  ""
+
+assert_test_patterns "a 404 declares no test paths, the same safe absence" \
+  "$(contents_response "404 Not Found" '{"message":"Not Found"}')" \
+  ""
+
+assert_test_fails_closed "testPaths present but not an array fails closed, naming that field" \
+  "$(inspector_json_response '{"testPaths": "*_test.go"}')" \
+  "its \"testPaths\" is a JSON string, not an array"
+
+assert_test_fails_closed "a testPaths entry that is not a string fails closed, naming that field" \
+  "$(inspector_json_response '{"testPaths": ["ok_test.go", 7]}')" \
+  "one of its \"testPaths\" entries is not a string"
+
+assert_test_fails_closed "an unreadable response fails closed for testPaths too" \
+  "$(contents_response "403 Forbidden" '{"message":"API rate limit exceeded"}')" \
+  "HTTP 403"
+
+# The two fields are read independently: a broken protectedPaths must not
+# be silently tolerated because testPaths happened to be fine, nor the
+# reverse. Each read names its own field.
+assert_fails_closed "a broken protectedPaths still fails closed when testPaths is valid" \
+  "$(inspector_json_response '{"protectedPaths": "script/check", "testPaths": ["*_test.go"]}')" \
+  "its \"protectedPaths\" is a JSON string, not an array"
 
 # --- required-tools drift ---
 #

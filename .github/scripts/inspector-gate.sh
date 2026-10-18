@@ -10,6 +10,16 @@
 #      stop - SPEC.md section 8: "There is no declared-changes path that
 #      passes."
 #
+# Question 2 has exactly one narrow exception, issue #44's stopgap: a
+# protected path that is also one of the project's own declared testPaths
+# passes when the head commit carries a green TESTS_STATUS_CONTEXT status,
+# which is inspector's record that every changed test file in it was judged
+# to still prove what the request asked for. Nothing else clears a protected
+# path, and ALWAYS_PROTECTED below is never clearable this way - a project
+# must not be able to hand .github/** or .inspector.json to a model's
+# judgment. The gate itself stays AI-free: it reads a status string, exactly
+# as it does for question 1, and runs no model and no project code.
+#
 # SAFETY-CRITICAL, read before editing this file:
 #
 # The workflow that calls this script runs on `pull_request_target`, so
@@ -34,9 +44,10 @@
 #   - inspector-gate_test.sh, which sources this file and calls the pure
 #     functions below directly, with fixture data, never touching the
 #     network
-# Only the pure functions (status_verdict, find_protected_match,
-# listing_count_check, gh_api_failure_reason,
-# protected_paths_from_response) are unit tested. The
+# Only the pure functions (status_verdict, state_for_context,
+# matches_any_pattern, each_touched_candidate, protected_match_kind,
+# classify_protected_matches, listing_count_check, gh_api_failure_reason,
+# config_paths_from_response and its two wrappers) are unit tested. The
 # API orchestration in main() can only be exercised inside Actions - see
 # inspector-gate_test.sh's header for why that is an honest limitation
 # rather than a gap.
@@ -78,34 +89,110 @@ status_verdict() {
   printf 'red\tthe "%s" status on this commit is "%s", not "success"\n' "$context" "$state"
 }
 
-# find_protected_match scans touched (one "file<TAB>previous_file" line per
-# changed entry, previous_file empty unless it's a rename) against patterns
-# (one glob pattern per line, `[[ ]]`-style). It prints the first matching
-# path and returns 0, or returns 1 if nothing matches. `read -r` per line
-# (not word-splitting) so a pattern or filename containing a space is
-# matched whole rather than silently split into two things that can never
-# match a real path.
-find_protected_match() {
-  local touched="$1" patterns="$2"
-  local pattern file previous_file candidate
+# state_for_context picks one context's current state out of the statuses
+# list endpoint's "context<TAB>state" lines. That endpoint returns every
+# status ever posted to the commit, newest first and never deduped by
+# context, so the FIRST line naming a context is its current state. Prints
+# nothing when that context was never posted to this commit, which
+# status_verdict reads as red - the same as a failing one.
+state_for_context() {
+  local listing="$1" context="$2"
+  local line_context line_state
+  while IFS=$'\t' read -r line_context line_state; do
+    [ -n "$line_context" ] || continue
+    if [ "$line_context" = "$context" ]; then
+      printf '%s\n' "$line_state"
+      return 0
+    fi
+  done <<< "$listing"
+  return 0
+}
+
+# matches_any_pattern reports whether one candidate path matches any of
+# patterns (one glob pattern per line, `[[ ]]`-style). `read -r` per line
+# (not word-splitting) so a pattern containing a space is matched whole
+# rather than silently split into two things that can never match a real
+# path. An empty pattern list matches nothing.
+matches_any_pattern() {
+  local candidate="$1" patterns="$2"
+  local pattern
+  [ -n "$candidate" ] || return 1
   while IFS= read -r pattern; do
     [ -n "$pattern" ] || continue
-    while IFS=$'\t' read -r file previous_file; do
-      [ -n "$file" ] || continue
-      for candidate in "$file" "$previous_file"; do
-        [ -n "$candidate" ] || continue
-        # $pattern is deliberately unquoted: it is a glob, and quoting it
-        # would turn every protected pattern into an exact string match,
-        # so ".github/**" would stop protecting anything under .github/.
-        # shellcheck disable=SC2053
-        if [[ "$candidate" == $pattern ]]; then
-          printf '%s\n' "$candidate"
-          return 0
-        fi
-      done
-    done <<< "$touched"
+    # $pattern is deliberately unquoted: it is a glob, and quoting it
+    # would turn every protected pattern into an exact string match,
+    # so ".github/**" would stop protecting anything under .github/.
+    # shellcheck disable=SC2053
+    if [[ "$candidate" == $pattern ]]; then
+      return 0
+    fi
   done <<< "$patterns"
   return 1
+}
+
+# each_touched_candidate prints every path one changed-file listing names -
+# one per line, the new name and, for a rename, the previous one too. A pure
+# rename reports as ONE entry whose previous_filename is the only place the
+# old (possibly protected) path appears, which is why both are emitted.
+each_touched_candidate() {
+  local touched="$1"
+  local file previous_file candidate
+  while IFS=$'\t' read -r file previous_file; do
+    [ -n "$file" ] || continue
+    for candidate in "$file" "$previous_file"; do
+      [ -n "$candidate" ] || continue
+      printf '%s\n' "$candidate"
+    done
+  done <<< "$touched"
+}
+
+# protected_match_kind says how one candidate path is protected, which
+# decides what - if anything - can clear it:
+#
+#   blocked  red, full stop. Nothing clears it.
+#   test     red unless the head commit carries a green TESTS_STATUS_CONTEXT
+#            status (issue #44): the path is protected AND the project's own
+#            testPaths claim it as one of its tests.
+#   (none)   not protected; returns 1 and prints nothing.
+#
+# always is checked FIRST and is never clearable, even if a project's own
+# testPaths would also match it - otherwise a project could declare
+# ".github/**" a test path and hand the gate's own definition to a model's
+# judgment. A test pattern only ever downgrades a path that the project's
+# own protectedPaths made red in the first place; a test file nobody
+# protected was never blocked and needs nothing to pass.
+protected_match_kind() {
+  local candidate="$1" always="$2" project="$3" tests="$4"
+  if matches_any_pattern "$candidate" "$always"; then
+    echo "blocked"
+    return 0
+  fi
+  if matches_any_pattern "$candidate" "$project"; then
+    if matches_any_pattern "$candidate" "$tests"; then
+      echo "test"
+    else
+      echo "blocked"
+    fi
+    return 0
+  fi
+  return 1
+}
+
+# classify_protected_matches prints one "kind<TAB>path" line for every
+# protected path a changed-file listing touches - every one, not just the
+# first, so the log names each file that has to be dealt with rather than
+# one at a time across re-runs. Returns 0 whether or not anything matched;
+# the caller decides on the lines.
+classify_protected_matches() {
+  local touched="$1" always="$2" project="$3" tests="$4"
+  local candidate kind
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if kind=$(protected_match_kind "$candidate" "$always" "$project" "$tests"); then
+      printf '%s\t%s\n' "$kind" "$candidate"
+    fi
+  done <<< "$(each_touched_candidate "$touched")"
+  return 0
 }
 
 # listing_count_check compares how many files the API actually listed
@@ -148,10 +235,12 @@ gh_api_failure_reason() {
   printf '%s\n' "$joined"
 }
 
-# protected_paths_from_response turns the GitHub Contents API's raw
-# response for the BASE branch tip's .inspector.json into that project's own
-# protectedPaths entries, one per line. It does NOT derive anything from
-# the "check" field - see ALWAYS_PROTECTED's comment for why that was
+# config_paths_from_response turns the GitHub Contents API's raw response
+# for the BASE branch tip's .inspector.json into the string entries of one
+# named array field in it, one per line. Two fields are read through it:
+# "protectedPaths" (what may not be touched) and "testPaths" (which of the
+# project's own files are tests, issue #44). It does NOT derive anything
+# from the "check" field - see ALWAYS_PROTECTED's comment for why that was
 # tried and reverted; a project must list its own check command's file(s)
 # under protectedPaths explicitly.
 #
@@ -161,16 +250,19 @@ gh_api_failure_reason() {
 # gate that protects less than it claims is worse than one that refuses.
 # The single safe absence is HTTP 404 - the file genuinely is not there,
 # and a project that has not adopted .inspector.json still gets the floor.
+# An absent field inside a readable file is the other safe absence, and
+# means the same thing it meant before that field existed: no entries.
 #
 # The first argument is the complete `gh api --include` response (status
 # line, headers, blank line, body), or "" when the call produced no
-# response at all. The second is optional: gh's own one-line explanation
-# for that call, already run through gh_api_failure_reason. It is the only
-# thing that can say WHY there was no response - DNS, an unreachable
-# GitHub, a gh crash all look identical from an empty string - so when the
-# caller has it, that reason is named instead of guessing between them.
-protected_paths_from_response() {
-  local raw="$1" gh_error="${2:-}"
+# response at all. The second is the field name to read. The third is
+# optional: gh's own one-line explanation for that call, already run
+# through gh_api_failure_reason. It is the only thing that can say WHY
+# there was no response - DNS, an unreachable GitHub, a gh crash all look
+# identical from an empty string - so when the caller has it, that reason
+# is named instead of guessing between them.
+config_paths_from_response() {
+  local raw="$1" field="$2" gh_error="${3:-}"
   local proto http_status rest body encoded content kind
 
   if [ -z "$raw" ]; then
@@ -229,20 +321,38 @@ protected_paths_from_response() {
   fi
   kind=$(jq -r 'type' <<< "$content")
   if [ "$kind" != "object" ]; then
-    echo "its top level is a JSON $kind, not an object, so it has no protected paths to read"
+    echo "its top level is a JSON $kind, not an object, so it has no \"$field\" to read"
     return 1
   fi
-  kind=$(jq -r '.protectedPaths | type' <<< "$content")
+  # --arg rather than interpolating $field into the filter: the field name
+  # is this script's own literal either way, but a filter built by string
+  # concatenation is one edit away from being built from a response.
+  kind=$(jq -r --arg f "$field" '.[$f] | type' <<< "$content")
   if [ "$kind" != "null" ] && [ "$kind" != "array" ]; then
-    echo "its \"protectedPaths\" is a JSON $kind, not an array of paths"
+    echo "its \"$field\" is a JSON $kind, not an array of paths"
     return 1
   fi
-  if ! jq -e 'all((.protectedPaths // [])[]; type == "string")' >/dev/null <<< "$content"; then
-    echo "one of its \"protectedPaths\" entries is not a string"
+  if ! jq -e --arg f "$field" 'all((.[$f] // [])[]; type == "string")' >/dev/null <<< "$content"; then
+    echo "one of its \"$field\" entries is not a string"
     return 1
   fi
 
-  jq -r '(.protectedPaths // [])[]' <<< "$content"
+  jq -r --arg f "$field" '(.[$f] // [])[]' <<< "$content"
+}
+
+# protected_paths_from_response reads the "protectedPaths" entries: the
+# paths this project declares no pull request may touch.
+protected_paths_from_response() {
+  config_paths_from_response "$1" "protectedPaths" "${2:-}"
+}
+
+# test_paths_from_response reads the "testPaths" entries: which of this
+# project's own files are tests, and therefore which protected path a green
+# TESTS_STATUS_CONTEXT status is allowed to clear (issue #44). A project
+# that declares none gets no entries and no exception - exactly the gate's
+# behavior before this field existed.
+test_paths_from_response() {
+  config_paths_from_response "$1" "testPaths" "${2:-}"
 }
 
 # gh_api_call runs one `gh api` call the way all three of main()'s calls
@@ -280,7 +390,7 @@ gh_api_call() {
 # pure functions above. Only exercisable inside Actions - see this file's
 # header.
 main() {
-  : "${GH_TOKEN:?}" "${REPO:?}" "${PR_NUMBER:?}" "${HEAD_SHA:?}" "${BASE_REF:?}" "${CHANGED_FILES:?}" "${STATUS_CONTEXT:?}"
+  : "${GH_TOKEN:?}" "${REPO:?}" "${PR_NUMBER:?}" "${HEAD_SHA:?}" "${BASE_REF:?}" "${CHANGED_FILES:?}" "${STATUS_CONTEXT:?}" "${TESTS_STATUS_CONTEXT:?}"
 
   local failed=0
 
@@ -295,25 +405,26 @@ main() {
   # every status ever posted to the commit, newest first and not deduped
   # by context, so the first match is the current one.
   #
-  # `gh api` has no way to hand a jq filter an external variable (no
-  # --arg), so STATUS_CONTEXT is built into the filter string with jq's
-  # own $ENV lookup instead of shell interpolation - it comes from this
-  # workflow's own env block, not the pull request, so it's trusted, but
-  # this avoids relying on that being true forever.
+  # Every context's state comes back from this ONE call, as
+  # "context<TAB>state" lines, and state_for_context picks the two this
+  # gate asks about out of it. One call, not two: both questions are then
+  # answered from the same snapshot of the commit's statuses, so a status
+  # posted between two reads cannot produce a verdict that matches neither
+  # moment. No jq filter needs a context name interpolated into it either.
   #
   # gh's own failure is caught and worded here rather than left to `set -e`.
   # An unguarded assignment aborts main() on the spot with nothing in the
   # log but gh's raw stderr, so a rate limit or a token-scope problem reads
   # exactly like a real red - and question 2 never runs to say otherwise.
-  # Fail closed either way, but say which of the two calls failed and why.
-  local states state
-  if ! STATUS_CONTEXT="$STATUS_CONTEXT" gh_api_call "repos/$REPO/statuses/$HEAD_SHA?per_page=100" --paginate \
-    --jq '.[] | select(.context == env.STATUS_CONTEXT) | .state'; then
-    echo "::error::Could not read this commit's commit statuses from the GitHub API, so whether a green \"$STATUS_CONTEXT\" status exists is unknown: $GH_API_ERROR. Failing closed rather than guessing - this is a problem reaching GitHub, not a verdict on the code; re-run this check."
+  # Fail closed either way, but say which of the calls failed and why.
+  local statuses state
+  if ! gh_api_call "repos/$REPO/statuses/$HEAD_SHA?per_page=100" --paginate \
+    --jq '.[] | [.context, .state] | @tsv'; then
+    echo "::error::Could not read this commit's commit statuses from the GitHub API, so neither whether a green \"$STATUS_CONTEXT\" status exists nor whether its changed test files were judged is known: $GH_API_ERROR. Failing closed rather than guessing - this is a problem reaching GitHub, not a verdict on the code; re-run this check."
     exit 1
   fi
-  states="$GH_API_OUT"
-  state="${states%%$'\n'*}"
+  statuses="$GH_API_OUT"
+  state=$(state_for_context "$statuses" "$STATUS_CONTEXT")
   local verdict reason
   IFS=$'\t' read -r verdict reason <<< "$(status_verdict "$state" "$STATUS_CONTEXT")"
   if [ "$verdict" = "red" ]; then
@@ -394,12 +505,19 @@ main() {
   # response body does. But gh's stderr is captured like the other two
   # calls rather than discarded: when there is no response at all, it is
   # the only thing that can say which failure it was.
-  local config_response project_paths config_error
+  # The same response answers both config questions - protectedPaths and
+  # testPaths - so there is one read, and the two lists can never come from
+  # two different versions of the file.
+  local config_response project_paths test_patterns config_error
   gh_api_call -X GET --include "repos/$REPO/contents/.inspector.json" -f ref="$BASE_REF" || true
   config_response="$GH_API_OUT"
   config_error="$GH_API_ERROR"
   if ! project_paths=$(protected_paths_from_response "$config_response" "$config_error"); then
     echo "::error::Could not read the base branch's .inspector.json, so this pull request cannot be checked against the protected paths this project actually declares: $project_paths. Failing closed rather than checking against a shorter list - re-run this check, or have the Client review it and deliberately override it."
+    exit 1
+  fi
+  if ! test_patterns=$(test_paths_from_response "$config_response" "$config_error"); then
+    echo "::error::Could not read the base branch's .inspector.json, so which of this pull request's protected files are this project's own tests is unknown: $test_patterns. Failing closed rather than guessing - re-run this check, or have the Client review it and deliberately override it."
     exit 1
   fi
 
@@ -409,7 +527,7 @@ main() {
 $project_paths"
   fi
 
-  # Echo what is actually in effect, so a run's own log shows the list it
+  # Echo what is actually in effect, so a run's own log shows the lists it
   # judged against rather than leaving that to be inferred.
   local pattern
   echo "protected patterns in effect:"
@@ -417,12 +535,53 @@ $project_paths"
     [ -n "$pattern" ] || continue
     echo "  $pattern"
   done <<< "$patterns"
-
-  local match
-  if match=$(find_protected_match "$touched" "$patterns"); then
-    echo "::error::This pull request touches \"$match\", a protected file. Any touch to a protected path is red, full stop - there is no declared-changes path that passes (SPEC.md section 8). Only the Client may review this by hand and merge it using his own bypass."
-    failed=1
+  if [ -z "$test_patterns" ]; then
+    echo "test patterns in effect: none declared, so no protected path can be cleared by a \"$TESTS_STATUS_CONTEXT\" status."
   else
+    echo "test patterns in effect (clearable by a green \"$TESTS_STATUS_CONTEXT\" status):"
+    while IFS= read -r pattern; do
+      [ -n "$pattern" ] || continue
+      echo "  $pattern"
+    done <<< "$test_patterns"
+  fi
+
+  # Every protected path this pull request touches, split by what can clear
+  # it. A "blocked" one is red full stop; a "test" one waits on the
+  # TESTS_STATUS_CONTEXT status read below.
+  local classified blocked_paths="" test_paths="" kind path
+  classified=$(classify_protected_matches "$touched" "$ALWAYS_PROTECTED" "$project_paths" "$test_patterns")
+  while IFS=$'\t' read -r kind path; do
+    [ -n "$kind" ] || continue
+    case "$kind" in
+    blocked) blocked_paths="$blocked_paths \"$path\"" ;;
+    test) test_paths="$test_paths \"$path\"" ;;
+    esac
+  done <<< "$classified"
+
+  if [ -n "$blocked_paths" ]; then
+    echo "::error::This pull request touches${blocked_paths}, protected file(s). Any touch to a protected path is red, full stop - there is no declared-changes path that passes (SPEC.md section 8). Only the Client may review this by hand and merge it using his own bypass."
+    failed=1
+  fi
+
+  # Issue #44's stopgap, and the only exception question 2 has: a protected
+  # path the project itself declares a test passes when inspector has
+  # recorded that every changed test in this commit still proves what the
+  # request asked for. Absent or non-success is red, exactly as for question
+  # 1 - this is the same status_verdict, reading the same statuses snapshot,
+  # so silence is never mistaken for approval.
+  if [ -n "$test_paths" ]; then
+    local tests_state tests_verdict tests_reason
+    tests_state=$(state_for_context "$statuses" "$TESTS_STATUS_CONTEXT")
+    IFS=$'\t' read -r tests_verdict tests_reason <<< "$(status_verdict "$tests_state" "$TESTS_STATUS_CONTEXT")"
+    if [ "$tests_verdict" = "red" ]; then
+      echo "::error::This pull request changes${test_paths}, protected test file(s), and $tests_reason - so whether those changes still prove what the request asked for has not been established. Run inspector locally so it judges the changed tests and posts a green \"$TESTS_STATUS_CONTEXT\" status to this exact commit, or have the Client review it and deliberately override this check."
+      failed=1
+    else
+      echo "protected test files cleared by a green \"$TESTS_STATUS_CONTEXT\" status:${test_paths}"
+    fi
+  fi
+
+  if [ -z "$blocked_paths" ] && [ -z "$test_paths" ]; then
     echo "protected files: none touched."
   fi
 

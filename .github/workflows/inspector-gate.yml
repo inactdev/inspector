@@ -83,6 +83,12 @@ jobs:
           # Must match exactly what inspector (the local half, issue #3)
           # posts as its commit status context - see SPEC.md section 7.
           STATUS_CONTEXT: inspector
+          # The second status inspector posts (issue #44): its judgment of
+          # the commit's changed test files. Must match
+          # inspector.TestsStatusContext in internal/inspector/status.go -
+          # a name that does not match reads as "no status posted", which
+          # keeps every changed test file red.
+          TESTS_STATUS_CONTEXT: inspector-tests
         # No `actions/checkout` (see the header notes above), so nothing is
         # on disk to run a script file from. Instead this fetches
         # inspector-gate.sh's own content via the same Contents API call

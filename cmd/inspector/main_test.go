@@ -128,9 +128,27 @@ func (p *fakePullRequests) handleCreate(w http.ResponseWriter, r *http.Request) 
 }
 
 type statusAPIStub struct {
-	Request      *statusRequest
+	// Request is the FIRST status post the stub saw, which for `inspector
+	// run` is always the "inspector" one - the publication order guarantees
+	// it. Tests that only care about that one keep reading it.
+	Request *statusRequest
+	// Requests is every status post in the order they arrived, so a test can
+	// assert on the separate "inspector-tests" post (issue #44) as well.
+	Requests     []statusRequest
 	Remote       string
 	PullRequests *fakePullRequests
+}
+
+// statusFor returns the status posted under the given context, and whether one
+// was posted at all - the distinction the inspector-tests status depends on,
+// since "no test file changed" means no post rather than a passing post.
+func (s *statusAPIStub) statusFor(context string) (statusRequest, bool) {
+	for _, req := range s.Requests {
+		if req.Ctx == context {
+			return req, true
+		}
+	}
+	return statusRequest{}, false
 }
 
 // stubGitHubStatusAPI points githubAPIBaseURL at a fake GitHub API and gives
@@ -159,10 +177,13 @@ func stubGitHubStatusAPI(t *testing.T, dir string, statusCode int, responseBody 
 			_, _ = w.Write([]byte(`{"default_branch":"main"}`))
 			return
 		}
-		stub.Request.Path = r.URL.Path
-		stub.Request.Auth = r.Header.Get("Authorization")
+		posted := statusRequest{Path: r.URL.Path, Auth: r.Header.Get("Authorization")}
 		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, stub.Request)
+		_ = json.Unmarshal(body, &posted)
+		stub.Requests = append(stub.Requests, posted)
+		if len(stub.Requests) == 1 {
+			*stub.Request = posted
+		}
 		if observe != nil {
 			observe(stub.Remote)
 		}
@@ -545,7 +566,7 @@ func TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails(t *testing.T) {
 	runGitT(t, dir, "push", "-q", "origin", "HEAD:refs/heads/"+branch)
 	runGitT(t, dir, "reset", "-q", "--hard", commit)
 
-	_, err := publishGreen(capturePublicationTarget(dir), branch, inspector.Result{Outcome: inspector.Green, Commit: commit})
+	_, _, err := publishGreen(capturePublicationTarget(dir), branch, inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil {
 		t.Fatal("expected non-fast-forward branch move to fail")
 	}
@@ -591,7 +612,7 @@ func TestPublishGreenReportsLostStatusResponseAsUnconfirmed(t *testing.T) {
 	t.Cleanup(func() { resolvePublicationTarget = previousResolvePublicationTarget })
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
-	_, err := publishGreen(capturePublicationTarget(dir), "feature", inspector.Result{Outcome: inspector.Green, Commit: commit})
+	_, _, err := publishGreen(capturePublicationTarget(dir), "feature", inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil || !strings.Contains(err.Error(), "stamp sent, outcome unconfirmed") {
 		t.Fatalf("error = %v, want the distinct unconfirmed stamp state", err)
 	}
@@ -615,7 +636,7 @@ func TestPublishGreenRefusesUnsupportedPlatformBeforePublication(t *testing.T) {
 	}
 	t.Cleanup(func() { resolvePublicationTarget = previousResolvePublicationTarget })
 
-	_, err := publishGreen(publicationTargetSnapshot{repoRoot: t.TempDir()}, "feature", inspector.Result{Outcome: inspector.Green, Commit: "abc"})
+	_, _, err := publishGreen(publicationTargetSnapshot{repoRoot: t.TempDir()}, "feature", inspector.Result{Outcome: inspector.Green, Commit: "abc"}, testJudgmentOptions{})
 	if err == nil || !strings.Contains(err.Error(), "publication unsupported") {
 		t.Fatalf("error = %v, want unsupported-platform publication refusal", err)
 	}
@@ -630,7 +651,7 @@ func TestPublishGreenRefusesRemoteDefaultBranch(t *testing.T) {
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
-	_, err := publishGreen(capturePublicationTarget(dir), "main", inspector.Result{Outcome: inspector.Green, Commit: commit})
+	_, _, err := publishGreen(capturePublicationTarget(dir), "main", inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil || !strings.Contains(err.Error(), "default branch") {
 		t.Fatalf("error = %v, want remote default branch refusal", err)
 	}
@@ -718,7 +739,7 @@ func TestPublishGreenRefusesRetargetedOriginBeforeRemoteSideEffects(t *testing.T
 	runGitT(t, dir, "remote", "set-url", "--push", "origin", "https://github.com/attacker/redirected.git")
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
-	_, err := publishGreen(snapshot, "feature", inspector.Result{Outcome: inspector.Green, Commit: commit})
+	_, _, err := publishGreen(snapshot, "feature", inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil || !strings.Contains(err.Error(), "publication target changed during inspection") {
 		t.Fatalf("error = %v, want publication-target change refusal", err)
 	}
@@ -735,7 +756,7 @@ func TestPublishGreenRefusesChangedHeadBeforeRemoteSideEffects(t *testing.T) {
 	runGitT(t, dir, "add", "changed.txt")
 	runGitT(t, dir, "commit", "-q", "-m", "changed")
 
-	_, err := publishGreen(capturePublicationTarget(dir), "feature", inspector.Result{Outcome: inspector.Green, Commit: commit})
+	_, _, err := publishGreen(capturePublicationTarget(dir), "feature", inspector.Result{Outcome: inspector.Green, Commit: commit}, testJudgmentOptions{})
 	if err == nil {
 		t.Fatal("expected changed HEAD to stop publication")
 	}

@@ -79,6 +79,15 @@ type Config struct {
 	// patterns match, and why Check is deliberately not protected
 	// automatically, are owned by README.md's "inspector-gate" section.
 	ProtectedPaths []string `json:"protectedPaths,omitempty"`
+	// TestPaths lists the glob patterns naming which of the project's own
+	// files are tests (issue #44). Unlike ProtectedPaths, BOTH halves read
+	// this one: inspector judges every changed test file matching it and
+	// posts the result as the TestsStatusContext commit status, and
+	// inspector-gate reads the base branch's copy to know which protected
+	// path that status is allowed to clear. Same glob dialect as
+	// ProtectedPaths; absent means inspector judges nothing and posts no
+	// such status, exactly as before this field existed.
+	TestPaths []string `json:"testPaths,omitempty"`
 }
 
 // Timeout returns the configured timeout, or DefaultTimeout if unset.

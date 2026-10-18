@@ -184,7 +184,9 @@ your own:
 ```
 
 One more field, `protectedPaths`, is read only by inspector-gate, never by
-inspector itself - see the "inspector-gate" section below.
+inspector itself - see the "inspector-gate" section below. One further field,
+`testPaths`, is read by *both* halves: see
+[The `inspector-tests` status](#the-inspector-tests-status).
 
 The order is commit, then inspect. inspector refuses to run against an
 uncommitted working tree - it can only be honest about a commit that actually
@@ -192,10 +194,16 @@ matches what's on disk. For a green commit C, inspector owns the remaining
 publication steps, in this exact order:
 
 1. It runs the check locally on C.
-2. It transfers C to a temporary non-branch staging ref on `origin`.
-3. It records C's green commit status.
-4. It updates the explicitly named pull request branch on `origin`.
-5. If both `-pr-title` and `-pr-body-file` were given, it opens a pull
+2. If this project declares `testPaths` and C changes a file matching one, it
+   judges those changes - before any remote step, so a slow or failing model
+   leaves no half-published state behind.
+3. It transfers C to a temporary non-branch staging ref on `origin`.
+4. It records C's green commit status.
+5. If step 2 produced a judgment, it records that as C's `inspector-tests`
+   status - before the branch moves, so the gate's first look at the pull
+   request already sees both.
+6. It updates the explicitly named pull request branch on `origin`.
+7. If both `-pr-title` and `-pr-body-file` were given, it opens a pull
    request for that branch, or reports the existing one. This step is
    optional and always comes after the branch has already moved - a failure
    here is reported as its own warning, never as a red verdict or an
@@ -398,6 +406,51 @@ What a reader should conclude:
 The token is not an identity boundary - see SPEC.md section 7 for the honest
 limit on what a green status does and doesn't prove.
 
+#### The `inspector-tests` status
+
+When a project declares `testPaths` in `.inspector.json` and the checked commit
+changes a file matching one of them, inspector posts a **second** commit status
+on the same commit, under the context `inspector-tests`. It carries one
+question's answer, judged by the reviewer's own engine (see
+[Judging test changes](#judging-test-changes)) through the same `internal/llm`
+vendor seam and the same environment-read key `inspector review` uses:
+
+| state | meaning |
+| --- | --- |
+| `success` | every changed test file was judged to still prove what it proved before |
+| `failure` | one of them weakens the exam, or could not be judged at all - the reason is in the description |
+| *(not posted)* | this commit changed no file matching `testPaths`, or the project declares none |
+
+```
+{
+  "check": "script/check",
+  "image": "cimg/go:1.22",
+  "protectedPaths": ["script/check", "*_test.go"],
+  "testPaths": ["*_test.go"]
+}
+```
+
+`testPaths` uses the same glob dialect as `protectedPaths`, and both halves of
+inspector read it: the local CLI to know what to judge, and `inspector-gate` to
+know which protected path this status is allowed to clear. Declaring it is what
+turns the status on; a project without it behaves exactly as it did before the
+status existed.
+
+Judging needs a model, so `inspector run` takes `--vendor` and `--model` for it
+- the same two flags, the same defaults, and the same
+`<VENDOR>_API_KEY`/`<VENDOR>_BASE_URL` environment reads as `inspector review`.
+The vendor is named in the status description, never left silent.
+
+Every way this can go wrong **fails closed**: a missing `--model`, an
+unreadable diff, an unusable pattern, a vendor that cannot be reached, a
+weakened exam, and an unjudged change all post `failure` with the reason, so no
+changed test ever clears the gate on silence. What it deliberately does **not**
+do is change the run's verdict or exit code. A failing `inspector-tests` status
+on a green run still exits `0`, because a red exit would suppress publication
+entirely and the gate would then have no status to read - blocking lives in the
+status and the gate, exactly as it does for `examiner`. Inspector prints the
+failure loudly on stderr so a green line can never be mistaken for a merge.
+
 ## Reviewer
 
 `inspector review` is the independent code reviewer (SPEC.md's "The reviewer").
@@ -466,13 +519,20 @@ same separation the examiner keeps between a found bug and untested work. A
 second judgment for a path already judged is rejected rather than replacing the
 first, so a weakened verdict cannot be written over with an intact one.
 
-This changes nothing about the gate. A weakened exam is a finding that travels
-with the delivery for the Client to rule on, not a merge block: the exit code
-stays green for any completed review, and SPEC.md section 8's gate stays
-AI-free. In this repository the blanket `*_test.go` entry under `protectedPaths`
-is what blocks the merge; this judgment is what tells the owner whether to use
-his bypass, and it is a stopgap for exactly as long as that entry is
-([fabrica#96](https://github.com/inactdev/fabrica/issues/96)).
+`inspector review` itself only reports: its exit code stays green for any
+completed review, and a weakened exam travels with the delivery as a finding
+for the Client to rule on. What acts on the same judgment is `inspector run`,
+which posts it as the [`inspector-tests` status](#the-inspector-tests-status)
+and lets `inspector-gate` clear a changed test file on it. That keeps SPEC.md
+section 8's gate AI-free: the gate reads a status string, the same way it reads
+the `inspector` one, and runs no model and no project code itself.
+
+Until the behavior tester can judge test changes, this is the stopgap that
+makes the blanket `*_test.go` entry under `protectedPaths` livable: without it
+every pull request touching a test is red by design and needs the Client's
+override by hand
+([fabrica#96](https://github.com/inactdev/fabrica/issues/96)). It is a stopgap
+for exactly as long as that entry is.
 
 ## Examiner
 
@@ -617,7 +677,8 @@ such a change and the verdict says whether the exam survived.
 with no AI and no checkout: does the head commit carry a green `inspector` commit
 status (no status at all is red, same as a failing one), and did the pull request
 touch a protected path (any touch is red - there is no declared-changes path that
-passes; see `.github/scripts/inspector-gate.sh` for the full reasoning inline).
+passes, with the one narrow `testPaths` exception described below; see
+`.github/scripts/inspector-gate.sh` for the full reasoning inline).
 
 Adopting it means copying **both** files. The workflow never checks the
 repository out, so it reads `.github/scripts/inspector-gate.sh` from the base
@@ -661,10 +722,28 @@ are already open, which also means a pull request's verdict can change without
 the pull request changing. That is the intended direction for a protection list.
 If the list cannot be read with certainty - a rate limit, a server error, a file
 too large for the API to inline, invalid JSON, a top level that is not a JSON
-object, or a `protectedPaths` that is not a list of strings - the gate fails
-closed and says which of those it hit, rather than quietly judging against a
-shorter list. Only a genuinely absent `.inspector.json` (HTTP 404) is a safe
-absence; that project still gets the always-protected floor.
+object, or a `protectedPaths` (or `testPaths`) that is not a list of strings -
+the gate fails closed and says which of those it hit, rather than quietly
+judging against a shorter list. Only a genuinely absent `.inspector.json`
+(HTTP 404) is a safe absence; that project still gets the always-protected
+floor.
+
+**One exception clears a protected path: a judged test file.** When the same
+`.inspector.json` declares `testPaths`, a protected path matching one of those
+patterns passes if the head commit carries a green
+[`inspector-tests` status](#the-inspector-tests-status) - inspector's record
+that every changed test in that commit still proves what the request asked for.
+Anything else keeps it red: a `failure`, a stale state, or no such status at
+all. The gate itself stays AI-free either way; it compares a status string, the
+same as for question 1.
+
+Nothing else clears a protected path, and the always-protected floor
+(`.github/**` and `.inspector.json`) is never clearable this way, even if a
+project lists those patterns under `testPaths` too - a project must not be able
+to hand the gate's own definition to a model's judgment. A `testPaths` entry
+only ever downgrades a path the project's own `protectedPaths` made red in the
+first place; a test file nobody protected was never blocked and needs nothing
+to pass.
 
 **The first gate run does not go stale-red.** inspector stages a green commit,
 posts its status, and only then updates the pull request branch. The gate
@@ -683,8 +762,12 @@ only enforces a check once it is a *required* status check:
 > commit status) to the list.
 
 The existing `gate` job continues to require the separate `inspector` status.
-This is a repository setting the workflow cannot turn on for itself - there is
-no API call or workflow step that does it from here.
+`inspector-tests` is deliberately *not* on that list: it is read by the `gate`
+job itself, which is already required, so adding it separately would block
+every pull request that changes no test file at all - inspector posts no such
+status then, and a required status that is never posted never passes. This is a
+repository setting the workflow cannot turn on for itself - there is no API call
+or workflow step that does it from here.
 
 ## Status
 
@@ -702,6 +785,9 @@ examiner (issue #7, above) and the gate workflow (issue #4) are also built. The
 gate reads the project-check status under the context `inspector`. The code
 reviewer (issue #34, above) is also built: it shares the `internal/llm` vendor
 seam with the examiner, and with `--test-paths` it judges the change's test
-files for a weakened exam as a stopgap for the blanket test protection below
-(issue #44). Still to come: the installer - see
+files for a weakened exam. Issue #44 is built on top of that judgment: a
+project declaring `testPaths` gets it run by `inspector run`, recorded as the
+`inspector-tests` status, and read by the gate as the one thing that clears a
+changed test file - a stopgap for the blanket test protection above, for as
+long as that protection lasts. Still to come: the installer - see
 [SPEC.md](SPEC.md) and the repo's issues.

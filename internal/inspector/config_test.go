@@ -91,6 +91,54 @@ func TestLoadConfig_NetworkDefaultsFalse(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_ReadsPathLists(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "protectedPaths": ["script/check", "*_test.go"], "testPaths": ["*_test.go"]}`})
+
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := []string{"script/check", "*_test.go"}; !equalStrings(cfg.ProtectedPaths, want) {
+		t.Fatalf("ProtectedPaths = %v, want %v", cfg.ProtectedPaths, want)
+	}
+	if want := []string{"*_test.go"}; !equalStrings(cfg.TestPaths, want) {
+		t.Fatalf("TestPaths = %v, want %v", cfg.TestPaths, want)
+	}
+}
+
+// Absent testPaths has to stay absent rather than become a default: an empty
+// pattern list is what makes inspector judge nothing and post no
+// inspector-tests status, and a guessed default would clear protected test
+// files in a project that never asked for the judgment.
+func TestLoadConfig_PathListsDefaultToNone(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine"}`})
+
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.ProtectedPaths) != 0 {
+		t.Fatalf("ProtectedPaths = %v, want none", cfg.ProtectedPaths)
+	}
+	if len(cfg.TestPaths) != 0 {
+		t.Fatalf("TestPaths = %v, want none", cfg.TestPaths)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestConfig_Limits_Defaults(t *testing.T) {
 	cfg := &Config{Check: "true"}
 	got := cfg.Limits()
