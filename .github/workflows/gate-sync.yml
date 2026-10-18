@@ -1,0 +1,77 @@
+# gate-sync. inspector-gate is two files - .github/workflows/inspector-gate.yml
+# and .github/scripts/inspector-gate.sh - and every repository that runs the
+# gate keeps its own copy of both, because the gate workflow never checks a
+# repository out and reads its script from its own base branch instead. This
+# workflow is what keeps those copies in step: when either file changes on
+# main, it opens or updates one pull request, on one fixed branch, on every
+# repository listed in .github/gate-consumers.txt. Same shape as the sync that
+# keeps Fabrica's consumer contract and this repository's copy of it in step.
+#
+# It never merges. The consumer merges, or does not.
+#
+# .github/scripts/gate-sync.sh holds the whole decision and does the GitHub
+# API work; gate-sync_test.sh unit tests its pure functions AND reads this
+# file to prove the facts below - the trigger set, the path filter, the secret
+# name, the permissions, and that every environment variable the script
+# requires is actually supplied here. Change one of those and that test is
+# where it has to be changed too.
+#
+# This workflow DOES check this repository out, which inspector-gate.yml must
+# never do (SPEC.md section 8). The difference is the trigger, not a change of
+# policy: this runs on `push` to main, so the code it checks out and runs is
+# already merged and already past the gate, while inspector-gate runs on
+# `pull_request_target` against code that is not. Do not read this as
+# permission to add a checkout there.
+name: gate-sync
+
+on:
+  push:
+    branches: [main]
+    # The two synced files, plus the list of who they are synced to - adding a
+    # consumer has to wake this workflow up too, or a newly listed repository
+    # would wait for the next unrelated gate change to receive anything. These
+    # entries must match SYNCED_PATHS and CONSUMERS_FILE in gate-sync.sh, and
+    # gate-sync_test.sh fails if they ever drift apart.
+    paths:
+      - .github/workflows/inspector-gate.yml
+      - .github/scripts/inspector-gate.sh
+      - .github/gate-consumers.txt
+  # So a consumer whose first sync failed closed - an unscoped token, a
+  # protected branch - can be retried from the Actions tab once that is fixed,
+  # without an empty commit to main. A re-run is a no-op for every consumer
+  # that already carries these files.
+  workflow_dispatch:
+
+# Nothing here writes to THIS repository. What writes to the consumers is
+# GATE_SYNC_TOKEN, which is not a GITHUB_TOKEN permission and is deliberately
+# not grantable from this block: the default token cannot reach another
+# repository at all, by design.
+permissions:
+  contents: read
+
+# One sync at a time. Two pushes in quick succession would otherwise race to
+# move the same branch on the same consumer, and the loser fails closed on a
+# non-fast-forward for no reason other than timing. Not cancelled in flight:
+# a half-finished run is exactly the state this is trying to avoid.
+concurrency:
+  group: gate-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Open or update the gate pull request on each consumer
+        env:
+          # A repository secret, scoped to the consumer repositories with
+          # Contents and Pull requests write access. The job fails closed
+          # naming it when it is absent: a secret that does not exist arrives
+          # as an empty string, not as an unset variable.
+          GH_TOKEN: ${{ secrets.GATE_SYNC_TOKEN }}
+          # What the sync says it came from, so a consumer can tell which
+          # commit of which repository its copy is, without asking anyone.
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        run: .github/scripts/gate-sync.sh

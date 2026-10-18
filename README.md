@@ -769,6 +769,44 @@ status then, and a required status that is never posted never passes. This is a
 repository setting the workflow cannot turn on for itself - there is no API call
 or workflow step that does it from here.
 
+### Keeping a consumer's copy of the gate in step
+
+Adopting the gate means copying two files into your repository, and a copy
+goes stale the moment either of them changes here. `.github/workflows/gate-sync.yml`
+is what closes that gap for repositories that want it: a push to `main` that
+changes `.github/workflows/inspector-gate.yml` or
+`.github/scripts/inspector-gate.sh` opens - or updates - **one** pull request
+on **one** fixed branch, `inspector-gate-sync`, on every repository listed in
+`.github/gate-consumers.txt`, carrying both files verbatim and naming the
+inspector commit they came from. `.github/scripts/gate-sync.sh` holds the
+decision and does the work; `gate-sync_test.sh` tests it and checks the
+workflow's own facts against it.
+
+It opens pull requests and never merges one. A consumer reviews the change to
+its own gate like any other, which is the same rule the gate itself applies to
+protected files.
+
+Running it on another repository needs two things that are not in this one:
+
+- **A `GATE_SYNC_TOKEN` repository secret**, scoped to exactly the consumer
+  repositories, with **Contents** and **Pull requests** write access. The
+  default `GITHUB_TOKEN` cannot reach another repository at all, so there is
+  no fallback and the sync fails closed, by name, when the secret is missing.
+- **Each consumer listed in `.github/gate-consumers.txt`**, one `owner/repo`
+  per line. That file sits inside the always-protected `.github/**` floor, so
+  pointing a write-scoped token at a new repository needs the owner's eyes,
+  like any other gate change.
+
+Everything about it fails closed. A list that does not parse - a malformed
+line, a repository named twice, this repository naming itself - syncs nothing
+at all, rather than acting on the part of it that did parse. A consumer whose
+current state cannot be read with certainty is never written to. And when one
+consumer fails while others succeed, the run still attempts every one of them
+and then fails at the end naming each failure and its reason: one repository's
+revoked access must not leave the rest carrying a stale gate. Re-running it
+after fixing the cause does nothing to the consumers that are already up to
+date.
+
 ## Status
 
 The check (issue #1) is built: locally, `inspector` runs a project's own check
@@ -789,5 +827,8 @@ files for a weakened exam. Issue #44 is built on top of that judgment: a
 project declaring `testPaths` gets it run by `inspector run`, recorded as the
 `inspector-tests` status, and read by the gate as the one thing that clears a
 changed test file - a stopgap for the blanket test protection above, for as
-long as that protection lasts. Still to come: the installer - see
+long as that protection lasts. The gate-file sync (above) is built too: a
+change to either gate file on `main` opens or updates one pull request per
+listed consumer, carrying both files and naming the commit. Still to come: the
+installer - see
 [SPEC.md](SPEC.md) and the repo's issues.

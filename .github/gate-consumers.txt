@@ -1,0 +1,17 @@
+# The repositories that run inspector-gate and are kept in step with this
+# one. .github/workflows/gate-sync.yml opens or updates one pull request on
+# each of them whenever either gate file changes on main - see
+# .github/scripts/gate-sync.sh and README's "Syncing the gate to other
+# repositories".
+#
+# One "owner/repo" per line. Blank lines and "#" comments are ignored.
+# Everything else is read strictly: a line that is not an owner/repo pair, a
+# repository named twice, or this repository naming itself fails the whole
+# run before any consumer is touched. This file decides where a token with
+# write access to other people's repositories gets pointed, so acting on half
+# of an ambiguous list is worse than refusing all of it.
+#
+# Adding a repository here is only half of onboarding it: GATE_SYNC_TOKEN must
+# also be scoped to it, with Contents and Pull requests write access, or the
+# first sync fails closed naming it.
+inactdev/dotfiles
