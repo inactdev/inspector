@@ -56,6 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	repoPath := fs.String("repo", ".", "path to the repository to inspect")
 	publicationBranch := fs.String("branch", "", "pull request branch to publish after a green result (required)")
+	expectedTip := fs.String("expected-tip", "", "full commit SHA the pull request branch must still point at on the remote; given, the branch update may replace a history it does not contain (a rebase), and any other remote commit is refused without pushing. Omitted, the update stays fast-forward only")
 	prTitle := fs.String("pr-title", "", "pull request title to open after a green result (requires -pr-body-file; both or neither)")
 	prBodyFile := fs.String("pr-body-file", "", "path to a file containing the pull request body (requires -pr-title; both or neither)")
 	vendor := fs.String("vendor", "", "model vendor for judging changed test files (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment")
@@ -74,6 +75,14 @@ access and a GitHub 'origin' remote. See README.md for setup.
 branch against the repository's default branch once publication completes;
 given alone, either one is a usage error. Given neither, no pull request is
 opened.
+
+The branch update is fast-forward only, so a branch whose history was
+rewritten locally - a rebase - cannot be published without saying so.
+-expected-tip <sha> is how a caller says so: it names the full commit SHA the
+branch must still point at on the remote, and the update then carries a lease
+on exactly that commit. A remote sitting on any other commit is refused with
+nothing pushed, because an unexpected commit there is work nobody accounted
+for.
 
 When the project declares testPaths in .inspector.json and this commit's
 change touches one of those files, inspector also judges whether any changed
@@ -98,6 +107,13 @@ flags:
 		fmt.Fprintf(stderr, "refused: invalid publication branch: %v\n", err)
 		return exitRefused
 	}
+	if *expectedTip != "" {
+		if err := inspector.ValidateExpectedTip(*expectedTip); err != nil {
+			fmt.Fprintf(stderr, "refused: invalid --expected-tip: %v\n", err)
+			return exitRefused
+		}
+	}
+	branchTarget := publicationBranchTarget{Branch: *publicationBranch, ExpectedTip: *expectedTip}
 	prTitleSet := strings.TrimSpace(*prTitle) != ""
 	prBodyFileSet := strings.TrimSpace(*prBodyFile) != ""
 	openPullRequest := prTitleSet && prBodyFileSet
@@ -143,7 +159,7 @@ flags:
 
 	switch result.Outcome {
 	case inspector.Green:
-		cleanupWarning, tests, err := publishGreen(publicationTarget, *publicationBranch, result, judgment)
+		cleanupWarning, tests, err := publishGreen(publicationTarget, branchTarget, result, judgment)
 		if err != nil {
 			printPublicationFailure(stderr, err)
 			return exitRefused
@@ -225,6 +241,16 @@ func incompletePublication(err error) error {
 	return &publicationError{cause: err, attempted: true}
 }
 
+// publicationBranchTarget names the branch inspector may move and, when the
+// caller rewrote that branch's history locally, the remote commit it must
+// still find there. The two travel together because the second only ever
+// authorizes a rewrite of the first: an empty ExpectedTip leaves the branch
+// update fast-forward only, exactly as it has always been.
+type publicationBranchTarget struct {
+	Branch      string
+	ExpectedTip string
+}
+
 // publishGreen performs the publication order that keeps inspector-gate from
 // observing a pull-request branch without an inspector status: stage the
 // checked commit remotely, record its green status, record the changed-test
@@ -235,12 +261,18 @@ func incompletePublication(err error) error {
 // green status but before the branch moves, so the gate's very first look at
 // the pull request already sees both statuses - the same reason the green
 // status itself precedes the branch move.
-func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, result inspector.Result, judgment testJudgmentOptions) (cleanupWarning string, tests testJudgment, err error) {
+func publishGreen(snapshot publicationTargetSnapshot, branchTarget publicationBranchTarget, result inspector.Result, judgment testJudgmentOptions) (cleanupWarning string, tests testJudgment, err error) {
+	publicationBranch := branchTarget.Branch
 	if err := validatePublicationPlatform(); err != nil {
 		return "", testJudgment{}, publicationRefusal(err)
 	}
 	if err := inspector.ValidatePublicationBranch(publicationBranch); err != nil {
 		return "", testJudgment{}, publicationRefusal(err)
+	}
+	if branchTarget.ExpectedTip != "" {
+		if err := inspector.ValidateExpectedTip(branchTarget.ExpectedTip); err != nil {
+			return "", testJudgment{}, publicationRefusal(err)
+		}
 	}
 	token := os.Getenv(inspector.GitHubTokenEnvVar)
 	if strings.TrimSpace(token) == "" {
@@ -284,6 +316,19 @@ func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, 
 	if exists && remoteCommit == result.Commit {
 		return "", testJudgment{}, publicationRefusal(fmt.Errorf("publication branch %q already points at checked commit %s; inspector will not retroactively stamp a commit published before its required staging, status, and branch-update sequence; make the correction as a new local commit and hand that commit to inspector before anything publishes it", publicationBranch, result.Commit))
 	}
+	// Read before the first remote write, so a remote the caller did not
+	// account for costs nothing and is reported as a refusal rather than a
+	// half-finished publication. The lease on the push itself then re-decides
+	// the same question at the remote, closing the gap between this read and
+	// that push.
+	if branchTarget.ExpectedTip != "" {
+		if !exists {
+			return "", testJudgment{}, publicationRefusal(fmt.Errorf("publication branch %q does not exist on the remote, but --expected-tip names %s; inspector replaces a branch's history only where the remote still shows the exact commit the caller accounted for, so nothing was pushed and the branch was not created", publicationBranch, branchTarget.ExpectedTip))
+		}
+		if remoteCommit != branchTarget.ExpectedTip {
+			return "", testJudgment{}, publicationRefusal(fmt.Errorf("publication branch %q is at %s on the remote, not the --expected-tip %s given; inspector will not replace a history the caller did not account for, so nothing was pushed and no status was recorded; read the branch's current remote tip, rebase onto it if that work must be kept, and hand the result back", publicationBranch, remoteCommit, branchTarget.ExpectedTip))
+		}
+	}
 
 	// Judged before the first remote step, so a slow or failing model leaves
 	// no half-published state behind. It can only produce a status, never a
@@ -326,13 +371,28 @@ func publishGreen(snapshot publicationTargetSnapshot, publicationBranch string, 
 		}
 	}
 
-	if err := inspector.PushRefToRemote(snapshot.repoRoot, snapshot.target.PushURL, result.Commit, branchRef); err != nil {
+	if err := updatePublicationBranch(snapshot, branchTarget, branchRef, result.Commit); err != nil {
+		if errors.Is(err, inspector.ErrStaleLease) {
+			return "", tests, incompletePublication(fmt.Errorf("branch %q was not moved: the remote had left --expected-tip %s by the time the push ran, so it refused to replace that history. the green status was recorded and temporary staging ref %s may remain: %w", publicationBranch, branchTarget.ExpectedTip, stagingRef, err))
+		}
 		return "", tests, incompletePublication(fmt.Errorf("moving branch %q failed after the green status was recorded; whether the remote branch moved is unknown, and temporary staging ref %s may remain: %w", publicationBranch, stagingRef, err))
 	}
 	if err := inspector.DeleteRefFromRemote(snapshot.repoRoot, snapshot.target.PushURL, stagingRef); err != nil {
 		return fmt.Sprintf("inspector published green branch %q, but could not confirm removal of its temporary staging ref: %v", publicationBranch, err), tests, nil
 	}
 	return "", tests, nil
+}
+
+// updatePublicationBranch is the last remote write of the sequence. Without
+// --expected-tip it is the fast-forward-only push it has always been; with it,
+// the push carries a lease on that exact commit, so the remote - not
+// inspector's own earlier read of it - is what finally decides whether the
+// history being replaced is the one the caller accounted for.
+func updatePublicationBranch(snapshot publicationTargetSnapshot, branchTarget publicationBranchTarget, branchRef, commit string) error {
+	if branchTarget.ExpectedTip != "" {
+		return inspector.ForcePushRefWithLease(snapshot.repoRoot, snapshot.target.PushURL, commit, branchRef, branchTarget.ExpectedTip)
+	}
+	return inspector.PushRefToRemote(snapshot.repoRoot, snapshot.target.PushURL, commit, branchRef)
 }
 
 // printTestJudgment reports the changed-test status on stdout and, for

@@ -206,11 +206,79 @@ func ValidatePublicationPlatform() error {
 // PushRefToRemote sends source to the resolved publication remote. Callers use
 // an explicit source commit and destination ref rather than a tracking ref, so
 // a checked commit is the only object a publication step can move.
+//
+// It is fast-forward only: git refuses a destination whose history this commit
+// does not contain. ForcePushRefWithLease is the single, caller-authorized way
+// past that.
 func PushRefToRemote(repoRoot, remote, source, destination string) error {
 	if _, err := runGitPush(repoRoot, "push", "--porcelain", remote, source+":"+destination); err != nil {
 		return fmt.Errorf("pushing %s to %s: %w", source, destination, err)
 	}
 	return nil
+}
+
+// ErrStaleLease reports that the remote refused a leased push because
+// destination was no longer at the expected tip. The remote answered, so this
+// is certain rather than uncertain: the destination did not move.
+var ErrStaleLease = errors.New("remote ref is not at the expected tip")
+
+// fullObjectNameRE matches a complete, lowercase hexadecimal object name in
+// either of git's two hash sizes - SHA-1 and SHA-256.
+var fullObjectNameRE = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// ValidateExpectedTip accepts only a complete object name. An abbreviation, a
+// branch name, or anything beginning with a hyphen is refused here rather than
+// handed to git, so the lease a caller asked for is always the lease git
+// enforces: git itself rejects an abbreviation outright, and a value that is
+// not an object name at all could otherwise be read as an option.
+func ValidateExpectedTip(expectedTip string) error {
+	if !fullObjectNameRE.MatchString(expectedTip) {
+		return fmt.Errorf("%q is not a complete lowercase hexadecimal commit SHA (40 or 64 characters); inspector requires the whole object name so a lease can never be read as an abbreviation, a branch name, or an option", expectedTip)
+	}
+	return nil
+}
+
+// ForcePushRefWithLease sends source to destination on the resolved
+// publication remote, replacing a history the destination does not contain -
+// the case a rebase creates - but only while the remote still has destination
+// at expectedTip. Anything else there and the remote refuses the push, which
+// is why the caller must name that commit rather than inspector reading
+// whatever it happens to find: an unexpected remote means work nobody
+// accounted for, and overwriting it is exactly what must not happen.
+func ForcePushRefWithLease(repoRoot, remote, source, destination, expectedTip string) error {
+	if err := ValidateExpectedTip(expectedTip); err != nil {
+		return fmt.Errorf("refusing to rewrite %s under an unusable lease: %w", destination, err)
+	}
+	lease := "--force-with-lease=" + destination + ":" + expectedTip
+	out, err := runGitPush(repoRoot, "push", "--porcelain", lease, remote, source+":"+destination)
+	if err == nil {
+		return nil
+	}
+	if staleLeaseRejection(out, destination) {
+		return fmt.Errorf("%w: %s on %s is no longer at %s, so git refused the rewrite and that ref did not move: %v", ErrStaleLease, destination, redactURLCredentials(remote), expectedTip, err)
+	}
+	return fmt.Errorf("pushing %s to %s with a lease on %s: %w", source, destination, expectedTip, err)
+}
+
+// staleLeaseRejection reports whether git's --porcelain output records the
+// remote refusing destination for a stale lease. Only the remote can produce
+// that line, so finding it proves the push was answered and rejected; its
+// absence - a lost response, a transport failure - leaves the outcome unknown,
+// which is what the caller must then report.
+func staleLeaseRejection(porcelain, destination string) bool {
+	for _, line := range strings.Split(porcelain, "\n") {
+		if !strings.HasPrefix(line, "!") {
+			continue
+		}
+		fields := strings.Split(strings.TrimSuffix(line, "\r"), "\t")
+		if len(fields) < 3 || !strings.HasSuffix(fields[1], ":"+destination) {
+			continue
+		}
+		if strings.Contains(fields[2], "stale info") {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoteRefCommit reports the commit currently named by an exact remote ref.
@@ -815,6 +883,12 @@ func readOptionalFile(path string) ([]byte, error) {
 	return contents, err
 }
 
+// gitOutput returns git's stdout alongside a failure as well as a success,
+// because `git push --porcelain` writes the per-ref result - including the
+// remote's reason for refusing one - to stdout while exiting non-zero.
+// ForcePushRefWithLease is the one caller that reads it on failure; every
+// other caller checks the error first and uses the value only without one.
+// The error message itself still carries only stderr, redacted.
 func gitOutput(cmd *exec.Cmd, args []string) (string, error) {
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
@@ -822,7 +896,7 @@ func gitOutput(cmd *exec.Cmd, args []string) (string, error) {
 	if err != nil {
 		command := redactURLCredentials(strings.Join(args, " "))
 		detail := redactURLCredentials(strings.TrimSpace(errBuf.String()))
-		return "", fmt.Errorf("git %s: %w: %s", command, err, detail)
+		return string(out), fmt.Errorf("git %s: %w: %s", command, err, detail)
 	}
 	return string(out), nil
 }

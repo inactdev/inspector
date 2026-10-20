@@ -97,7 +97,7 @@ func TestPublishGreen_DeletedTestEncodingTheFeatureIsRedWithTheReason(t *testing
 	}, nil)
 
 	_, tests, err := publishGreen(
-		capturePublicationTarget(dir), "feature",
+		capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"},
 		inspector.Result{Outcome: inspector.Green, Commit: commit, TestPaths: []string{"*_test.go"}},
 		testJudgmentOptions{Vendor: "anthropic", Model: "claude-opus-5", VendorDescription: "anthropic (default, no flag given)"},
 	)
@@ -167,7 +167,7 @@ func TestPublishGreen_AddedUnrelatedTestClearsTheGateWithoutAnOverride(t *testin
 	}, nil)
 
 	_, tests, err := publishGreen(
-		capturePublicationTarget(dir), "feature",
+		capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"},
 		inspector.Result{Outcome: inspector.Green, Commit: commit, TestPaths: []string{"*_test.go"}},
 		testJudgmentOptions{Vendor: "anthropic", Model: "claude-opus-5", VendorDescription: "anthropic (default, no flag given)"},
 	)
@@ -210,7 +210,7 @@ func TestPublishGreen_NoChangedTestPostsNoTestStatus(t *testing.T) {
 	judge := stubTestJudge(t, reviewer.Result{TestChangeVerdict: reviewer.TestChangesIntact}, nil)
 
 	_, tests, err := publishGreen(
-		capturePublicationTarget(dir), "feature",
+		capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"},
 		inspector.Result{Outcome: inspector.Green, Commit: commit, TestPaths: []string{"*_test.go"}},
 		testJudgmentOptions{Model: "claude-opus-5", VendorDescription: "anthropic (default, no flag given)"},
 	)
@@ -244,7 +244,7 @@ func TestPublishGreen_NoTestPathsPostsNoTestStatus(t *testing.T) {
 	judge := stubTestJudge(t, reviewer.Result{TestChangeVerdict: reviewer.TestChangesIntact}, nil)
 
 	_, tests, err := publishGreen(
-		capturePublicationTarget(dir), "feature",
+		capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"},
 		inspector.Result{Outcome: inspector.Green, Commit: commit},
 		testJudgmentOptions{Model: "claude-opus-5"},
 	)

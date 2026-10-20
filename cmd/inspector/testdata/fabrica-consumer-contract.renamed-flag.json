@@ -2,6 +2,7 @@
   "flags": [
     { "name": "repo", "description": "path to the repository to inspect" },
     { "name": "branch", "description": "pull request branch to publish after a green result", "required": true },
+    { "name": "expected-tip", "description": "full commit SHA the pull request branch must still point at on the remote, so a rebased branch can be published" },
     { "name": "pr-title-renamed", "description": "pull request title to open after a green result" },
     { "name": "pr-body-file", "description": "path to a file containing the pull request body" }
   ],
