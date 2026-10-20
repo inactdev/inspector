@@ -46,3 +46,6 @@ echo "==> inspector-gate tests"
 
 echo "==> fabrica-contract-check tests"
 .github/scripts/fabrica-contract-check_test.sh
+
+echo "==> gate-sync tests"
+.github/scripts/gate-sync_test.sh
