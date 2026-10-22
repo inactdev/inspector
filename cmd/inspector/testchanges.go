@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/inactdev/inspector/internal/inspector"
@@ -37,6 +38,13 @@ type testJudgment struct {
 	// Description is the status text; Summary is the one stdout line.
 	Description string
 	Summary     string
+	// Review is the per-file evidence behind this status: which changed
+	// test files the reviewer covered, what it judged each one, and why,
+	// plus who judged them. GitHub caps the status description at 140
+	// characters, so this is the only place those reasons can be read -
+	// printed on stdout and recorded in the run report, on a pass exactly
+	// as on a failure (issue #55).
+	Review inspector.TestReview
 	// Warning is set for any state other than success: the text printed
 	// loudly on stderr, because the worker reading it is the one who has to
 	// put the exam back.
@@ -76,7 +84,8 @@ func judgeChangedTests(repoRoot, commit, baseBranch string, patterns []string, j
 		return testJudgment{}
 	}
 	if strings.TrimSpace(judgment.Model) == "" {
-		return testChangeFailure(judgment, fmt.Sprintf("%s changed, and no --model was given to judge %s with, so whether the exam survived is unknown", changedTestList(changes), pluralTests(len(changes))))
+		return testChangeFailure(judgment, fmt.Sprintf("%s changed, and no --model was given to judge %s with, so whether the exam survived is unknown", changedTestList(changes), pluralTests(len(changes)))).
+			withReviewedTests(reviewer.DeriveTestChangeVerdict(true, changes), changes)
 	}
 
 	result, err := judgeTestChanges(context.Background(), reviewer.AgentOptions{
@@ -86,23 +95,45 @@ func judgeChangedTests(repoRoot, commit, baseBranch string, patterns []string, j
 		Model:            judgment.Model,
 	})
 	if err != nil {
-		return testChangeFailure(judgment, fmt.Sprintf("%s changed, and the judgment of %s could not be completed: %v", changedTestList(changes), pluralTests(len(changes)), err))
+		return testChangeFailure(judgment, fmt.Sprintf("%s changed, and the judgment of %s could not be completed: %v", changedTestList(changes), pluralTests(len(changes)), err)).
+			withReviewedTests(reviewer.DeriveTestChangeVerdict(true, changes), changes)
 	}
 
 	switch result.TestChangeVerdict {
 	case reviewer.TestChangesIntact:
+		summary := fmt.Sprintf("every changed test keeps its exam intact (%s)", changedTestList(result.TestChanges))
 		return testJudgment{
 			Posted:      true,
 			State:       inspector.StatusSuccess,
 			Description: testChangeDescription(judgment, fmt.Sprintf("%s intact: %s", pluralTests(len(result.TestChanges)), changedTestList(result.TestChanges))),
-			Summary:     fmt.Sprintf("every changed test keeps its exam intact (%s)", changedTestList(result.TestChanges)),
-		}
+			Summary:     summary,
+			Review:      newTestReview(judgment, inspector.StatusSuccess, summary),
+		}.withReviewedTests(result.TestChangeVerdict, result.TestChanges)
 	case reviewer.TestChangesWeaken:
-		return testChangeFailure(judgment, weakenedTestReason(result.TestChanges))
+		return testChangeFailure(judgment, weakenedTestReason(result.TestChanges)).
+			withReviewedTests(result.TestChangeVerdict, result.TestChanges)
 	default:
 		// Unjudged, and anything the reviewer could in principle grow later:
 		// neither reads as intact, so neither clears the gate.
-		return testChangeFailure(judgment, unjudgedTestReason(result))
+		return testChangeFailure(judgment, unjudgedTestReason(result)).
+			withReviewedTests(result.TestChangeVerdict, result.TestChanges)
+	}
+}
+
+// recordTestReview writes the review's per-file judgments into this run's
+// report, so the reasons behind the inspector-tests status outlive the
+// 140-character status description and reach the file Fabrica copies onto the
+// task record. It runs whether the publication that followed the judgment
+// completed or not - the judgment happens before the first remote step, so
+// its evidence is worth keeping either way - and a failure to write it is a
+// warning and nothing more, the same rule a failed report save follows: the
+// report is notes, never authority.
+func recordTestReview(stderr io.Writer, repoRoot, reportPath string, tests testJudgment) {
+	if !tests.Posted {
+		return
+	}
+	if err := inspector.RecordTestReview(repoRoot, reportPath, tests.Review); err != nil {
+		fmt.Fprintf(stderr, "warning: could not record the changed-test review in the local report: %v\n", err)
 	}
 }
 
@@ -114,6 +145,7 @@ func testChangeFailure(judgment testJudgmentOptions, reason string) testJudgment
 		State:       inspector.StatusFailure,
 		Description: testChangeDescription(judgment, reason),
 		Summary:     reason,
+		Review:      newTestReview(judgment, inspector.StatusFailure, reason),
 		Warning: fmt.Sprintf(
 			"the changed tests in this commit were not confirmed to keep their exam intact:\n\n  %s\n\n"+
 				"inspector published the green check status, and posted %q as a failure on the same commit, so\n"+
@@ -127,6 +159,43 @@ func testChangeFailure(judgment testJudgmentOptions, reason string) testJudgment
 // the examiner's does - the choice of who judged must never be silent.
 func testChangeDescription(judgment testJudgmentOptions, detail string) string {
 	return statusDescription(fmt.Sprintf("vendor: %s; %s: %s", judgment.VendorDescription, inspector.TestsStatusContext, detail))
+}
+
+// newTestReview starts the review record every outcome carries, naming who
+// judged before anything is known about what they concluded - so an outcome
+// reached before the model ever ran still records which model it would have
+// been.
+func newTestReview(judgment testJudgmentOptions, state inspector.StatusState, summary string) inspector.TestReview {
+	return inspector.TestReview{
+		Vendor:  judgment.VendorDescription,
+		Model:   judgment.Model,
+		State:   state,
+		Summary: summary,
+	}
+}
+
+// withReviewedTests attaches the changed test files this outcome was derived
+// from, with whatever each one was judged. A file the reviewer never reached
+// keeps an empty judgment and is still listed: the report has to be able to
+// say that nobody judged it, which is not the same as there being nothing to
+// judge.
+func (t testJudgment) withReviewedTests(verdict reviewer.TestChangeVerdict, changes []reviewer.TestChange) testJudgment {
+	t.Review.Verdict = string(verdict)
+	t.Review.Files = testReviewFiles(changes)
+	return t
+}
+
+func testReviewFiles(changes []reviewer.TestChange) []inspector.TestReviewFile {
+	files := make([]inspector.TestReviewFile, 0, len(changes))
+	for _, change := range changes {
+		files = append(files, inspector.TestReviewFile{
+			Path:     change.Path,
+			Status:   string(change.Status),
+			Judgment: string(change.Judgment),
+			Reason:   change.Reason,
+		})
+	}
+	return files
 }
 
 func weakenedTestReason(changes []reviewer.TestChange) string {

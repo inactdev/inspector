@@ -390,8 +390,12 @@ inspector --branch my-feature implemented the login flow
 Each run writes a small JSON report to `.inspector/runs/`, and copies it to
 `.inspector/latest.json`, so a red result is actionable without re-running: the
 command that ran, its exit code (or the signal that killed it), and its full
-output. These are notes for a
-human, never authority. On its first run inspector
+output. A run that judged the commit's changed tests also carries a
+`testReview` object - the vendor and model that judged, the status state and
+inspector's own derived verdict, and one entry per changed test naming its
+`path`, `status`, `judgment` and the reviewer's `reason`. See
+[The `inspector-tests` status](#the-inspector-tests-status). These are notes for
+a human, never authority. On its first run inspector
 writes `.inspector/.gitignore` containing `*`, so reports stay out of git without
 you editing anything; an existing `.inspector/.gitignore` is left alone.
 
@@ -489,6 +493,25 @@ Judging needs a model, so `inspector run` takes `--vendor` and `--model` for it
 - the same two flags, the same defaults, and the same
 `<VENDOR>_API_KEY`/`<VENDOR>_BASE_URL` environment reads as `inspector review`.
 The vendor is named in the status description, never left silent.
+
+The status is the signal; the run report is the evidence. GitHub truncates a
+status description at 140 characters, so the status names at most one file.
+Every per-file judgment and the reviewer's reason for it - **on a pass exactly
+as on a failure or a `cannot_tell`** - is recorded in the run report's
+`testReview` object and printed on stdout under the one-line summary:
+
+```
+inspector-tests: success - every changed test keeps its exam intact (feature/rounding_test.go)
+  judged by vendor: anthropic (default, no flag given), model: claude-sonnet-4-5
+  feature/rounding_test.go (added): keeps_the_exam_intact - new coverage for rounding; it removes nothing the request asked for
+```
+
+A pass that recorded no reasoning would be unauditable: the reviewer is the one
+thing that lets a test-touching pull request through the gate without the
+Client's own override, and a model that waves every diff through looks
+identical to a careful one. A changed test the reviewer never reached is listed
+with no judgment rather than left out, and a report that cannot be updated with
+the review is a warning only - the report is notes, never authority.
 
 Every way this can go wrong **fails closed**: a missing `--model`, an
 unreadable diff, an unusable pattern, a vendor that cannot be reached, a
@@ -878,7 +901,9 @@ files for a weakened exam. Issue #44 is built on top of that judgment: a
 project declaring `testPaths` gets it run by `inspector run`, recorded as the
 `inspector-tests` status, and read by the gate as the one thing that clears a
 changed test file - a stopgap for the blanket test protection above, for as
-long as that protection lasts. The gate-file sync (above) is built too: a
+long as that protection lasts. Issue #55 keeps that judgment auditable: every
+per-file judgment and reason, pass included, is printed and recorded in the run
+report's `testReview`, while the status itself is unchanged. The gate-file sync (above) is built too: a
 change to either gate file on `main` opens or updates one pull request per
 listed consumer, carrying both files and naming the commit. Still to come: the
 installer - see
