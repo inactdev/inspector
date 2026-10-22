@@ -610,6 +610,15 @@ Linux, macOS, or Windows host without mounting a caller-supplied executable.
 The image is intentionally general-purpose so a future browser driver can live
 there too.
 
+No file under the agent source tree - `cmd/examiner-agent/`,
+`internal/examiner/`, `internal/container/` and `internal/llm/` - may contain
+binary content, because a committed executable or archive is unreviewable by
+construction and this agent's whole job is refusing to trust what it cannot
+verify; `internal/agentsource` enforces that from the project's own check
+command, reads bytes rather than file names, and admits a genuinely binary test
+fixture only through an explicit, individually reasoned allowance under a
+`testdata` directory.
+
 The caller starts the app outside the examiner, then provides the permitted
 input files explicitly:
 
