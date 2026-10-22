@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -328,5 +331,222 @@ func assertTestFailure(t *testing.T, tests testJudgment, want string) {
 	}
 	if tests.Warning == "" {
 		t.Fatal("a failing test judgment printed no loud warning for the worker")
+	}
+	// Issue #55: every outcome carries its own record, so the report can
+	// never say less than the status did.
+	if tests.Review.State != inspector.StatusFailure || tests.Review.Summary != tests.Summary {
+		t.Fatalf("review = %+v, want it to record the failure and its reason", tests.Review)
+	}
+}
+
+// Issue #55's first ask: a PASS records every per-file judgment and its
+// reason, with the vendor and model that judged it. A pass that records
+// nothing is unauditable - a model that waves every diff through reads
+// exactly like a careful one.
+func TestJudgeChangedTests_PassRecordsEveryPerFileReasonAndWhoJudged(t *testing.T) {
+	dir, commit := newRepoWithRecordedBase(t,
+		map[string]string{"feature/feature_test.go": featureTest, "feature/feature.go": "package feature\n\nfunc Discount(n int) int { return n * 9 / 10 }\n"},
+		func(dir string) {
+			writeFileT(t, dir, "feature/feature_test.go", featureTest+"\nfunc TestDiscountIsStable(t *testing.T) {}\n")
+			writeFileT(t, dir, "feature/rounding_test.go", "package feature\n\nimport \"testing\"\n\nfunc TestRoundingIsStable(t *testing.T) {}\n")
+		})
+	const (
+		modifiedReason = "the 10% discount assertion is untouched; the change only adds a second case"
+		addedReason    = "new coverage for rounding; it removes nothing the request asked for"
+	)
+	stubTestJudge(t, reviewer.Result{
+		TestChangeVerdict: reviewer.TestChangesIntact,
+		TestChanges: []reviewer.TestChange{
+			{Path: "feature/feature_test.go", Status: reviewer.TestFileModified, Judgment: reviewer.ExamIntact, Reason: modifiedReason},
+			{Path: "feature/rounding_test.go", Status: reviewer.TestFileAdded, Judgment: reviewer.ExamIntact, Reason: addedReason},
+		},
+	}, nil)
+
+	tests := judgeChangedTests(dir, commit, "main", []string{"*_test.go"}, testJudgmentOptions{
+		Vendor: "anthropic", Model: "claude-opus-5", VendorDescription: "anthropic (default, no flag given)",
+	})
+	if tests.State != inspector.StatusSuccess {
+		t.Fatalf("state = %q, want success", tests.State)
+	}
+	review := tests.Review
+	if review.Vendor != "anthropic (default, no flag given)" || review.Model != "claude-opus-5" {
+		t.Fatalf("review names vendor %q model %q, want the ones that judged", review.Vendor, review.Model)
+	}
+	if review.State != inspector.StatusSuccess || review.Verdict != string(reviewer.TestChangesIntact) {
+		t.Fatalf("review state = %q verdict = %q, want the passing pair", review.State, review.Verdict)
+	}
+	want := []inspector.TestReviewFile{
+		{Path: "feature/feature_test.go", Status: "modified", Judgment: string(reviewer.ExamIntact), Reason: modifiedReason},
+		{Path: "feature/rounding_test.go", Status: "added", Judgment: string(reviewer.ExamIntact), Reason: addedReason},
+	}
+	if !reflect.DeepEqual(review.Files, want) {
+		t.Fatalf("review files = %+v, want %+v", review.Files, want)
+	}
+}
+
+// A file nobody judged is still listed, carrying no judgment: "the reviewer
+// never reached this one" is a fact about the review, and leaving it out
+// would read as there having been nothing to judge.
+func TestJudgeChangedTests_RecordsUnreachedFilesAsUnjudged(t *testing.T) {
+	dir, commit := newRepoWithRecordedBase(t, map[string]string{"feature_test.go": featureTest}, func(dir string) {
+		if err := os.Remove(filepath.Join(dir, "feature_test.go")); err != nil {
+			t.Fatalf("deleting the test: %v", err)
+		}
+	})
+	stubTestJudge(t, reviewer.Result{}, errors.New("ANTHROPIC_API_KEY is not set"))
+
+	tests := judgeChangedTests(dir, commit, "main", []string{"*_test.go"}, testJudgmentOptions{
+		Model: "claude-opus-5", VendorDescription: "anthropic (default, no flag given)",
+	})
+	assertTestFailure(t, tests, "could not be completed")
+	want := []inspector.TestReviewFile{{Path: "feature_test.go", Status: "deleted"}}
+	if !reflect.DeepEqual(tests.Review.Files, want) {
+		t.Fatalf("review files = %+v, want %+v", tests.Review.Files, want)
+	}
+	if tests.Review.Verdict != string(reviewer.TestChangesUnjudged) {
+		t.Fatalf("review verdict = %q, want %q", tests.Review.Verdict, reviewer.TestChangesUnjudged)
+	}
+}
+
+// Issue #55's second ask: the same list goes to stdout, so a caller that
+// never opens the report file still captures what the reviewer concluded.
+func TestPrintTestJudgment_PrintsEveryPerFileReason(t *testing.T) {
+	const reason = "the 10% discount assertion is untouched"
+	tests := testJudgment{
+		Posted:  true,
+		State:   inspector.StatusSuccess,
+		Summary: "every changed test keeps its exam intact (feature/feature_test.go, feature/rounding_test.go)",
+		Review: inspector.TestReview{
+			Vendor:  "anthropic (default, no flag given)",
+			Model:   "claude-opus-5",
+			State:   inspector.StatusSuccess,
+			Verdict: string(reviewer.TestChangesIntact),
+			Files: []inspector.TestReviewFile{
+				{Path: "feature/feature_test.go", Status: "modified", Judgment: string(reviewer.ExamIntact), Reason: reason},
+				{Path: "feature/rounding_test.go", Status: "added"},
+			},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	printTestJudgment(&stdout, &stderr, tests)
+	out := stdout.String()
+	for _, want := range []string{
+		inspector.TestsStatusContext + ": success",
+		"judged by vendor: anthropic (default, no flag given), model: claude-opus-5",
+		"feature/feature_test.go (modified): " + string(reviewer.ExamIntact) + " - " + reason,
+		"feature/rounding_test.go (added): unjudged",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout = %q, want it to contain %q", out, want)
+		}
+	}
+	if stderr.String() != "" {
+		t.Fatalf("a passing judgment wrote to stderr: %q", stderr.String())
+	}
+}
+
+// The judgment happens after the report is written, so it is patched in
+// afterward - and a pass has to be patched in exactly as a failure does.
+func TestRecordTestReview_PatchesThePassingReviewIntoTheReport(t *testing.T) {
+	dir, commit := newRepoWithRecordedBase(t, map[string]string{"feature_test.go": featureTest}, func(dir string) {
+		writeFileT(t, dir, "feature_test.go", featureTest+"\nfunc TestDiscountIsStable(t *testing.T) {}\n")
+	})
+	const reason = "the 10% discount assertion is untouched; the change only adds a case"
+	stubTestJudge(t, reviewer.Result{
+		TestChangeVerdict: reviewer.TestChangesIntact,
+		TestChanges:       []reviewer.TestChange{{Path: "feature_test.go", Status: reviewer.TestFileModified, Judgment: reviewer.ExamIntact, Reason: reason}},
+	}, nil)
+	tests := judgeChangedTests(dir, commit, "main", []string{"*_test.go"}, testJudgmentOptions{
+		Model: "claude-opus-5", VendorDescription: "anthropic (default, no flag given)",
+	})
+
+	reportPath, err := inspector.WriteReport(dir, inspector.Report{Commit: commit, Repo: dir, Outcome: inspector.Green})
+	if err != nil {
+		t.Fatalf("writing the report: %v", err)
+	}
+	var stderr bytes.Buffer
+	recordTestReview(&stderr, dir, reportPath, tests)
+	if stderr.String() != "" {
+		t.Fatalf("recording the review warned: %q", stderr.String())
+	}
+
+	assertReportTestReview(t, filepath.Join(dir, inspector.RunsDirName, inspector.LatestReportName), reason)
+}
+
+// A review that could not be written is a warning and nothing else: the
+// report is notes, never authority, so it must not change the run's result.
+func TestRecordTestReview_UnwritableReportOnlyWarns(t *testing.T) {
+	var stderr bytes.Buffer
+	recordTestReview(&stderr, t.TempDir(), filepath.Join(t.TempDir(), "absent.json"), testJudgment{
+		Posted: true,
+		State:  inspector.StatusSuccess,
+		Review: inspector.TestReview{State: inspector.StatusSuccess},
+	})
+	if !strings.Contains(stderr.String(), "could not record the changed-test review") {
+		t.Fatalf("stderr = %q, want a warning naming the failure", stderr.String())
+	}
+}
+
+// End to end, as Fabrica runs it: a green run whose change touches a test
+// leaves the reviewer's per-file reasons both on stdout and in the report
+// file Fabrica copies onto the task record.
+func TestCLI_GreenRecordsAndPrintsThePassingTestReview(t *testing.T) {
+	requirePublicationPlatform(t)
+	requireDocker(t)
+	dir, _ := newRepoWithRecordedBase(t,
+		map[string]string{
+			".inspector.json": `{"check": "true", "image": "alpine", "testPaths": ["*_test.go"]}`,
+			"feature_test.go": featureTest,
+		},
+		func(dir string) {
+			writeFileT(t, dir, "feature_test.go", featureTest+"\nfunc TestDiscountIsStable(t *testing.T) {}\n")
+		})
+	stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+	const reason = "the 10% discount assertion is untouched; the change only adds a case"
+	stubTestJudge(t, reviewer.Result{
+		TestChangeVerdict: reviewer.TestChangesIntact,
+		TestChanges:       []reviewer.TestChange{{Path: "feature_test.go", Status: reviewer.TestFileModified, Judgment: reviewer.ExamIntact, Reason: reason}},
+	}, nil)
+
+	code, stdout, stderr := runCLI(t, dir, "--branch", "feature", "--model", "claude-opus-5")
+	if code != exitGreen {
+		t.Fatalf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitGreen, stdout, stderr)
+	}
+	if !strings.Contains(stdout, reason) || !strings.Contains(stdout, "feature_test.go (modified)") {
+		t.Fatalf("stdout = %q, want the reviewer's own per-file reason in it", stdout)
+	}
+	assertReportTestReview(t, filepath.Join(dir, inspector.RunsDirName, inspector.LatestReportName), reason)
+}
+
+func assertReportTestReview(t *testing.T, path, wantReason string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var report inspector.Report
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("unmarshaling %s: %v", path, err)
+	}
+	if report.TestReview == nil {
+		t.Fatalf("%s carries no record of the test review at all:\n%s", path, data)
+	}
+	review := *report.TestReview
+	if review.State != inspector.StatusSuccess || review.Verdict != string(reviewer.TestChangesIntact) {
+		t.Fatalf("recorded review state = %q verdict = %q, want the passing pair", review.State, review.Verdict)
+	}
+	if review.Model != "claude-opus-5" || review.Vendor == "" {
+		t.Fatalf("recorded review names vendor %q model %q, want both", review.Vendor, review.Model)
+	}
+	if len(review.Files) != 1 {
+		t.Fatalf("recorded review files = %+v, want exactly the one changed test", review.Files)
+	}
+	file := review.Files[0]
+	if file.Path != "feature_test.go" || file.Status != "modified" || file.Judgment != string(reviewer.ExamIntact) {
+		t.Fatalf("recorded file = %+v, want the modified test judged intact", file)
+	}
+	if file.Reason != wantReason {
+		t.Fatalf("recorded reason = %q, want %q", file.Reason, wantReason)
 	}
 }

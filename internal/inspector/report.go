@@ -37,6 +37,50 @@ type Report struct {
 	// runs before that step even exists, so RecordPullRequestURL is what
 	// patches it into both this file and LatestReportName afterward.
 	PullRequestURL string `json:"pullRequestURL,omitempty"`
+	// TestReview is the evidence behind this run's TestsStatusContext
+	// status. Like PullRequestURL it is patched in afterward, by
+	// RecordTestReview - the judgment it records cannot happen until after
+	// the check this report is written for. Absent on a run that judged no
+	// test change at all.
+	TestReview *TestReview `json:"testReview,omitempty"`
+}
+
+// TestReview is what the test-reviewer concluded about one run's changed test
+// files, and who judged them. The TestsStatusContext status carries a single
+// description GitHub caps at 140 characters, so the per-file reasons can only
+// ever be read here: the status is the signal, this is the evidence.
+//
+// It is recorded for a pass exactly as for a failure, because a pass that
+// records no reasoning is unauditable - a model that waves every diff through
+// looks identical to a careful one (issue #55).
+type TestReview struct {
+	// Vendor and Model name who judged, the same two values the status
+	// description names. Model is empty when none was configured, which is
+	// itself one of the failing states.
+	Vendor string `json:"vendor,omitempty"`
+	Model  string `json:"model,omitempty"`
+	// State is the status state this review produced, and Verdict is
+	// inspector's own derived answer behind it. Verdict is empty when the
+	// review failed before it could read the change at all.
+	State   StatusState `json:"state"`
+	Verdict string      `json:"verdict,omitempty"`
+	// Summary is the one line the run also printed - for a failure, the
+	// reason it failed.
+	Summary string `json:"summary"`
+	// Files is every changed test file the review covered, in diff order. A
+	// file the reviewer never judged carries an empty Judgment rather than
+	// being left out: "nobody judged this" is a fact about the review, not
+	// an absence.
+	Files []TestReviewFile `json:"files,omitempty"`
+}
+
+// TestReviewFile is one changed test file as the review saw it: what the
+// change did to it, and the judgment and reason the reviewer gave for it.
+type TestReviewFile struct {
+	Path     string `json:"path"`
+	Status   string `json:"status"`
+	Judgment string `json:"judgment,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // WriteReport persists r under repoRoot/RunsDirName/runs/ and refreshes
@@ -130,16 +174,32 @@ func writeNewFile(dir, base string, data []byte) (string, error) {
 // re-running inspector. A no-op when reportPath is empty - the report save
 // itself already failed, and the local report is notes, never authority.
 func RecordPullRequestURL(repoRoot, reportPath, url string) error {
+	return patchReport(repoRoot, reportPath, func(r *Report) { r.PullRequestURL = url })
+}
+
+// RecordTestReview patches the changed-test review into the report already
+// written for this run at reportPath, and into LatestReportName alongside it.
+// The judgment happens after the check, so WriteReport cannot carry it; the
+// same no-op rule as RecordPullRequestURL applies when the report save itself
+// already failed.
+func RecordTestReview(repoRoot, reportPath string, review TestReview) error {
+	return patchReport(repoRoot, reportPath, func(r *Report) { r.TestReview = &review })
+}
+
+// patchReport applies mutate to this run's report and to LatestReportName,
+// which holds a copy of it. A no-op when reportPath is empty - the report
+// save itself already failed, and the local report is notes, never authority.
+func patchReport(repoRoot, reportPath string, mutate func(*Report)) error {
 	if reportPath == "" {
 		return nil
 	}
-	if err := patchReportPullRequestURL(reportPath, url); err != nil {
+	if err := patchReportFile(reportPath, mutate); err != nil {
 		return err
 	}
-	return patchReportPullRequestURL(filepath.Join(repoRoot, RunsDirName, LatestReportName), url)
+	return patchReportFile(filepath.Join(repoRoot, RunsDirName, LatestReportName), mutate)
 }
 
-func patchReportPullRequestURL(path, url string) error {
+func patchReportFile(path string, mutate func(*Report)) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", path, err)
@@ -148,7 +208,7 @@ func patchReportPullRequestURL(path, url string) error {
 	if err := json.Unmarshal(data, &report); err != nil {
 		return fmt.Errorf("decoding %s: %w", path, err)
 	}
-	report.PullRequestURL = url
+	mutate(&report)
 	encoded, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", path, err)

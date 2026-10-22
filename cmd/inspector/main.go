@@ -160,6 +160,10 @@ flags:
 	switch result.Outcome {
 	case inspector.Green:
 		cleanupWarning, tests, err := publishGreen(publicationTarget, branchTarget, result, judgment)
+		// Before the error is handled: the judgment runs before the first
+		// remote step, so a publication that then failed still has a review
+		// worth keeping in the report.
+		recordTestReview(stderr, publicationTarget.repoRoot, result.ReportPath, tests)
 		if err != nil {
 			printPublicationFailure(stderr, err)
 			return exitRefused
@@ -405,9 +409,39 @@ func printTestJudgment(stdout, stderr io.Writer, tests testJudgment) {
 		return
 	}
 	fmt.Fprintf(stdout, "%s: %s - %s\n", inspector.TestsStatusContext, tests.State, tests.Summary)
+	printTestReview(stdout, tests.Review)
 	if tests.State != inspector.StatusSuccess {
 		fmt.Fprintf(stderr, "\n%s\n%s\n%s\n\n", warningBar, tests.Warning, warningBar)
 	}
+}
+
+// printTestReview prints who judged the changed tests and what they concluded
+// about each one, on a pass exactly as on a failure. The status description is
+// capped at 140 characters and the summary line above names at most one file,
+// so without this a caller reading only stdout never learns what the reviewer
+// concluded about any particular test (issue #55).
+func printTestReview(stdout io.Writer, review inspector.TestReview) {
+	fmt.Fprintf(stdout, "  judged by vendor: %s, model: %s\n", orNoneGiven(review.Vendor), orNoneGiven(review.Model))
+	for _, file := range review.Files {
+		judgment := file.Judgment
+		if judgment == "" {
+			judgment = "unjudged"
+		}
+		fmt.Fprintf(stdout, "  %s (%s): %s", file.Path, file.Status, judgment)
+		if file.Reason != "" {
+			fmt.Fprintf(stdout, " - %s", file.Reason)
+		}
+		fmt.Fprintln(stdout)
+	}
+}
+
+// orNoneGiven keeps a vendor or model nobody named from printing as an empty
+// gap, which reads as a broken line rather than as an absence.
+func orNoneGiven(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "(none given)"
+	}
+	return value
 }
 
 // openGreenPullRequest runs once publishGreen has already completed in full
