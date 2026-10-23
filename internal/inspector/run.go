@@ -22,7 +22,8 @@ const (
 	Red Outcome = "red"
 	// Refused means inspector never reached a verdict on the code - no
 	// check command or image configured, no usable container runtime, a
-	// repo whose git directory cannot be reached inside the container, a
+	// repo whose git directory cannot be reached inside the container or
+	// whose source cannot be mounted read-only, a
 	// dirty working tree, a check command killed by a signal before it
 	// could finish on its own, or a check command that ran past its
 	// timeout and was killed for it. Those
@@ -161,6 +162,21 @@ func Run(opts Options) (Result, error) {
 			),
 		}, nil
 	}
+	if errors.Is(err, container.ErrWorkspaceUnavailable) {
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%v\n\n"+
+					"the commit under check is mounted read-only, and the check command writes to a\n"+
+					"throwaway workspace laid under it instead, so it cannot modify the code it is\n"+
+					"being judged on. inspector refuses rather than running a check whose source it\n"+
+					"could not make read-only - a check that can rewrite its own source can pass\n"+
+					"against bytes that exist nowhere.",
+				err,
+			),
+		}, nil
+	}
 	if errors.Is(err, container.ErrRemoteDocker) {
 		return Result{
 			Outcome: Refused,
@@ -179,6 +195,11 @@ func Run(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("running check command: %w", err)
 	}
+	// The check command's writable workspace is kept until this run's
+	// report is written and discarded after it, by ruling (issue #27):
+	// whatever the check installed or built belongs to that one run, and
+	// nothing in it is evidence once the report exists.
+	defer checkResult.Workspace.Cleanup()
 	finished := time.Now()
 
 	outcome := Green

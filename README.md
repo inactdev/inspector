@@ -78,14 +78,63 @@ never guesses at either:
 
 `image` has to have the project's own toolchain in it, the same way `check`
 has to be the project's own command - inspector ships no images and builds
-none for you. The check command runs with that image, bind-mounted to the
-repo at `/workspace`, its own working directory. If the image is missing or
-unusable, inspector refuses the same way it refuses a missing check command,
-rather than quietly doing nothing.
+none for you. The check command runs with that image, from `/workspace`, its
+own working directory, where it finds the commit under inspection. If the
+image is missing or unusable, inspector refuses the same way it refuses a
+missing check command, rather than quietly doing nothing.
+
+**The check command cannot modify tracked source.** Every top-level path git
+tracks - and `.git` itself - is mounted read-only; `/workspace` is otherwise a
+throwaway writable directory that belongs to that one run. So a check that
+installs packages, builds into `dist/`, or writes coverage and test reports
+into its own tree keeps working with nothing configured, while a write to a
+tracked file fails with a read-only file system and the check goes red naming
+it. The writable workspace is discarded once the run's report is written.
+
+This is enforced where the check runs, not checked afterwards, because
+afterwards is too late: a check can save a tracked file, modify it, pass
+against the modified bytes and restore it before exiting, and nothing looking
+at the tree at the end can see that happened. The capability is removed
+instead. The threat is not a hostile project owner - the check command comes
+from the project's own repository - it is a worker whose own tests the check
+runs, where a test that quietly edits source manufactures a green for code
+that never passed as written.
+
+What that does and does not cover, plainly:
+
+- **Covered:** no write to a tracked path succeeds, including creating a new
+  file inside a tracked directory - a read-only mount is read-only for its
+  whole subtree, and nothing can tell a new file in `src/` from a modified
+  one. Nothing the check writes reaches the repository.
+- **Not covered:** a check that writes **outside the repository entirely** is
+  a different problem, and this is not total containment - the container, its
+  resource limits and its denied network are what bound that.
+- **Not covered:** a check can still **add** files to its own tree for the
+  duration of its own run; they land in the discarded workspace rather than
+  the repository, so the post-check addition rule below no longer sees them.
+- **Untracked paths that already exist stay writable**, exactly as the whole
+  repo was before: gitignored build output, an installed `node_modules` from
+  an earlier run, inspector's own report directory. None of them is what the
+  commit under check is made of, and keeping them writable is what lets a
+  cached install go on being reused.
+- **A symbolic link at the repo root is the one tracked path a check can
+  still replace**, and the only exception to the first bullet. A link cannot
+  be mounted - Docker would resolve it - and resolving an in-repo one would
+  hand the container a second real copy of something the commit has once,
+  changing what a build walks. So it is recreated as a link, pointing where
+  git recorded, with its target read-only; what the check can change is only
+  which name points where. A link leading **out of** the repository, or to
+  nothing, is refused by name instead of being honored, since honoring it
+  would mean mounting a host path the commit does not contain. So is anything
+  at the repo root that is neither a directory nor a regular file. Links
+  anywhere below the top level are unaffected - they live inside a read-only
+  mount.
 
 One other thing is reachable from inside that container, and only when the
 repo needs it: its own git directory. An ordinary clone keeps that inside the
-repo, so nothing extra is mounted. A **linked worktree** (`git worktree add`)
+repo, so nothing extra is mounted - and it is read-only along with the source,
+so a `git commit` in there fails for the same reason. A **linked worktree**
+(`git worktree add`)
 does not - its `.git` is a one-line pointer file naming the project's shared
 git directory by absolute host path, outside the repo entirely, so a check
 command that uses git would find no repository at all in there and go red for
@@ -300,12 +349,18 @@ may be overruled: a stamp must name the exact code tested, while a check-written
 change means the passing code exists nowhere and could launder a green result
 for a different commit.
 
-This recheck compares only the post-check snapshot. In v1 the source mount is
-writable, so a check can modify a tracked file, pass against those modified
-bytes, and restore the file before exiting without being detected. A resulting
-green can therefore describe code that was never the commit stamped. Issue
+This recheck compares only the post-check snapshot, which is why it is not
+what keeps the source honest. A snapshot cannot see a tracked file that was
+modified and put back before the run ended, so the source mount is read-only
+instead and the capability is gone - issue
 [#27](https://github.com/inactdev/inspector/issues/27), "Source is read-only
-while the check runs," is where that gap is closed.
+while the check runs," above. The recheck is kept anyway and unchanged: it
+binds the result to one exact commit, which is a different job from
+immutability - HEAD moving, a `git commit` from elsewhere on the machine, or
+the publication target being retargeted mid-run are all things no mount flag
+would catch. Its one weakened reach is noted above: a file the check adds to
+its own tree now lands in the discarded workspace, where this rule does not
+look for it.
 
 The pull request branch never points at C until its status already exists, so
 inspector-gate's first run sees the result instead of a stale missing-status
@@ -332,7 +387,8 @@ Exit codes reserve `0`, `1`, and `2` for verdict attempts:
 - `2` no verdict, with one of two visibly different causes:
   - **refused** - inspector stopped before attempting any remote publication.
     This includes local-check failures such as missing configuration, an unusable
-    container runtime, a dirty working tree, a timeout, or infrastructure
+    container runtime, a dirty working tree, a repo root inspector cannot mount
+    read-only, a timeout, or infrastructure
     failure, and green-publication preflight failures such as an unsupported
     platform, missing token, invalid remote, default-branch target, or a
     `--expected-tip` the remote branch is not at. A refusal
@@ -996,7 +1052,10 @@ command against HEAD, inside a container (issue #13), and reports green or
 red, refusing loudly when no check command or image is configured, or no
 usable container runtime is found. That container is memory-, CPU-, and
 process-bounded and runs as the inviting host user rather than root (issue
-#43); it has no network access by default, with a temporary `network: true`
+#43), and the commit under check is mounted read-only inside it with a
+throwaway writable workspace in its place, so a check command cannot modify
+the code it is being judged on (issue #27); it has no network access by
+default, with a temporary `network: true`
 opt-in still honored until projects commit their own image with dependencies
 baked in - issue #47, not yet built. Inspector-owned publication (issue #18) is
 also built: it stages a green commit, posts its status, then moves an explicitly

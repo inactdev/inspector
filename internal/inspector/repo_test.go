@@ -43,6 +43,65 @@ func TestHeadCommit(t *testing.T) {
 	}
 }
 
+func TestTopLevelSourceEntries(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{
+		".gitignore":          "node_modules/\ncoverage.out\n",
+		"go.mod":              "module x\n",
+		"internal/pkg/a.go":   "package pkg\n",
+		"cmd/inspector/m.go":  "package main\n",
+		"node_modules/dep.js": "cached\n",
+		"coverage.out":        "mode: set\n",
+	})
+
+	got, err := TopLevelSourceEntries(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	source := make(map[string]bool, len(got))
+	for _, name := range got {
+		source[name] = true
+	}
+	// A directory counts as source when anything under it is tracked -
+	// the mount that protects it is read-only for its whole subtree.
+	for _, want := range []string{".gitignore", "go.mod", "internal", "cmd"} {
+		if !source[want] {
+			t.Fatalf("TopLevelSourceEntries = %v, want it to name %q", got, want)
+		}
+	}
+	for _, unwanted := range []string{"node_modules", "coverage.out", ".git", "internal/pkg", ""} {
+		if source[unwanted] {
+			t.Fatalf("TopLevelSourceEntries = %v, want it not to name %q", got, unwanted)
+		}
+	}
+}
+
+func TestTopLevelSourceEntries_NoGitDirectoryIsNotAnError(t *testing.T) {
+	// The same tolerance container.ResolveGitMounts extends to the unit
+	// tests of a bare check command: a directory with no git in it has
+	// no tracked source to protect, and that is not a failure.
+	got, err := TopLevelSourceEntries(t.TempDir())
+	if err != nil {
+		t.Fatalf("TopLevelSourceEntries(non-repo) = %v, want nil", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("TopLevelSourceEntries(non-repo) = %v, want nothing", got)
+	}
+}
+
+func TestTopLevelSourceEntries_UnreadableGitIsAnError(t *testing.T) {
+	// Fails closed: "nothing is tracked" would mount the whole repo
+	// writable, which is the state issue #27 ends.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("not a pointer file\n"), 0o644); err != nil {
+		t.Fatalf("writing a broken .git: %v", err)
+	}
+
+	if _, err := TopLevelSourceEntries(dir); err == nil {
+		t.Fatal("TopLevelSourceEntries on a path git cannot read unexpectedly succeeded")
+	}
+}
+
 func TestValidatePublicationBranch(t *testing.T) {
 	for _, branch := range []string{"feature", "user/topic", "release-1.2"} {
 		if err := ValidatePublicationBranch(branch); err != nil {

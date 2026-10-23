@@ -389,6 +389,51 @@ func WorkingTreeStatus(repoRoot string) (string, error) {
 	return out + trackedRuns + mutableIndex, nil
 }
 
+// TopLevelSourceEntries names the repo root's own top-level entries
+// that hold tracked content - the first path component of every file in
+// the index, deduplicated. That is the list container.ResolveWorkspace
+// mounts read-only, so the check command cannot modify the code it is
+// being judged on (issue #27).
+//
+// A directory counts as tracked source when anything under it is
+// tracked: a mount is read-only for its whole subtree, and no mount
+// flag can tell a new file in a tracked directory from a modified one.
+//
+// A path with no git directory at all returns nothing rather than an
+// error, the same tolerance container.ResolveGitMounts extends to the
+// unit tests of a bare check command. Anything else that stops git from
+// answering is an error: assuming "nothing is tracked" there would mount
+// the whole repo writable, which is the state this exists to end.
+func TopLevelSourceEntries(repoRoot string) ([]string, error) {
+	if _, err := os.Stat(filepath.Join(repoRoot, ".git")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", filepath.Join(repoRoot, ".git"), err)
+	}
+	// --full-name so the components are the repository's own, never
+	// relative to some other working directory, and -z so a path with
+	// a space or a quote in it arrives as git recorded it.
+	out, err := runValidationGit(repoRoot, "ls-files", "--full-name", "-z", "--")
+	if err != nil {
+		return nil, fmt.Errorf("listing tracked files: %w", err)
+	}
+	seen := make(map[string]bool)
+	var names []string
+	for _, path := range splitNullPaths(out) {
+		name := path
+		if slash := strings.IndexByte(path, '/'); slash >= 0 {
+			name = path[:slash]
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return names, nil
+}
+
 func validationHeadCommit(repoRoot string) (string, error) {
 	out, err := runValidationGit(repoRoot, "rev-parse", "HEAD")
 	if err != nil {
