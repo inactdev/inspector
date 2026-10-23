@@ -37,6 +37,14 @@ type CheckResult struct {
 	// also set in this case, since killing it is how the timeout is
 	// enforced, but TimedOut identifies who pulled the trigger and why).
 	TimedOut bool
+	// Workspace is the throwaway writable area that stood in for a
+	// writable repo while the check ran (issue #27) - everything the
+	// check command wrote is in there, and nothing of it reached the
+	// repository. The caller owns it from here: discard it with
+	// Workspace.Cleanup() once this run's report is written, which is
+	// the lifetime the ruling gives it. A zero Workspace, which is what
+	// every error return carries, is safe to Cleanup.
+	Workspace container.Workspace
 	// KillFailed is set when the deadline fired and docker then refused
 	// to stop the container, so inspector cannot claim the check command
 	// is no longer running against the repo. It is additive reporting
@@ -49,10 +57,16 @@ type CheckResult struct {
 }
 
 // RunCheck runs command inside a fresh container built from image,
-// bind-mounted to repoRoot at container.WorkspaceDir - plus, read-only,
-// whatever container.ResolveGitMounts says the repo needs for git to
-// work in there, and nothing else on the host - killing the container
-// if it has not finished within timeout. The container is bounded by
+// working from container.WorkspaceDir, where repoRoot's tracked
+// top-level paths are mounted read-only over a throwaway writable
+// workspace - so the check command can install, build and write
+// reports into its own tree without being able to modify the code it
+// is being judged on (issue #27; see container.ResolveWorkspace) - plus,
+// read-only, whatever container.ResolveGitMounts says the repo needs
+// for git to work in there, and nothing else on the host - killing the
+// container if it has not finished within timeout. The returned
+// CheckResult carries that workspace, which the caller discards once
+// this run's report is written. The container is bounded by
 // limits (see container.Limits and its Default* constants), runs as
 // the host user ResolveUser resolves rather than the image's own
 // default, and is denied network access unless network is true - a
@@ -105,8 +119,33 @@ func RunCheck(repoRoot, command, image string, limits container.Limits, network 
 		return CheckResult{}, err
 	}
 
+	// Resolved before anything starts, for the same reason again: a
+	// repo whose source inspector cannot mount read-only is refused
+	// rather than checked with that source writable. Both errors wrap
+	// container.ErrWorkspaceUnavailable; Run turns that into a refusal
+	// naming it.
+	sourceEntries, err := TopLevelSourceEntries(repoRoot)
+	if err != nil {
+		return CheckResult{}, fmt.Errorf("%w: inspector cannot tell which of this repository's top-level paths hold tracked source, and those are exactly what it mounts read-only: %v", container.ErrWorkspaceUnavailable, err)
+	}
+	workspace, err := container.ResolveWorkspace(repoRoot, sourceEntries)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	// Not deferred unconditionally: a run that reached a result hands
+	// its workspace to the caller, whose report is written before it is
+	// discarded. Every path that returns no result discards it here.
+	keepWorkspace := false
+	defer func() {
+		if !keepWorkspace {
+			workspace.Cleanup()
+		}
+	}()
+
 	run := container.New(ctx, container.Run{
-		RepoRoot:       repoRoot,
+		WorkspaceRoot:  workspace.Root,
+		SourceMounts:   workspace.SourceMounts,
+		WritableMounts: workspace.WritableMounts,
 		Command:        command,
 		Image:          image,
 		Limits:         limits,
@@ -186,6 +225,8 @@ func RunCheck(repoRoot, command, image string, limits container.Limits, network 
 		}
 	}
 	result.KillFailed = killErr != nil
+	result.Workspace = workspace
+	keepWorkspace = true
 	return result, nil
 }
 

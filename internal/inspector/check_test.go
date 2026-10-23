@@ -99,6 +99,19 @@ exec %q "$@"
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// runCheck calls RunCheck and registers the run's writable workspace
+// (issue #27) for removal when the test ends, since every caller of
+// RunCheck owns that directory - run.go discards it once the report is
+// written, and a test that leaves it behind litters the temp directory
+// once per run. Tests that have to look inside it read
+// result.Workspace.Root, which stays valid until the test returns.
+func runCheck(t *testing.T, repoRoot, command, image string, limits container.Limits, network bool, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
+	t.Helper()
+	result, err := RunCheck(repoRoot, command, image, limits, network, timeout, stdout, stderr)
+	t.Cleanup(result.Workspace.Cleanup)
+	return result, err
+}
+
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
@@ -111,7 +124,7 @@ func TestRunCheck_Success(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "echo hi", testImage, container.Limits{}, false, testTimeout, &stdout, &stderr)
+	result, err := runCheck(t, dir, "echo hi", testImage, container.Limits{}, false, testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,7 +144,7 @@ func TestRunCheck_Failure(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "echo boom >&2; exit 7", testImage, container.Limits{}, false, testTimeout, &stdout, &stderr)
+	result, err := runCheck(t, dir, "echo boom >&2; exit 7", testImage, container.Limits{}, false, testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,7 +165,7 @@ func TestRunCheck_CapturesInterleavedStreams(t *testing.T) {
 	dir := t.TempDir()
 	const lines = 200
 
-	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -177,7 +190,7 @@ func TestRunCheck_SameWriterForBothStreams(t *testing.T) {
 	const lines = 200
 	var combined bytes.Buffer
 
-	result, err := RunCheck(dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, container.Limits{}, false, testTimeout, &combined, &combined)
+	result, err := runCheck(t, dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, container.Limits{}, false, testTimeout, &combined, &combined)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -206,7 +219,7 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	dir := t.TempDir()
 	const size = 500_000
 
-	result, err := RunCheck(dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -254,7 +267,7 @@ func TestRunCheck_CompoundCommandSurvivingKilledChild(t *testing.T) {
 	requireDocker(t)
 	dir := t.TempDir()
 
-	result, err := RunCheck(dir, `sh -c 'kill -9 $$' && true`, testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, `sh -c 'kill -9 $$' && true`, testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -274,7 +287,7 @@ func TestRunCheck_Timeout(t *testing.T) {
 	dir := t.TempDir()
 
 	start := time.Now()
-	result, err := RunCheck(dir, "sleep 30", testImage, container.Limits{}, false, 300*time.Millisecond, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, "sleep 30", testImage, container.Limits{}, false, 300*time.Millisecond, io.Discard, io.Discard)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -308,16 +321,22 @@ func TestRunCheck_TimeoutKillsChildProcesses(t *testing.T) {
 	// PID namespace - including any children it forked - the instant
 	// that process is killed. Proves it the same way the host version
 	// did: a background grandchild announces that it woke up naturally,
-	// into a file inside the bind-mounted repo, well after the timeout -
-	// if the kill works, that file stays empty.
+	// into a file well after the timeout - if the kill works, that file
+	// is never created. The file is looked for in the run's writable
+	// workspace rather than in the repo, because since issue #27 that
+	// is where a check command's writes land; looking in the repo would
+	// make this test pass no matter what the kill did.
 	requireDocker(t)
 	dir := t.TempDir()
-	marker := filepath.Join(dir, "survived")
 
-	_, err := RunCheck(dir, "( sleep 3 && echo alive > survived ) & wait", testImage, container.Limits{}, false, 300*time.Millisecond, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, "( sleep 3 && echo alive > survived ) & wait", testImage, container.Limits{}, false, 300*time.Millisecond, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if result.Workspace.Root == "" {
+		t.Fatal("RunCheck returned no workspace, so this test cannot tell whether the background child wrote its marker")
+	}
+	marker := filepath.Join(result.Workspace.Root, "survived")
 
 	// Give a leaked background process the time it would have needed
 	// to write the marker, then confirm it never did.
@@ -336,7 +355,7 @@ func TestRunCheck_RunsFromWorkspaceDir(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "pwd", testImage, container.Limits{}, false, testTimeout, &stdout, &stderr)
+	result, err := runCheck(t, dir, "pwd", testImage, container.Limits{}, false, testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -359,7 +378,7 @@ func TestRunCheck_BindMountsOnlyTheRepo(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, outside, map[string]string{"secret.txt": "should not be visible"})
 
-	result, err := RunCheck(dir, fmt.Sprintf("test -e %s && echo LEAKED || echo contained", outside), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, fmt.Sprintf("test -e %s && echo LEAKED || echo contained", outside), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -371,11 +390,158 @@ func TestRunCheck_BindMountsOnlyTheRepo(t *testing.T) {
 	}
 }
 
+// TestRunCheck_CannotWriteTrackedSource is a negative test: it attempts
+// the forbidden act and must fail. It is the acceptance bar for issue
+// #27 - a check command cannot modify tracked source at all, enforced
+// at the execution boundary rather than noticed afterwards, because a
+// check that can save a file, change it, pass against the change and
+// put it back cannot be caught by looking at the tree. This fails if
+// the source mount is ever writable again.
+func TestRunCheck_CannotWriteTrackedSource(t *testing.T) {
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{
+		"tracked.txt":    "original\n",
+		"pkg/nested.txt": "nested original\n",
+	})
+
+	result, err := runCheck(t, dir, strings.Join([]string{
+		"cat tracked.txt",
+		"printf changed > tracked.txt && echo WROTE_TRACKED_FILE",
+		"printf changed > pkg/nested.txt && echo WROTE_FILE_IN_TRACKED_DIR",
+		"printf new > pkg/added.txt && echo ADDED_FILE_IN_TRACKED_DIR",
+		"rm -f tracked.txt && echo REMOVED_TRACKED_FILE",
+		"true",
+	}, "; "), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Proof the assertions below mean something: the source really is
+	// in there to be read, it just cannot be written.
+	if !strings.Contains(result.Output, "original") {
+		t.Fatalf("the check command could not even read tracked source, so this test proves nothing: %q", result.Output)
+	}
+	for _, forbidden := range []string{
+		"WROTE_TRACKED_FILE",
+		"WROTE_FILE_IN_TRACKED_DIR",
+		"ADDED_FILE_IN_TRACKED_DIR",
+		"REMOVED_TRACKED_FILE",
+	} {
+		if strings.Contains(result.Output, forbidden) {
+			t.Fatalf("the check command changed tracked source (%s):\n%s", forbidden, result.Output)
+		}
+	}
+	// The operator has to be able to tell why their check failed.
+	if !strings.Contains(strings.ToLower(result.Output), "read-only file system") {
+		t.Fatalf("the writes failed, but not with a reason naming a read-only file system:\n%s", result.Output)
+	}
+	if got := readFile(t, filepath.Join(dir, "tracked.txt")); got != "original\n" {
+		t.Fatalf("tracked.txt = %q in the repository, want it untouched", got)
+	}
+	if got := readFile(t, filepath.Join(dir, "pkg", "nested.txt")); got != "nested original\n" {
+		t.Fatalf("pkg/nested.txt = %q in the repository, want it untouched", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pkg", "added.txt")); !os.IsNotExist(err) {
+		t.Fatalf("os.Stat(pkg/added.txt) = %v, want the check command unable to add a file to a tracked directory", err)
+	}
+}
+
+func TestRunCheck_BuildOutputAndReportsLandInTheWorkspace(t *testing.T) {
+	// The other half of issue #27's bar: an ordinary project whose
+	// check installs dependencies, builds into its own tree and writes
+	// a report passes unchanged, with nothing configured. None of it
+	// reaches the repository.
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{"tracked.txt": "original\n"})
+
+	result, err := runCheck(t, dir, strings.Join([]string{
+		"mkdir -p dist node_modules/dep coverage",
+		"echo built > dist/app",
+		"echo installed > node_modules/dep/index.js",
+		"printf 'mode: set\n' > coverage/coverage.out",
+		"echo ORDINARY_CHECK_PASSED",
+	}, " && "), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.ExitCode != 0 {
+		t.Fatalf("a check that writes build output, an install and a report failed: ExitCode = %d, output = %q", result.ExitCode, result.Output)
+	}
+	if !strings.Contains(result.Output, "ORDINARY_CHECK_PASSED") {
+		t.Fatalf("Output = %q, want the ordinary check to have run to the end", result.Output)
+	}
+	for _, name := range []string{"dist", "node_modules", "coverage"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("os.Stat(%s) in the repository = %v, want the check command's leftovers kept out of it", name, err)
+		}
+	}
+	if got := readFile(t, filepath.Join(result.Workspace.Root, "dist", "app")); strings.TrimSpace(got) != "built" {
+		t.Fatalf("dist/app in the run's workspace = %q, want the check command's build output there", got)
+	}
+}
+
+func TestRunCheck_GitWorksFromASubdirectoryOfTheWorkspace(t *testing.T) {
+	// Issue #27's layout makes the workspace its own file system with
+	// the source mounted over it, so WorkspaceDir is a mount point -
+	// and git stops its upward search for a repository at a file system
+	// boundary unless told otherwise. Left unhandled that brings back
+	// issue #31's defect by another route: a check command running git
+	// from any subdirectory would be told it is not in a repository,
+	// and go red for a reason that has nothing to do with the code.
+	requireDocker(t)
+	dir := newTestWorktree(t, map[string]string{"pkg/a.txt": "one\n"})
+
+	result, err := runCheck(t, dir, "cd pkg && git rev-parse --show-toplevel && git log --oneline -1", gitTestImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.ExitCode != 0 {
+		t.Fatalf("git failed from a subdirectory of the workspace: ExitCode = %d, output = %q", result.ExitCode, result.Output)
+	}
+	if !strings.Contains(result.Output, container.WorkspaceDir) {
+		t.Fatalf("Output = %q, want git to name %s as the top level", result.Output, container.WorkspaceDir)
+	}
+	if !strings.Contains(result.Output, "initial") {
+		t.Fatalf("Output = %q, want the project's real history", result.Output)
+	}
+}
+
+func TestRunCheck_UntrackedPathsStayWritable(t *testing.T) {
+	// Deliberate boundary: tracked source is what the commit under
+	// check is made of, and only that is read-only. A gitignored
+	// install from an earlier run stays writable exactly as the whole
+	// repo was before issue #27, which is what lets a cached
+	// node_modules go on being reused.
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{
+		".gitignore":  "node_modules/\n",
+		"tracked.txt": "original\n",
+	})
+	writeFiles(t, dir, map[string]string{"node_modules/dep/index.js": "cached\n"})
+
+	result, err := runCheck(t, dir, "cat node_modules/dep/index.js && printf reinstalled > node_modules/dep/index.js && echo REINSTALLED", testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(result.Output, "cached") {
+		t.Fatalf("Output = %q, want the earlier run's install readable inside the container", result.Output)
+	}
+	if !strings.Contains(result.Output, "REINSTALLED") {
+		t.Fatalf("Output = %q, want a gitignored path to still be writable", result.Output)
+	}
+	if got := readFile(t, filepath.Join(dir, "node_modules", "dep", "index.js")); got != "reinstalled" {
+		t.Fatalf("node_modules/dep/index.js = %q, want the check command's install to have reached it", got)
+	}
+}
+
 func TestRunCheck_NoNetworkByDefault(t *testing.T) {
 	requireDocker(t)
 	dir := t.TempDir()
 
-	result, err := RunCheck(dir, "wget -q -T 3 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, "wget -q -T 3 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -392,7 +558,7 @@ func TestRunCheck_NetworkOptIn(t *testing.T) {
 	requireInternet(t)
 	dir := t.TempDir()
 
-	result, err := RunCheck(dir, "wget -q -T 5 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, container.Limits{}, true, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, "wget -q -T 5 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, container.Limits{}, true, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -409,7 +575,7 @@ func TestRunCheck_NetworkOptInLogsDeprecationWarning(t *testing.T) {
 	dir := t.TempDir()
 	var stderr bytes.Buffer
 
-	_, err := RunCheck(dir, "true", testImage, container.Limits{}, true, testTimeout, io.Discard, &stderr)
+	_, err := runCheck(t, dir, "true", testImage, container.Limits{}, true, testTimeout, io.Discard, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -423,7 +589,7 @@ func TestRunCheck_NoDeprecationWarningWithoutNetworkOptIn(t *testing.T) {
 	dir := t.TempDir()
 	var stderr bytes.Buffer
 
-	_, err := RunCheck(dir, "true", testImage, container.Limits{}, false, testTimeout, io.Discard, &stderr)
+	_, err := runCheck(t, dir, "true", testImage, container.Limits{}, false, testTimeout, io.Discard, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -442,7 +608,7 @@ func TestRunCheck_UnstoppableContainerIsReported(t *testing.T) {
 	dir := t.TempDir()
 	var stderr bytes.Buffer
 
-	result, err := RunCheck(dir, "sleep 30", testImage, container.Limits{}, false, 500*time.Millisecond, io.Discard, &stderr)
+	result, err := runCheck(t, dir, "sleep 30", testImage, container.Limits{}, false, 500*time.Millisecond, io.Discard, &stderr)
 	if err != nil {
 		t.Fatalf("a refused kill must stay a verdict, not become an infrastructure error: %v", err)
 	}
@@ -471,7 +637,7 @@ func TestRunCheck_UnusableImageIsInfrastructureFailure(t *testing.T) {
 	requireDocker(t)
 	dir := t.TempDir()
 
-	_, err := RunCheck(dir, "true", "inspector-test-image-does-not-exist-xyz", container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	_, err := runCheck(t, dir, "true", "inspector-test-image-does-not-exist-xyz", container.Limits{}, false, testTimeout, io.Discard, io.Discard)
 	if err == nil {
 		t.Fatal("expected an error for an image that was never run, not a swallowed CheckResult")
 	}
@@ -496,7 +662,7 @@ func TestRunCheck_RemoteDockerIsRefused(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "")
 	repoDir := t.TempDir()
 
-	_, err := RunCheck(repoDir, "true", testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	_, err := runCheck(t, repoDir, "true", testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
 	if !errors.Is(err, container.ErrRemoteDocker) {
 		t.Fatalf("RunCheck() = %v, want container.ErrRemoteDocker", err)
 	}

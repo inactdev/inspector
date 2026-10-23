@@ -58,6 +58,18 @@ func newTestRepo(t *testing.T, files map[string]string) string {
 	return dir
 }
 
+// readRepoFile reads a file from the repository under inspection, for
+// the tests that have to prove a check command left it exactly as the
+// commit has it.
+func readRepoFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return string(data)
+}
+
 func runGitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
@@ -887,7 +899,14 @@ func TestPublishGreenRefusesRemoteDefaultBranch(t *testing.T) {
 	}
 }
 
-func TestCLI_RefusesGreenCheckThatChangesTrackedCode(t *testing.T) {
+// TestCLI_GreenCheckCannotWriteTrackedCode is the end-to-end form of
+// issue #27. The check command here has no reason to fail other than
+// the write it attempts, so before #27 it would have passed and then
+// been caught by #18's post-check comparison - which could only ever
+// catch a change still visible when the run ended. Now the write itself
+// fails inside the container, so the laundering attempt gets the check's
+// own red and publishes nothing.
+func TestCLI_GreenCheckCannotWriteTrackedCode(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
@@ -898,27 +917,35 @@ func TestCLI_RefusesGreenCheckThatChangesTrackedCode(t *testing.T) {
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
 	code, stdout, stderr := runCLI(t, dir, "--branch", "feature")
-	if code != exitRefused {
-		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	if code != exitRed {
+		t.Fatalf("exit code = %d, want %d - the check's own failed write is a red check, not a refusal", code, exitRed)
 	}
 	if strings.Contains(stdout, "green -") {
-		t.Fatalf("stdout = %q, must not bless code changed by the check", stdout)
+		t.Fatalf("stdout = %q, must not bless a check that tried to rewrite its own source", stdout)
 	}
-	if !strings.Contains(stderr, "tracked.txt") {
-		t.Fatalf("stderr = %q, want it to name the file changed by the check", stderr)
+	if got := readRepoFile(t, filepath.Join(dir, "tracked.txt")); got != "original" {
+		t.Fatalf("tracked.txt = %q in the repository, want it untouched by the check", got)
+	}
+	// The operator has to be able to tell why their check failed.
+	if !strings.Contains(strings.ToLower(stdout+stderr), "read-only file system") {
+		t.Fatalf("stdout+stderr = %q, want the check's failure to name a read-only file system", stdout+stderr)
 	}
 	if stub.Request.State != "" {
-		t.Fatalf("check-written change posted status state %q", stub.Request.State)
+		t.Fatalf("a check that tried to rewrite its own source posted status state %q", stub.Request.State)
 	}
 	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
-		t.Fatal("check-written change published a staging ref")
+		t.Fatal("a check that tried to rewrite its own source published a staging ref")
 	}
 	if _, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
-		t.Fatal("check-written change published the named branch")
+		t.Fatal("a check that tried to rewrite its own source published the named branch")
 	}
 }
 
-func TestCLI_RefusesRedCheckThatChangesTrackedCode(t *testing.T) {
+// TestCLI_RedCheckCannotWriteTrackedCode is the same boundary for a
+// check that would have failed anyway: the attempted write still never
+// reaches the repository, and the operator still gets the check's own
+// red rather than a refusal that says nothing about the code.
+func TestCLI_RedCheckCannotWriteTrackedCode(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
 		".inspector.json": `{"check": "printf changed > tracked.txt; false", "image": "alpine"}`,
@@ -926,28 +953,25 @@ func TestCLI_RefusesRedCheckThatChangesTrackedCode(t *testing.T) {
 	})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
-	previousValidatePublicationPlatform := validatePublicationPlatform
-	validatePublicationPlatform = func() error { return errors.New("publication unsupported") }
-	t.Cleanup(func() { validatePublicationPlatform = previousValidatePublicationPlatform })
 
-	code, stdout, stderr := runCLI(t, dir, "--branch", "feature")
-	if code != exitRefused {
-		t.Fatalf("exit code = %d, want %d", code, exitRefused)
+	code, stdout, _ := runCLI(t, dir, "--branch", "feature")
+	if code != exitRed {
+		t.Fatalf("exit code = %d, want %d", code, exitRed)
 	}
-	if strings.Contains(stdout, "red -") {
-		t.Fatalf("stdout = %q, must refuse rather than report red after the check changed code", stdout)
+	if !strings.Contains(stdout, "red -") {
+		t.Fatalf("stdout = %q, want the check's own red verdict", stdout)
 	}
-	if !strings.Contains(stderr, "tracked.txt") {
-		t.Fatalf("stderr = %q, want it to name the file changed by the check", stderr)
+	if got := readRepoFile(t, filepath.Join(dir, "tracked.txt")); got != "original" {
+		t.Fatalf("tracked.txt = %q in the repository, want it untouched by the check", got)
 	}
 	if stub.Request.State != "" {
-		t.Fatalf("check-written change posted status state %q", stub.Request.State)
+		t.Fatalf("a red check posted status state %q", stub.Request.State)
 	}
 	if _, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
-		t.Fatal("check-written change published a staging ref")
+		t.Fatal("a red check published a staging ref")
 	}
 	if _, exists := remoteRef(t, stub.Remote, "refs/heads/feature"); exists {
-		t.Fatal("check-written change published the named branch")
+		t.Fatal("a red check published the named branch")
 	}
 }
 

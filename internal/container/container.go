@@ -85,16 +85,31 @@ func EnsureAvailableContext(ctx context.Context) error {
 
 // Run describes one containerized check command.
 type Run struct {
-	// RepoRoot is bind-mounted read-write at WorkspaceDir. Nothing on
-	// the host is reachable from inside the container except this and
-	// ReadOnlyMounts.
-	RepoRoot string
+	// WorkspaceRoot is bind-mounted read-write at WorkspaceDir, and is
+	// the only writable thing the container can reach apart from
+	// WritableMounts and its own throwaway file system. For a project
+	// check it is ResolveWorkspace's workspace rather than the repo
+	// itself: the commit under check arrives through SourceMounts,
+	// read-only (issue #27). Nothing on the host is reachable from
+	// inside the container except this and the three mount lists below.
+	WorkspaceRoot string
+	// SourceMounts carry the commit under check into the workspace,
+	// read-only - one mount per tracked top-level entry of the repo.
+	// See Workspace and ResolveWorkspace.
+	SourceMounts []Mount
+	// WritableMounts are the host paths the check command may write:
+	// the repo root's own untracked, gitignored leftovers (build
+	// output, installed dependencies), which are not what the commit
+	// under check is made of. See Workspace.
+	WritableMounts []Mount
 	// ReadOnlyMounts are the few host paths that have to be readable
-	// alongside the repo for the check command to work at all, each at
-	// a fixed absolute path inside the container and none of them
-	// writable. In practice this is what ResolveGitMounts returns: a
-	// linked worktree's shared git directory, which lives outside
-	// RepoRoot, plus a sanitized stand-in for its config.
+	// alongside the workspace for the check command to work at all,
+	// each at a fixed absolute path inside the container and none of
+	// them writable. In practice this is what ResolveGitMounts returns:
+	// a linked worktree's shared git directory, which lives outside the
+	// repo root, plus a sanitized stand-in for its config. Unlike
+	// SourceMounts these are declared to git as safe.directory below,
+	// because they are git directories rather than paths inside one.
 	ReadOnlyMounts []Mount
 	// Command is run with `sh -c` inside the container, from WorkspaceDir.
 	Command string
@@ -153,8 +168,23 @@ type Cmd struct {
 // classifyResult needed no container-specific case.
 func New(ctx context.Context, r Run) *Cmd {
 	args := []string{
-		"-v", r.RepoRoot + ":" + WorkspaceDir,
+		"-v", r.WorkspaceRoot + ":" + WorkspaceDir,
 		"-w", WorkspaceDir,
+	}
+	// Docker applies a container's mounts in lexicographic order of
+	// their destination rather than flag order, so a nested destination
+	// always lands on top of its already-mounted parent - the behavior
+	// ResolveGitMounts already relies on, verified live here and in
+	// Fabrica for the file it lays over a mounted git directory. These
+	// are emitted parent-first regardless, so the result does not
+	// depend on that sort. Every source here exists: ResolveWorkspace
+	// read it off disk, which matters because -v would otherwise create
+	// a missing source as an empty directory instead of failing.
+	for _, mount := range r.SourceMounts {
+		args = append(args, "-v", mount.Source+":"+mount.Target+":ro")
+	}
+	for _, mount := range r.WritableMounts {
+		args = append(args, "-v", mount.Source+":"+mount.Target)
 	}
 	for _, mount := range r.ReadOnlyMounts {
 		args = append(args, "-v", mount.Source+":"+mount.Target+":ro")
@@ -164,8 +194,10 @@ func New(ctx context.Context, r Run) *Cmd {
 	// files keep their host ownership, git would refuse to look at the
 	// repository at all ("detected dubious ownership", verified) unless
 	// User (ResolveUser) already matches that ownership. Declared
-	// unconditionally anyway, scoped to exactly the paths mounted above
-	// rather than widened to `*`: git's own documented escape hatch for
+	// unconditionally anyway, scoped to the workspace and whatever git
+	// directory was mounted beside it - the only paths git has to trust
+	// as a repository - rather than widened to `*` or to every mount
+	// above: git's own documented escape hatch for
 	// this, kept as defense in depth for whatever ownership mismatch a
 	// given host/Docker combination still produces (rootless remapping,
 	// a macOS filesystem-sharing backend, ResolveUser falling back to
@@ -177,6 +209,21 @@ func New(ctx context.Context, r Run) *Cmd {
 	for _, mount := range r.ReadOnlyMounts {
 		safeDirs = append(safeDirs, mount.Target)
 	}
+	// The workspace is its own file system and every source mount above
+	// is another, so WorkspaceDir is a mount point - and git stops its
+	// upward search for a repository at a file system boundary unless
+	// told not to ("Stopping at filesystem boundary
+	// (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)"). Without this, a check
+	// command that runs git from any subdirectory of the repo would be
+	// told it is not in a repository at all, which is the failure issue
+	// #31 already fixed once by a different route. Nothing but the
+	// workspace and its mounts is in this container to be discovered, so
+	// crossing that boundary can only find the repository that is
+	// supposed to be found. git(1)'s own "Environment Variables"
+	// section documents this as affecting that upward search only -
+	// never a repository named explicitly - so it cannot reach how the
+	// git directory mounted by ResolveGitMounts is read.
+	args = append(args, "-e", "GIT_DISCOVERY_ACROSS_FILESYSTEM=1")
 	args = append(args, "-e", fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(safeDirs)))
 	for i, dir := range safeDirs {
 		args = append(args,

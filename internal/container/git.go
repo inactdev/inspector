@@ -38,10 +38,13 @@ func unavailable(format string, args ...any) error {
 }
 
 // Mount is one host path the container can also see, at a fixed
-// absolute path inside it. Every Mount is read-only: the repo root is
-// the only writable thing in the container, and the one place where
-// anything mounted alongside it would otherwise be modifiable by the
-// check command.
+// absolute path inside it. Whether it is writable in there is decided
+// by which field of Run carries it: ReadOnlyMounts and SourceMounts are
+// read-only, WritableMounts is not. Everything a Mount can name is
+// either the commit under check or something alongside it that a check
+// command would otherwise be able to modify, so read-only is the
+// default and writability is stated explicitly at the one field that
+// has it.
 type Mount struct {
 	Source string
 	Target string

@@ -93,11 +93,25 @@ func runGitCheck(t *testing.T, worktree, command string) (string, error) {
 	}
 	t.Cleanup(mounts.Cleanup)
 
+	// The same read-only source over a writable workspace a real check
+	// command gets (issue #27) - newWorktreeProject commits exactly
+	// file.txt, so that is the repo root's one tracked entry. Keeping
+	// this in step with RunCheck is the point: these three git tests are
+	// the ones that have to keep holding under the layout checks
+	// actually run in.
+	workspace, err := ResolveWorkspace(worktree, []string{"file.txt"})
+	if err != nil {
+		t.Fatalf("ResolveWorkspace(%q) = %v, want the workspace a check command runs in", worktree, err)
+	}
+	t.Cleanup(workspace.Cleanup)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	cmd := New(ctx, Run{
-		RepoRoot:       worktree,
+		WorkspaceRoot:  workspace.Root,
+		SourceMounts:   workspace.SourceMounts,
+		WritableMounts: workspace.WritableMounts,
 		Command:        command,
 		Image:          gitImage,
 		ReadOnlyMounts: mounts.Mounts,

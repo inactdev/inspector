@@ -63,9 +63,9 @@ func TestNew_BuildsExpectedArgs(t *testing.T) {
 	// Pure argument construction - doesn't touch docker, so it runs
 	// without a runtime present.
 	cmd := New(context.Background(), Run{
-		RepoRoot: "/host/repo",
-		Command:  "go test ./...",
-		Image:    "golang:1.22",
+		WorkspaceRoot: "/host/repo",
+		Command:       "go test ./...",
+		Image:         "golang:1.22",
 	})
 
 	args := strings.Join(cmd.Args, " ")
@@ -85,8 +85,47 @@ func TestNew_BuildsExpectedArgs(t *testing.T) {
 	}
 }
 
+func TestNew_SourceMountsAreReadOnlyAndWritableMountsAreNot(t *testing.T) {
+	// Issue #27: the workspace is writable so an ordinary check can
+	// build into its own tree, and the commit under check is laid over
+	// it read-only so the same check cannot modify what it is judged
+	// on. The `:ro` suffix on one list and its absence on the other is
+	// the whole enforcement, so it is asserted literally.
+	cmd := New(context.Background(), Run{
+		WorkspaceRoot:  "/tmp/inspector-workspace-1",
+		SourceMounts:   []Mount{{Source: "/host/repo/cmd", Target: WorkspaceDir + "/cmd"}},
+		WritableMounts: []Mount{{Source: "/host/repo/node_modules", Target: WorkspaceDir + "/node_modules"}},
+		Command:        "true",
+		Image:          "alpine",
+		User:           "1000:1000",
+	})
+
+	args := strings.Join(cmd.Args, " ")
+	for _, want := range []string{
+		"-v /tmp/inspector-workspace-1:" + WorkspaceDir,
+		"-v /host/repo/cmd:" + WorkspaceDir + "/cmd:ro",
+		"-v /host/repo/node_modules:" + WorkspaceDir + "/node_modules ",
+	} {
+		if !strings.Contains(args+" ", want) {
+			t.Fatalf("docker args = %q, want it to contain %q", args, want)
+		}
+	}
+	if strings.Contains(args, "/host/repo/node_modules:"+WorkspaceDir+"/node_modules:ro") {
+		t.Fatalf("docker args = %q, want an untracked path mounted writable, not read-only", args)
+	}
+	// Per-entry mounts make WorkspaceDir a file system boundary, which
+	// git refuses to search past when looking for a repository from a
+	// subdirectory unless this says otherwise.
+	if !strings.Contains(args, "GIT_DISCOVERY_ACROSS_FILESYSTEM=1") {
+		t.Fatalf("docker args = %q, want git allowed to find the repository from a subdirectory of the workspace", args)
+	}
+	if !strings.Contains(args, "GIT_CONFIG_COUNT=1") {
+		t.Fatalf("docker args = %q, want safe.directory declared for the workspace alone - source and writable mounts are paths inside a repository, not git directories", args)
+	}
+}
+
 func TestNew_NoNetworkByDefault(t *testing.T) {
-	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine"})
+	cmd := New(context.Background(), Run{WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine"})
 
 	if !strings.Contains(strings.Join(cmd.Args, " "), "--network none") {
 		t.Fatalf("docker args = %q, want --network none by default", cmd.Args)
@@ -97,7 +136,7 @@ func TestNew_NetworkOptsIn(t *testing.T) {
 	// Temporary opt-in: keep honoring it until projects commit their
 	// own image with dependencies baked in (issue #47). See
 	// Run.Network's own doc comment.
-	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine", Network: true})
+	cmd := New(context.Background(), Run{WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine", Network: true})
 
 	if strings.Contains(strings.Join(cmd.Args, " "), "--network none") {
 		t.Fatalf("docker args = %q, should not restrict network when Network is true", cmd.Args)
@@ -106,10 +145,10 @@ func TestNew_NetworkOptsIn(t *testing.T) {
 
 func TestNew_LimitsOverrideDefaults(t *testing.T) {
 	cmd := New(context.Background(), Run{
-		RepoRoot: "/host/repo",
-		Command:  "true",
-		Image:    "alpine",
-		Limits:   Limits{Memory: "4g", CPUs: "1.5", PIDsLimit: 128},
+		WorkspaceRoot: "/host/repo",
+		Command:       "true",
+		Image:         "alpine",
+		Limits:        Limits{Memory: "4g", CPUs: "1.5", PIDsLimit: 128},
 	})
 
 	args := strings.Join(cmd.Args, " ")
@@ -122,7 +161,7 @@ func TestNew_LimitsOverrideDefaults(t *testing.T) {
 
 func TestNew_UserSetsHomeAndSafeDirectory(t *testing.T) {
 	cmd := New(context.Background(), Run{
-		RepoRoot:       "/host/repo",
+		WorkspaceRoot:  "/host/repo",
 		Command:        "true",
 		Image:          "alpine",
 		User:           "1000:1000",
@@ -149,7 +188,7 @@ func TestNew_UserSetsHomeAndSafeDirectory(t *testing.T) {
 }
 
 func TestNew_NoUserOmitsUserFlag(t *testing.T) {
-	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine"})
+	cmd := New(context.Background(), Run{WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine"})
 
 	args := strings.Join(cmd.Args, " ")
 	if strings.Contains(args, "--user") {
@@ -161,7 +200,7 @@ func TestNew_NoUserOmitsUserFlag(t *testing.T) {
 }
 
 func TestCmd_Started(t *testing.T) {
-	cmd := New(context.Background(), Run{RepoRoot: "/host/repo", Command: "true", Image: "alpine"})
+	cmd := New(context.Background(), Run{WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine"})
 
 	if cmd.Started() {
 		t.Fatal("Started() = true before the cidfile exists, want false")
@@ -229,7 +268,7 @@ func TestKillContainer_NotRunningIsARealError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
 
-	cmd := New(context.Background(), Run{RepoRoot: t.TempDir(), Command: "true", Image: "alpine"})
+	cmd := New(context.Background(), Run{WorkspaceRoot: t.TempDir(), Command: "true", Image: "alpine"})
 	defer cmd.Cleanup()
 	cmd.name = name
 
@@ -256,7 +295,7 @@ func TestNew_RunsAndReportsExitCode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := New(ctx, Run{RepoRoot: dir, Command: "echo hi > out.txt; exit 7", Image: "alpine"})
+	cmd := New(ctx, Run{WorkspaceRoot: dir, Command: "echo hi > out.txt; exit 7", Image: "alpine"})
 	defer cmd.Cleanup()
 	err := cmd.Run()
 
@@ -277,7 +316,7 @@ func TestNew_BadImageIsNotStarted(t *testing.T) {
 	requireDocker(t)
 	dir := t.TempDir()
 
-	cmd := New(context.Background(), Run{RepoRoot: dir, Command: "true", Image: "inspector-test-image-does-not-exist-xyz"})
+	cmd := New(context.Background(), Run{WorkspaceRoot: dir, Command: "true", Image: "inspector-test-image-does-not-exist-xyz"})
 	defer cmd.Cleanup()
 	err := cmd.Run()
 
@@ -355,9 +394,9 @@ func TestNew_TimeoutKillsContainerAndDescendants(t *testing.T) {
 	defer cancel()
 
 	cmd := New(ctx, Run{
-		RepoRoot: dir,
-		Command:  "( sleep 3 && echo alive > survived ) & wait",
-		Image:    "alpine",
+		WorkspaceRoot: dir,
+		Command:       "( sleep 3 && echo alive > survived ) & wait",
+		Image:         "alpine",
 	})
 	defer cmd.Cleanup()
 	start := time.Now()
