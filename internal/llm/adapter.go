@@ -1,6 +1,6 @@
 // Package llm is Inspector's vendor seam: one small interface for "ask a
-// model with these tools," so a caller (the examiner today, the reviewer
-// later) is never written against one vendor's request shape.
+// model with these tools," so no caller - the examiner, the code reviewer, or
+// the documentation judgment - is written against one vendor's request shape.
 package llm
 
 import (
