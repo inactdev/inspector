@@ -1,0 +1,23 @@
+diff --git a/src/cli/README.md b/src/cli/README.md
+index 1111111..2222222 100644
+--- a/src/cli/README.md
++++ b/src/cli/README.md
+@@ -5,4 +5,6 @@ Commands are registered in `commands.go`, one entry point each:
+ - `runBuild` - compiles the project
+ - `runCheck` - runs the project's checks
+ - `runDeploy` - ships a built artifact
++- `runMigrate` - applies pending schema migrations
++- `runRollback` - undoes the last migration
+ - `runStatus` - prints what is deployed where
+diff --git a/src/cli/commands.go b/src/cli/commands.go
+index 3333333..4444444 100644
+--- a/src/cli/commands.go
++++ b/src/cli/commands.go
+@@ -5,5 +5,7 @@ func Register(d *Dispatcher) {
+ 	d.Add("build", runBuild)
+ 	d.Add("check", runCheck)
+ 	d.Add("deploy", runDeploy)
++	d.Add("migrate", runMigrate)
++	d.Add("rollback", runRollback)
+ 	d.Add("status", runStatus)
+ }

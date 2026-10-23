@@ -606,6 +606,107 @@ override by hand
 ([fabrica#96](https://github.com/inactdev/fabrica/issues/96)). It is a stopgap
 for exactly as long as that entry is.
 
+## Documentation
+
+`inspector document` is the documentation judgment (SPEC.md section 4's
+"Documentation"). It asks two questions about a change, not one:
+
+1. **Is this change described?** Look at what the change did and check the
+   documents that already cover that ground.
+2. **Has this change made something already written untrue?**
+
+Every documentation step asks the first one. The second is the one that gets
+missed, and it is why this exists: **the file that went stale is not in the
+diff.** A list elsewhere that no longer lists everything. A README promising
+behavior that moved. A described default, limit, or exit code that changed. An
+example command that no longer runs. Nothing else in the pipeline notices -
+no test fails because a document lies - and it compounds, because each stale
+claim makes the next reader trust the documents slightly less.
+
+```
+ANTHROPIC_API_KEY=... inspector document --diff change.diff --repo . \
+  --model claude-sonnet-4-5 --request-file request.txt
+```
+
+`--diff` is a unified diff of the change, annotated with line numbers the same
+way `inspector review` annotates its own. It answers *what changed*; it is
+never where the stale document is found. `--repo` is the project whose
+documentation to re-read, and `--request-file` is the request or
+expected-outcome text.
+
+### What it is allowed to read
+
+Inspector builds the corpus itself, before the first model call, from the
+project's **tracked text files** - then gives the model three tools that serve
+only from it: a literal case-insensitive search, a line-annotated read of one
+file, and a path listing. The model never picks which bytes inspector opens.
+
+That is deliberate. The obvious implementation is a general file-read tool
+rooted at the repository, which hands that choice to a model being fed project
+text nobody can vouch for - one careless or hostile document away from reading
+an untracked `.env` and quoting it back to a model vendor. Tracked files only,
+because an untracked or ignored file is not a claim the project publishes and
+is exactly where a secret lives. Non-regular entries are dropped too, which
+also means a tracked symlink cannot point the corpus out of the tree.
+
+The corpus is **not** limited to `.md` files: a claim about behavior is a claim
+wherever a person reads it - prose, doc comments, inline comments, sample
+configuration, an example command in a script or a test. Whatever inspector
+could not read is counted and named rather than silently dropped, so a
+judgment made over a partial corpus never prints like one made over the whole
+project.
+
+### What a finding has to carry
+
+| field | what it is |
+| --- | --- |
+| `kind` | `falsified_claim` (question 2) or `undescribed_change` (question 1) |
+| `path`, `line` | where the claim is, in the corpus |
+| `claim` | the text **verbatim** as the file has it |
+| `summary` | what the change did that made it untrue, or what is missing |
+| `correction` | proposed replacement text - or `needsClientJudgment` instead |
+| `inChange` | inspector's own fact: was this file part of the change? |
+
+Unlike the code reviewer, which is handed the whole diff it may cite, this
+judgment chooses what it reads - so inspector re-reads the corpus file and
+requires the quoted claim to be there, within two lines of the cited pointer,
+before recording anything. A finding whose claim is not in the file is
+rejected, not recorded. `inChange: false` is the case issue #16 exists for, and
+it is printed as *"this file is NOT in the change"* rather than left for a
+reader to work out.
+
+Then inspector derives the run's single verdict:
+
+| verdict | meaning |
+| --- | --- |
+| `documentation_consistent` | the review completed and the documents still describe reality |
+| `documentation_undescribed_change` | the change is not described somewhere it belongs, and no existing claim was found falsified |
+| `documentation_falsified_claims` | at least one thing already written is no longer true - this outranks the others |
+
+### The two limits it does not cross
+
+Both come from SPEC.md section 4, and both are enforced rather than requested:
+
+- **It reports on documentation that already exists.** A finding must name a
+  file already in the corpus, so the structurally impossible finding is "the
+  project should add a guide" - that is a judgment about the product and it
+  belongs to the Client.
+- **The request says what was meant.** `--request-file` is the only source of
+  intent; intent is never read out of the implementation. Whether one was given
+  is printed on *every* run, so "nobody told inspector what was meant" is as
+  visible as the reviewer's `test_change_judgment_not_requested`.
+
+A claim that looks falsified but cannot be corrected without a product decision
+carries `needsClientJudgment` and its reason instead of a correction, and is
+repeated under its own heading on stderr. Never silent, never a guess.
+
+Like `inspector review`, this judgment **only reports**: a correction is
+proposed text Fabrica applies after the Client's verdict, never an edit
+inspector makes (fabrica#95). It posts no commit status and gates no merge, and
+a completed review exits `0` whatever it found. One honest limit: the corpus is
+read from the working tree as it now stands, and inspector does not check that
+tree against `--diff`.
+
 ## Examiner
 
 `inspector examine` is the independent outcome judge. It derives scenarios from
@@ -912,7 +1013,12 @@ project declaring `testPaths` gets it run by `inspector run`, recorded as the
 changed test file - a stopgap for the blanket test protection above, for as
 long as that protection lasts. Issue #55 keeps that judgment auditable: every
 per-file judgment and reason, pass included, is printed and recorded in the run
-report's `testReview`, while the status itself is unchanged. The gate-file sync (above) is built too: a
+report's `testReview`, while the status itself is unchanged. The documentation
+judgment (issue #16, above) is built as well: `inspector document` asks both
+whether the change is described and - the question that gets missed - whether
+the change made something already written untrue, re-reading the project's own
+tracked text so it finds the stale claim in files the change never touched. It
+reports and posts no status. The gate-file sync (above) is built too: a
 change to either gate file on `main` opens or updates one pull request per
 listed consumer, carrying both files and naming the commit. Still to come: the
 installer - see
