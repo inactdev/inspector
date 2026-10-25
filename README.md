@@ -869,8 +869,24 @@ The locally built runtime forces the trusted agent entrypoint. The model has no
 shell or arbitrary-network tool: it can call only the supplied app URL, and a
 redirect cannot leave that origin. A local Docker daemon is required because
 bind mounts resolve on the daemon host; remote Docker endpoints are refused.
-Docker `userns-remap` is unsupported for now because private staged inputs
-cannot safely cross that mapping - see [#32](https://github.com/inactdev/inspector/issues/32).
+The container runs under whatever user namespace the daemon puts it in rather
+than opting out of one, so a host configured with Docker `userns-remap` keeps
+that isolation while being examined. Because such a daemon runs the container
+as a different, unprivileged host user, inspector asks the container which host
+identity it actually got and grants exactly that one uid the least access it
+needs to the staged inputs and the verdict it fills in - traversal of the two
+directories, read on each input, write on the verdict file, and nothing to any
+other account on the host. On a daemon that remaps nothing the container
+reports the identity inspector already runs as and nothing is granted. A host
+where even that single grant cannot be arranged refuses rather than loosening
+the staged modes.
+
+`userns-remap` nevertheless remains **declared unsupported** until that path has
+been recorded working on a live remapping daemon, which has not happened yet -
+the bridge above is built and unit-tested, and
+`TestExaminerStagedAccessUnderUsernsRemap` verifies it end to end but skips
+where no such daemon is reachable. See
+[#32](https://github.com/inactdev/inspector/issues/32).
 
 The model proposes capabilities, attempts, and assessments. Inspector records
 which capability each app request drove and what response was delivered, then

@@ -33,6 +33,16 @@ type PreparedInputs struct {
 	BaseTests    BaseTestList
 }
 
+// inputFileNames names every document PrepareInputs writes into the
+// sealed input directory. Kept as one list because two things walk it:
+// PrepareInputsContext, which writes them, and grantStagedAccess, which
+// has to grant the container read access to each one by name - a file
+// missing from the second list would be a file the container cannot
+// read under a remapping daemon, which is the defect issue #32 fixes.
+func inputFileNames() []string {
+	return []string{InputRequestName, InputFeatureMapName, InputAlwaysTrueName, InputChangedFilesName, InputBaseTestsName}
+}
+
 // PrepareInputs reads, validates, and copies the permitted inputs into a new
 // directory. Structured input is re-serialized from validated data before the
 // container starts. Call Cleanup after the examiner exits.
