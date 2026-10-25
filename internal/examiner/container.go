@@ -85,6 +85,9 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		return Result{}, err
 	}
 	defer cleanupOutput()
+	if err := grantStagedAccess(runCtx, prepared, outputDir, verdictPath, runtimeUser, runtimeImage); err != nil {
+		return Result{Kind: Refused, Message: err.Error()}, nil
+	}
 
 	network := opts.Network
 	if network == "" {
@@ -177,14 +180,30 @@ func ensureRuntimeImage(ctx context.Context, runtimeUser string) (string, error)
 }
 
 func newRuntimeIdentityCommand(ctx context.Context, runtimeUser, imageID string) *container.Cmd {
+	return newRuntimeProbeCommand(ctx, "inspector-examiner-identity-", runtimeUser, imageID, "--runtime-fingerprint")
+}
+
+func newHostIdentityCommand(ctx context.Context, runtimeUser, imageID string) *container.Cmd {
+	return newRuntimeProbeCommand(ctx, "inspector-examiner-hostid-", runtimeUser, imageID, "--host-identity")
+}
+
+// newRuntimeProbeCommand runs the trusted entrypoint for one of its
+// answer-and-exit modes. Both probes share runtimeIsolationArgs with the
+// examination itself rather than restating it, which the host-identity
+// probe depends on for more than tidiness: `--user` and the daemon's
+// user-namespace configuration are what decide the host identity it
+// measures, so a probe isolated differently from the real run would
+// measure the wrong one. Network access is not among those, so both
+// probes deny it outright.
+func newRuntimeProbeCommand(ctx context.Context, namePrefix, runtimeUser, imageID, mode string) *container.Cmd {
 	args := runtimeIsolationArgs(runtimeUser)
 	args = append(args,
 		"--network", "none",
 		"--entrypoint", "/usr/local/bin/examiner-agent",
 		imageID,
-		"--runtime-fingerprint",
+		mode,
 	)
-	return container.NewCommand(ctx, "inspector-examiner-identity-", args...)
+	return container.NewCommand(ctx, namePrefix, args...)
 }
 
 func validImageID(id string) bool {
@@ -302,6 +321,17 @@ func newContainerCommand(ctx context.Context, opts containerOptions, runtimeImag
 	return container.NewCommand(ctx, "inspector-examiner-", args...)
 }
 
+// runtimeIsolationArgs is the containment every run of the examiner
+// runtime gets, probes included.
+//
+// Deliberately no `--userns host`. That flag opts the container out of
+// whatever user namespace the daemon would have put it in, which on a
+// host configured with `userns-remap` means discarding the isolation its
+// administrator chose - for the one component here whose whole purpose
+// is a sealed runtime, the wrong trade in the wrong direction. The
+// container runs under the daemon's own user-namespace configuration
+// instead, and grantStagedAccess bridges the resulting host identity to
+// the staged inputs and verdict (issue #32).
 func runtimeIsolationArgs(user string) []string {
 	if user == "" {
 		user = container.HostUser()
@@ -309,7 +339,6 @@ func runtimeIsolationArgs(user string) []string {
 	return []string{
 		"--pull", "never",
 		"--read-only",
-		"--userns", "host",
 		"--user", user,
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",

@@ -335,25 +335,32 @@ func writeResult(outputDir string, result Result) error {
 		return fmt.Errorf("encoding verdict: %w", err)
 	}
 	data = append(data, '\n')
-	file, err := os.CreateTemp(outputDir, ".verdict-*.json")
+	// Written through the file inspector staged rather than published by
+	// renaming a fresh one over it, so the verdict keeps inspector's own
+	// ownership and mode. Under a user-namespace-remapping Docker daemon
+	// this agent runs as a host user that is neither inspector nor
+	// nameable in an ACL from inside this namespace, so a file it created
+	// itself would be one inspector could never read back (issue #32).
+	// It also means this container needs write permission on exactly this
+	// one file and no permission to create, replace or unlink anything
+	// else in the output directory.
+	//
+	// Nothing is given up by dropping the atomic rename: this runs at
+	// most once per examination, and inspector reads the verdict only
+	// after the container has exited, so there is no reader a torn file
+	// could reach. A write cut short leaves invalid JSON, which inspector
+	// already refuses by name.
+	path := filepath.Join(outputDir, VerdictName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return fmt.Errorf("creating verdict checkpoint: %w", err)
-	}
-	name := file.Name()
-	defer os.Remove(name)
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("securing verdict checkpoint: %w", err)
+		return fmt.Errorf("opening the staged verdict: %w", err)
 	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
-		return fmt.Errorf("writing verdict checkpoint: %w", err)
+		return fmt.Errorf("writing the verdict: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("writing verdict checkpoint: %w", err)
-	}
-	if err := os.Rename(name, filepath.Join(outputDir, VerdictName)); err != nil {
-		return fmt.Errorf("publishing verdict checkpoint: %w", err)
+		return fmt.Errorf("writing the verdict: %w", err)
 	}
 	return nil
 }
