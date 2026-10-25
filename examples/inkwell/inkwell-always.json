@@ -1,0 +1,164 @@
+{
+  "version": 1,
+  "note": "Inkwell's always-true list, in check 3's format. This is the worked example for the format, and it is also the artifact `inspector examine --always-true` reads: one name, one file, one check. It replaces the earlier hand-written prose list, whose five invariants are all carried below. Three lines deliberately carry no falsifier and say why in their own note - a promise nothing can currently disprove is reported as not-runnable and never as passing, which is the state Inkwell's list is honestly in today.",
+  "app": {
+    "image": "inkwell-backend:local",
+    "args": ["--addr", "0.0.0.0:8080", "--storage-dir", "/fixture/storage"],
+    "port": 8080,
+    "fixture": {
+      "dir": "/fixture",
+      "files": {
+        "storage/.keep": ""
+      }
+    },
+    "ready": {
+      "path": "/inklings",
+      "status": 200,
+      "timeout": "60s"
+    }
+  },
+  "promises": [
+    {
+      "id": "inkling-never-lost",
+      "promise": "An inkling is never lost once captured: a record the backend accepted is readable afterwards, with the text it was captured with.",
+      "confirmed": false,
+      "source": "named on inspector#24; the earlier prose list stated it as the upsert property",
+      "falsify": {
+        "http": [
+          {
+            "method": "POST",
+            "path": "/inklings",
+            "headers": {
+              "Content-Type": "multipart/form-data; boundary=always-boundary"
+            },
+            "body": "--always-boundary\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n6f1b0c2e-5a44-4c8e-9b31-2d7f0a1c4e01\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"created\"\r\n\r\n2026-01-01T00:00:00Z\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"updated\"\r\n\r\n2026-01-01T00:00:00Z\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nthe captured inkling\r\n--always-boundary--\r\n",
+            "expect": {
+              "status": 201,
+              "bodyContains": ["6f1b0c2e-5a44-4c8e-9b31-2d7f0a1c4e01"]
+            }
+          },
+          {
+            "method": "GET",
+            "path": "/inklings",
+            "expect": {
+              "status": 200,
+              "bodyContains": ["6f1b0c2e-5a44-4c8e-9b31-2d7f0a1c4e01", "the captured inkling"]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "capture-is-an-upsert-by-id",
+      "promise": "POST /inklings is an upsert by id: retrying an id updates the one record rather than leaving a second copy behind.",
+      "confirmed": false,
+      "source": "carried over from the earlier hand-written prose always-true list",
+      "falsify": {
+        "http": [
+          {
+            "method": "POST",
+            "path": "/inklings",
+            "headers": {
+              "Content-Type": "multipart/form-data; boundary=always-boundary"
+            },
+            "body": "--always-boundary\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n2c9a7e41-3b62-4f05-8a17-9e4d6b0c3a22\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"created\"\r\n\r\n2026-01-02T00:00:00Z\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"updated\"\r\n\r\n2026-01-02T00:00:00Z\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nfirst wording of the upsert record\r\n--always-boundary--\r\n",
+            "expect": {
+              "status": 201
+            }
+          },
+          {
+            "method": "POST",
+            "path": "/inklings",
+            "headers": {
+              "Content-Type": "multipart/form-data; boundary=always-boundary"
+            },
+            "body": "--always-boundary\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n2c9a7e41-3b62-4f05-8a17-9e4d6b0c3a22\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"created\"\r\n\r\n2026-01-02T00:00:00Z\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"updated\"\r\n\r\n2026-01-02T00:05:00Z\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nsecond wording of the upsert record\r\n--always-boundary--\r\n",
+            "expect": {
+              "status": 200
+            }
+          },
+          {
+            "method": "GET",
+            "path": "/inklings",
+            "expect": {
+              "status": 200,
+              "bodyContains": ["second wording of the upsert record"],
+              "bodyNotContains": ["first wording of the upsert record"]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "no-endpoint-accepts-a-non-uuid-id",
+      "promise": "No endpoint accepts a non-UUID id. An id that is not a UUID - a path separator among them - is rejected rather than stored.",
+      "confirmed": false,
+      "source": "named on inspector#24; the earlier prose list stated it as the UUID and path-separator rule",
+      "falsify": {
+        "http": [
+          {
+            "method": "POST",
+            "path": "/inklings",
+            "headers": {
+              "Content-Type": "multipart/form-data; boundary=always-boundary"
+            },
+            "body": "--always-boundary\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\n../escaped-id\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"created\"\r\n\r\n2026-01-03T00:00:00Z\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"updated\"\r\n\r\n2026-01-03T00:00:00Z\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nan id that is not a uuid\r\n--always-boundary--\r\n",
+            "expect": {
+              "status": 400
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "required-capture-fields-are-enforced",
+      "promise": "Invalid capture input returns 400: a missing required part, empty text, or a malformed timestamp is rejected rather than stored.",
+      "confirmed": false,
+      "source": "carried over from the earlier hand-written prose always-true list",
+      "falsify": {
+        "http": [
+          {
+            "method": "POST",
+            "path": "/inklings",
+            "headers": {
+              "Content-Type": "multipart/form-data; boundary=always-boundary"
+            },
+            "body": "--always-boundary\r\nContent-Disposition: form-data; name=\"id\"\r\n\r\nb84f21d7-6c03-4a9e-8d52-1f7a0b6c9e13\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"created\"\r\n\r\nnot-a-timestamp\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"updated\"\r\n\r\n2026-01-04T00:00:00Z\r\n--always-boundary\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\n\r\n--always-boundary--\r\n",
+            "expect": {
+              "status": 400
+            }
+          },
+          {
+            "method": "GET",
+            "path": "/inklings",
+            "expect": {
+              "status": 200,
+              "bodyNotContains": ["b84f21d7-6c03-4a9e-8d52-1f7a0b6c9e13"]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "delete-removes-the-markdown-and-its-audio-sibling",
+      "promise": "A delete removes both the markdown file and its audio sibling, leaving neither behind.",
+      "confirmed": false,
+      "source": "named on inspector#24",
+      "note": "No falsifier yet, so this line is reported as not-runnable rather than passing. Two reasons, both about the observation surface rather than about Inkwell: the feature map documents no delete endpoint, and the backend's storage effects are outside the HTTP surface check 3 can observe. A command falsifier in a runner image that can read the app's storage directory is what would make this runnable."
+    },
+    {
+      "id": "unsynced-inkling-survives-a-restart",
+      "promise": "An inkling captured but not yet synced survives a restart of the app that holds it.",
+      "confirmed": false,
+      "source": "named on inspector#24",
+      "note": "No falsifier yet, so this line is reported as not-runnable rather than passing. It is a property of the native client's local store, which this format drives nothing of, and check 3 brings one app instance up per run rather than restarting it mid-list."
+    },
+    {
+      "id": "list-is-ordered-newest-first",
+      "promise": "GET /inklings returns its records ordered by newest created timestamp first.",
+      "confirmed": false,
+      "source": "carried over from the earlier hand-written prose always-true list",
+      "note": "No falsifier yet, so this line is reported as not-runnable rather than passing. An http falsifier's expectations are status and substring, which cannot express an ordering between two records; this needs a command falsifier in a runner image that can read the JSON."
+    }
+  ]
+}

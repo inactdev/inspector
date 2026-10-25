@@ -35,6 +35,16 @@ const ExaminerStatusContext = "examiner"
 // and every changed test goes back to being red.
 const TestsStatusContext = "inspector-tests"
 
+// AlwaysStatusContext is the separate status check 3 posts for the project's
+// always-true list - its regression list of promises the product makes (issue
+// #24): success only when every line was driven and every one of them still
+// held, failure when a promise broke, and error when nothing broke but the
+// list was not fully checked - the app would not start, or a line declares no
+// falsifier to run. Branch protection requires it alongside the gate, the same
+// way it requires ExaminerStatusContext; unlike TestsStatusContext the gate
+// script does not read it, so it is named here and in README only.
+const AlwaysStatusContext = "inspector-always"
+
 // GitHubTokenEnvVar is the environment variable inspector reads its
 // GitHub token from. SPEC.md section 12 settled where the token lives:
 // v1 posts with the Client's own token rather than a token scoped to

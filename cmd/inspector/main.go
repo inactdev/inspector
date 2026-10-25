@@ -54,6 +54,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return runDocumenter(args[1:], stdout, stderr)
 		case "guidebook":
 			return runGuidebook(args[1:], stdout, stderr)
+		case "always":
+			return runAlways(args[1:], stdout, stderr)
 		}
 	}
 	fs := flag.NewFlagSet("inspector", flag.ContinueOnError)

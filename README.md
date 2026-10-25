@@ -844,9 +844,11 @@ application's implementation or worker-written test content.
 The first version drives HTTP backends. It does not drive native iOS screens, so
 an Inkwell examination covers its backend only. The hand-written first
 [Inkwell feature map](examples/inkwell/EXAMINER_GUIDEBOOK.md) and
-[always-true list](examples/inkwell/INKWELL_ALWAYS_TRUE.md) are worked examples.
+[always-true list](examples/inkwell/inkwell-always.json) are worked examples.
 The Guidebook section below owns generating a feature map for any project
-(issue #22); #24 owns the always-true list producer.
+(issue #22). The always-true list is the same file check 3 drives - see the
+Always-true list section below - so `--always-true` takes that list rather
+than a document of its own.
 
 `--feature-map` may be either a hand-written document like Inkwell's or a
 generated guidebook. A generated one carries a `confirmed` line, and the
@@ -1006,6 +1008,156 @@ change green. What the reviewer's `--test-paths` judgment adds is the reason for
 that override, not a way around it - run it with `--test-paths '*_test.go'` on
 such a change and the verdict says whether the exam survived.
 
+## Always-true list
+
+`inspector always` is check 3: the project's **regression list**, driven end to
+end. The list is the set of things a person would run by hand to convince
+themselves the product still works - console commands, driver scripts, HTTP
+calls - and **all of them must still pass**
+([#24](https://github.com/inactdev/inspector/issues/24)).
+
+It lives in the judged repository, at `.inspector-always.json` by default,
+under that project's `protectedPaths`. That is what makes it hard to weaken
+quietly, and it means the list travels with the code rather than living in a
+tool's configuration. It is deliberately not like `.inspector.json` and the
+gate files, which are the rules of the game and stay human by design: this list
+is accumulated knowledge about the product and has to be able to grow. A change
+to it is **not forbidden** - it has to be *visible*, and whether it is
+legitimate is decided by whether the request justifies it, the same rule as a
+test change. The protected-path gate is what makes it visible.
+
+It is also the examiner's `--always-true` input. One name, one file, one check:
+the invariants a project states and the always-true list the examiner hunts
+around are the same artifact.
+
+### What a line looks like
+
+Each line carries both halves - the plain-language promise a person reads, and
+the thing that would falsify it:
+
+```json
+{
+  "version": 1,
+  "app": {
+    "image": "inkwell-backend:local",
+    "args": ["--addr", "0.0.0.0:8080", "--storage-dir", "/fixture/storage"],
+    "port": 8080,
+    "fixture": { "dir": "/fixture", "files": { "storage/.keep": "" } },
+    "ready": { "path": "/inklings", "status": 200, "timeout": "60s" }
+  },
+  "runner": { "image": "curlimages/curl:8.5.0" },
+  "promises": [
+    {
+      "id": "inkling-never-lost",
+      "promise": "An inkling is never lost once captured.",
+      "confirmed": true,
+      "source": "proposed by a confirmed check-2 finding, 2026-10-24",
+      "falsify": {
+        "http": [
+          { "method": "POST", "path": "/inklings",
+            "headers": { "Content-Type": "application/json" },
+            "body": "{\"id\":\"...\"}",
+            "expect": { "status": 201 } },
+          { "method": "GET", "path": "/inklings",
+            "expect": { "status": 200, "bodyContains": ["..."],
+                        "bodyNotContains": ["the superseded text"] } }
+        ]
+      }
+    }
+  ]
+}
+```
+
+`falsify` carries exactly one of the three shapes:
+
+- `http` - a sequence of requests Inspector performs itself. Every step must
+  answer its `expect` (a status, and optionally substrings its body must or
+  must not contain); the first that does not breaks the promise.
+- `command` - argv run in a single-use container from `runner.image`, with the
+  app at `$APP_URL`. Exit 0 means the promise survived.
+- `script` - a driver script, named by its **absolute path inside
+  `runner.image`**. It cannot be a path in the project: check 3 mounts no
+  repository, so there is no project tree to name one in.
+
+Two rules about what is *not* there:
+
+- **A line with no `falsify` is reported as not runnable, and never as
+  passing.** That is how a promise nobody can disprove yet stays visible
+  instead of quietly counting as a pass. Give it a `note` saying why.
+- **A `falsify` that is declared but empty is refused when the list is read.**
+  So is an unknown or duplicated field anywhere in the file - a misspelled
+  expectation that decoded to nothing would leave a promise passing against an
+  assertion nobody made.
+
+`confirmed` records whether a person has accepted the line. A proposal sits
+there with `false` until someone does; it is still driven, still counted, and
+the run says how many lines are still proposals. It deliberately does not
+change the verdict - a broken promise nobody accepted yet is still a broken
+promise.
+
+### Running it
+
+```
+GITHUB_TOKEN=... inspector always \
+  --list .inspector-always.json \
+  --commit <40-character-commit-sha> \
+  --owner inactdev \
+  --repo inkwell
+```
+
+Check 3 **brings the app up itself**, from the image the list names, with the
+fixture data the list declares, waits for the declared readiness response, and
+removes both afterwards. A promise is only evidence about this commit if the
+thing it was driven against was brought up from a declared image with known
+data for that one run; a long-lived instance's accumulated state can make a
+promise pass vacuously. The image must already be present locally - like the
+examiner's runtime, check 3 never builds or pulls while it holds app access.
+The app container is read-only apart from its fixture mount and its own `/tmp`,
+drops every capability, and is memory-, CPU-, and process-bounded.
+
+It is **read-only by construction, not by instruction**: it mounts no
+repository at all, the same boundary the examiner has, so there is no handle on
+the commit for it to edit and nothing to prove about that afterwards.
+
+HTTP falsifiers run against the ephemeral loopback port Docker published for
+the app. Command and script falsifiers run in their own container joined with
+`--network container:<app>`, sharing the app container's network stack, which
+is why `$APP_URL` names `127.0.0.1` and the port the app itself listens on.
+
+### Its verdict
+
+One aggregate, never fail-fast: every line is attempted even after one breaks,
+so the whole list's state arrives in a single status under the stable context
+`inspector-always`.
+
+- `success` - every promise ran and every one of them held. Exits `0`.
+- `failure` - at least one promise broke, and the status names all of them.
+  Exits `1`. A broken promise outranks incompleteness and does not hide it:
+  both facts stay in the result.
+- `error` - nothing broke, but the list was not fully checked: the app would
+  not start, or a line declares no falsifier. It says which. Exits `2`, as does
+  a refusal that never got as far as the list.
+
+`inspector run` does not invoke check 3, and the gate script does not read its
+status: it is its own command and its own judgment, the same as
+`inspector examine`. For that reason `inspector-always` is deliberately not a
+required status check yet - a required status nobody posted never passes, which
+would block every pull request. The inspector-gate section below says when to
+add it.
+
+Two parts of issue #24 are deliberately **follow-ups**, not here: the pipeline
+that turns a confirmed check-2 finding into a proposed line in this list, and
+the judgment of a change to the list against the request it was made for.
+
+Inspector's own [`.inspector-always.json`](.inspector-always.json) is seeded
+with promises inferred from its own tests, every one of them a proposal nobody
+has confirmed and none of them carrying a falsifier yet - so `inspector always`
+run against this repository reports `error` and names each line as not
+runnable. Inspector is a command-line tool with no HTTP app to bring up, and
+the no-repository-mount boundary is exactly what keeps those lines unrunnable
+for now. `examples/inkwell/inkwell-always.json` is the worked example of a list
+with real falsifiers in it.
+
 ## inspector-gate
 
 `.github/workflows/inspector-gate.yml` is the cloud half (SPEC.md sections 2, 4,
@@ -1105,6 +1257,13 @@ status then, and a required status that is never posted never passes. This is a
 repository setting the workflow cannot turn on for itself - there is no API call
 or workflow step that does it from here.
 
+`inspector-always` is not on that list yet either, and for the second half of
+the same reason: nothing invokes check 3 as part of `inspector run`, so the
+status is absent on any commit where a caller did not run `inspector always`
+itself. Make it required once the delivery pipeline runs check 3 on every
+commit it hands over - not before, or every pull request blocks on a status
+nobody posted.
+
 ### Keeping a consumer's copy of the gate in step
 
 Adopting the gate means copying two files into your repository, and a copy
@@ -1181,8 +1340,16 @@ has a model write the examiner's operating instructions over them, renders one
 fixed-shape `INSPECTOR-GUIDEBOOK.md` at the project root without ever
 overwriting a confirmed one, and leaves it unconfirmed until a person signs it -
 which the examiner now reads, recording every capability driven from an
-unsigned guidebook as could-not-be-tested. The gate-file sync (above) is built
-too: a
+unsigned guidebook as could-not-be-tested. Check 3, the always-true list
+(issue #24, above), is built: the project's regression list of promises lives
+in its own repository under `protectedPaths`, each line carrying the
+plain-language promise and the command, script, or HTTP call that would
+falsify it, and `inspector always` brings the app up itself, drives every
+line, and posts one aggregate `inspector-always` status - failure naming every
+broken promise, error when the list could not be fully checked. The two
+remaining parts of that issue are follow-ups: turning a confirmed check-2
+finding into a proposed line, and judging a change to the list against the
+request. The gate-file sync (above) is built too: a
 change to either gate file on `main` opens or updates one pull request per
 listed consumer, carrying both files and naming the commit. Still to come: the
 installer - see
