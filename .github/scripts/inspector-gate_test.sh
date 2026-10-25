@@ -126,6 +126,14 @@ assert_eq "editing a workflow file is caught" \
   "$(printf 'blocked\t.github/workflows/inspector-gate.yml')" \
   "$(classify_protected_matches "$touched_workflow_edit" "$ALWAYS_PROTECTED" "" "")"
 
+# inspector#47 moved the check environment out of .inspector.json's
+# "image" field and into this file. It is protected for the same reason
+# that field was: swapping the box a check runs in is another way to make
+# a failing check stop failing.
+assert_eq "editing Dockerfile.inspector is caught" \
+  "$(printf 'blocked\tDockerfile.inspector')" \
+  "$(classify_protected_matches "$(printf 'Dockerfile.inspector\t')" "$ALWAYS_PROTECTED" "" "")"
+
 assert_eq "renaming a protected file away is caught via previous_filename" \
   "$(printf 'blocked\told-protected.txt')" \
   "$(classify_protected_matches "$touched_rename" "" "$(printf 'old-protected.txt')" "")"

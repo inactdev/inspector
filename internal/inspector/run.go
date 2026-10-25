@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/inactdev/inspector/internal/container"
@@ -21,7 +22,9 @@ const (
 	// Red means the project's check command failed.
 	Red Outcome = "red"
 	// Refused means inspector never reached a verdict on the code - no
-	// check command or image configured, no usable container runtime, a
+	// check command configured, a retired config key still set, no
+	// committed Dockerfile to build the check image from or an image
+	// that would not build, no usable container runtime, a
 	// repo whose git directory cannot be reached inside the container or
 	// whose source cannot be mounted read-only, a
 	// dirty working tree, a check command killed by a signal before it
@@ -108,28 +111,55 @@ func Run(opts Options) (Result, error) {
 					"inspector refuses to run rather than silently doing nothing - a repo that runs\n"+
 					"unprotected must never look identical to one that runs protected.\n\n"+
 					"Configure it by creating %s in the repo root:\n\n"+
-					"  {\n    \"check\": \"<your project's own test/lint/build command>\",\n"+
-					"    \"image\": \"<a container image with your project's toolchain>\"\n  }\n",
-				ConfigFileName,
+					"  {\n    \"check\": \"<your project's own test/lint/build command>\"\n  }\n\n"+
+					"and committing a %s beside it with your project's toolchain and\n"+
+					"dependencies in it - that is the image the check command runs in.\n",
+				ConfigFileName, ProjectDockerfileName,
 			),
 		}, nil
 	}
-	if errors.Is(err, ErrNoImage) {
+	if errors.Is(err, ErrRetiredImageKey) {
 		return Result{
 			Outcome: Refused,
 			Commit:  commit,
 			Message: fmt.Sprintf(
-				"no container image configured for this repo.\n\n"+
-					"the check command runs inside a container, not on this machine - inspector\n"+
-					"needs to know which image has this project's own toolchain in it. Add an\n"+
-					"\"image\" field to %s naming one:\n\n"+
-					"  {\n    \"check\": \"...\",\n    \"image\": \"golang:1.22\"\n  }\n",
-				ConfigFileName,
+				"%s still names an \"image\".\n\n"+
+					"the check command's image is no longer configured by name: it is built from\n"+
+					"the %s this project commits, so that the box the work is written\n"+
+					"in and the box it is judged in cannot differ. Remove the \"image\" field and\n"+
+					"commit a %s whose FROM names the image it used to name.\n\n"+
+					"inspector refuses rather than ignoring the field, because a config naming one\n"+
+					"image while the check runs in another says something untrue about this run.\n",
+				ConfigFileName, ProjectDockerfileName, ProjectDockerfileName,
+			),
+		}, nil
+	}
+	if errors.Is(err, ErrRetiredNetworkKey) {
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%s still carries the \"network\" opt-in.\n\n"+
+					"that opt-in is gone, as every run that used it said it would be: the check\n"+
+					"container now always runs with no network at all. Whatever it was installing\n"+
+					"at check time belongs in the %s this project commits, baked in\n"+
+					"at build time - the build may use the network, the check may not. Remove the\n"+
+					"\"network\" field.\n",
+				ConfigFileName, ProjectDockerfileName,
 			),
 		}, nil
 	}
 	if err != nil {
 		return Result{Outcome: Refused, Commit: commit, Message: err.Error()}, nil
+	}
+
+	// Resolved before the runtime check, because it needs no runtime: a
+	// project that commits no image to build from has a gap in what it
+	// declares, and saying so is more use than reporting a missing
+	// Docker to someone who would hit this immediately afterwards.
+	dockerfile, err := ProjectDockerfile(repoRoot)
+	if refusal, refused := refuseProjectImage(repoRoot, commit, container.ProjectImage{}, err); refused {
+		return refusal, nil
 	}
 
 	if err := container.EnsureAvailable(); err != nil {
@@ -145,9 +175,26 @@ func Run(opts Options) (Result, error) {
 		}, nil
 	}
 
+	// Built before the check and outside its timeout: the image is the
+	// project's own declaration of the environment it is judged in, and
+	// a project whose image inspector cannot produce has not been judged
+	// at all. Docker's output goes straight to the caller's stderr as it
+	// happens, so a long first build is visible rather than silent.
+	buildLog := opts.Stderr
+	if buildLog == nil {
+		// os/exec reads a nil writer as /dev/null, but the build streams
+		// through writers of its own that do not.
+		buildLog = io.Discard
+	}
+	image, err := BuildProjectImage(repoRoot, dockerfile, buildLog)
+	if refusal, refused := refuseProjectImage(repoRoot, commit, image, err); refused {
+		return refusal, nil
+	}
+	fmt.Fprintln(buildLog, DescribeProjectImage(image))
+
 	timeout := cfg.Timeout()
 	started := time.Now()
-	checkResult, err := RunCheck(repoRoot, cfg.Check, cfg.Image, cfg.Limits(), cfg.Network, timeout, opts.Stdout, opts.Stderr)
+	checkResult, err := RunCheck(repoRoot, cfg.Check, image.Tag, cfg.Limits(), timeout, opts.Stdout, opts.Stderr)
 	if errors.Is(err, container.ErrGitDirUnavailable) {
 		return Result{
 			Outcome: Refused,
@@ -215,6 +262,8 @@ func Run(opts Options) (Result, error) {
 		Repo:         repoRoot,
 		Claim:        opts.Claim,
 		CheckCommand: cfg.Check,
+		Image:        image.Tag,
+		ImageBases:   imageBases(image),
 		Outcome:      outcome,
 		StartedAt:    started,
 		FinishedAt:   finished,
@@ -275,4 +324,100 @@ func Run(opts Options) (Result, error) {
 	}
 
 	return result, nil
+}
+
+// refuseProjectImage turns every way the project's own check image can
+// fail to be produced into a refusal, and reports false when there was no
+// failure. None of these is a red: a project whose declared environment
+// inspector could not build has not been judged, and judging it in some
+// other image would judge a different project (issue #47).
+func refuseProjectImage(repoRoot, commit string, image container.ProjectImage, err error) (Result, bool) {
+	switch {
+	case err == nil:
+		return Result{}, false
+	case errors.Is(err, ErrNoProjectImage):
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"this repo commits no %s, so there is no image to run its check in.\n\n"+
+					"inspector builds that file and runs the check command inside the result - it\n"+
+					"never guesses at a toolchain, the same way it never guesses at a check\n"+
+					"command. Add %s at the repo root, carrying this project's\n"+
+					"toolchain and its dependencies:\n\n"+
+					"  FROM <a base image with your toolchain>\n"+
+					"  # install this project's dependencies here, so the check needs no network\n\n"+
+					"The same image is meant to be the box the work is written in, so what the\n"+
+					"check runs against cannot differ from what the work was built against.\n",
+				ProjectDockerfileName, ProjectDockerfileName,
+			),
+		}, true
+	case errors.Is(err, ErrUncommittedProjectImage):
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%s exists here but git does not track it (it is ignored, or was\n"+
+					"never added), so the image the check would run in is not part of this commit\n"+
+					"and nobody reviewing this work would ever see it. Commit it.\n",
+				ProjectDockerfileName,
+			),
+		}, true
+	case errors.Is(err, container.ErrProjectImageBuildFailed):
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%v\n\n"+
+					"the check command runs in the image this project's own %s\n"+
+					"builds, and that build failed - docker's own output is above%s. Nothing was\n"+
+					"judged: a project whose check environment does not build has not been found\n"+
+					"wrong about its code.\n",
+				err, ProjectDockerfileName, buildLogSuffix(repoRoot, image),
+			),
+		}, true
+	case errors.Is(err, container.ErrProjectImageUnavailable):
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%v\n\n"+
+					"inspector reads this project's own %s to know which image to\n"+
+					"build and tag for the check, and could not. It refuses rather than falling\n"+
+					"back to an image nobody declared.\n",
+				err, ProjectDockerfileName,
+			),
+		}, true
+	default:
+		return Result{Outcome: Refused, Commit: commit, Message: err.Error()}, true
+	}
+}
+
+// buildLogSuffix keeps a failed build's own log, which is the only thing
+// that says why it failed, and names where it was kept. The log is already
+// streamed live, but a Fabrica handoff reads a refusal message rather than
+// a console, so the file is what a human is pointed at afterwards.
+func buildLogSuffix(repoRoot string, image container.ProjectImage) string {
+	if strings.TrimSpace(image.Log) == "" {
+		return ""
+	}
+	path, err := WriteImageBuildLog(repoRoot, image.Dockerfile, image.Log)
+	if err != nil {
+		return fmt.Sprintf(" (its log could not be saved: %v)", err)
+	}
+	return fmt.Sprintf(" and kept in %s", path)
+}
+
+// imageBases records which base image each FROM resolved to, so the
+// report says exactly which environment judged this commit rather than
+// only naming the derived tag.
+func imageBases(image container.ProjectImage) map[string]string {
+	if len(image.Bases) == 0 {
+		return nil
+	}
+	bases := make(map[string]string, len(image.Bases))
+	for _, base := range image.Bases {
+		bases[base.Ref] = base.ID
+	}
+	return bases
 }

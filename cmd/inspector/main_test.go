@@ -34,6 +34,13 @@ func requirePublicationPlatform(t *testing.T) {
 	}
 }
 
+// defaultTestDockerfile is the check image a test repo gets when the test
+// does not name its own. Every project inspector judges commits one of
+// these for its check command to run in, and inspector builds it at check
+// time (issue #47); none of the end-to-end tests below is about which
+// image that is, so this keeps them stating only what they test.
+const defaultTestDockerfile = "FROM alpine\n"
+
 func newTestRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -41,6 +48,15 @@ func newTestRepo(t *testing.T, files map[string]string) string {
 	runGitT(t, dir, "init", "-q")
 	runGitT(t, dir, "config", "user.email", "test@example.com")
 	runGitT(t, dir, "config", "user.name", "Test")
+
+	if _, named := files[inspector.ProjectDockerfileName]; !named {
+		withDockerfile := make(map[string]string, len(files)+1)
+		for name, content := range files {
+			withDockerfile[name] = content
+		}
+		withDockerfile[inspector.ProjectDockerfileName] = defaultTestDockerfile
+		files = withDockerfile
+	}
 
 	for name, content := range files {
 		path := filepath.Join(dir, name)
@@ -261,7 +277,7 @@ func runCLI(t *testing.T, dir string, args ...string) (exitCode int, stdout, std
 func TestCLI_GreenPublishesStatusBeforeBranch(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	runGitT(t, dir, "checkout", "-q", "-b", "local-checkout")
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	publicationBranch := "feature"
@@ -303,7 +319,7 @@ func TestCLI_GreenPublishesStatusBeforeBranch(t *testing.T) {
 func TestCLI_RefusesCommitAlreadyOnPublicationBranch(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	publicationBranch := "feature"
 	branchRef := "refs/heads/" + publicationBranch
@@ -333,7 +349,7 @@ func TestCLI_RefusesCommitAlreadyOnPublicationBranch(t *testing.T) {
 
 func TestCLI_RedDoesNotPublish(t *testing.T) {
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false"}`})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 	previousValidatePublicationPlatform := validatePublicationPlatform
@@ -424,7 +440,7 @@ func TestCLI_SignalKilledCheckExitsRefused(t *testing.T) {
 	// pid-namespace behavior, not a bug - so the check command has to
 	// kill a forked child rather than itself for this to reproduce; see
 	// AGENTS.md.
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "sh -c 'kill -9 $$' && true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "sh -c 'kill -9 $$' && true"}`})
 
 	code, _, stderr := runCLI(t, dir, "--branch", "feature")
 	if code != exitRefused {
@@ -438,7 +454,7 @@ func TestCLI_SignalKilledCheckExitsRefused(t *testing.T) {
 func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	if err := os.WriteFile(filepath.Join(dir, ".inspector"), []byte("occupied"), 0o644); err != nil {
 		t.Fatalf("occupying .inspector: %v", err)
 	}
@@ -462,7 +478,7 @@ func TestCLI_ReportWriteFailureStillExitsGreenWithLoudWarning(t *testing.T) {
 func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
 	code, _, _ := runCLI(t, dir, "--branch", "feature", "the", "login", "flow", "is", "done")
@@ -479,7 +495,7 @@ func TestCLI_ClaimTextIsAccepted(t *testing.T) {
 func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	if err := os.WriteFile(filepath.Join(dir, ".inspector"), []byte("occupied"), 0o644); err != nil {
 		t.Fatalf("occupying .inspector: %v", err)
 	}
@@ -516,7 +532,7 @@ func TestCLI_GreenWithoutTokenFailsLoudly(t *testing.T) {
 func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	t.Setenv("GITHUB_TOKEN", "test-token")
 
 	code, _, stderr := runCLI(t, dir, "--branch", "feature")
@@ -534,7 +550,7 @@ func TestCLI_GreenWithoutGitHubRemoteFailsLoudly(t *testing.T) {
 func TestCLI_StatusAPIRefusalFailsLoudly(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
 	stub := stubGitHubStatusAPI(t, dir, http.StatusUnauthorized, `{"message":"Bad credentials"}`, nil)
 
@@ -611,7 +627,7 @@ func rewriteRemoteBranch(t *testing.T, dir, remote, branch string) (remoteCommit
 func TestCLI_GreenWithExpectedTipPublishesRebasedBranch(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 	remoteCommit, rewritten := rewriteRemoteBranch(t, dir, stub.Remote, "feature")
 
@@ -640,7 +656,7 @@ func TestCLI_GreenWithExpectedTipPublishesRebasedBranch(t *testing.T) {
 func TestCLI_GreenWithoutExpectedTipLeavesARebasedBranchUnpublished(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 	remoteCommit, _ := rewriteRemoteBranch(t, dir, stub.Remote, "feature")
 
@@ -657,7 +673,7 @@ func TestCLI_GreenWithoutExpectedTipLeavesARebasedBranchUnpublished(t *testing.T
 }
 
 func TestCLI_RefusesAnExpectedTipThatIsNotAFullSHA(t *testing.T) {
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 
 	code, stdout, stderr := runCLI(t, dir, "--branch", "feature", "--expected-tip", "HEAD~1")
 	if code != exitRefused {
@@ -910,7 +926,7 @@ func TestCLI_GreenCheckCannotWriteTrackedCode(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		".inspector.json": `{"check": "printf changed > tracked.txt", "image": "alpine"}`,
+		".inspector.json": `{"check": "printf changed > tracked.txt"}`,
 		"tracked.txt":     "original",
 	})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
@@ -948,7 +964,7 @@ func TestCLI_GreenCheckCannotWriteTrackedCode(t *testing.T) {
 func TestCLI_RedCheckCannotWriteTrackedCode(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		".inspector.json": `{"check": "printf changed > tracked.txt; false", "image": "alpine"}`,
+		".inspector.json": `{"check": "printf changed > tracked.txt; false"}`,
 		"tracked.txt":     "original",
 	})
 	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
@@ -1030,7 +1046,7 @@ func writePRBodyFile(t *testing.T, body string) string {
 func TestCLI_GreenWithPRFlagsOpensPullRequest(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 	bodyPath := writePRBodyFile(t, "the login flow is done")
 
@@ -1065,7 +1081,7 @@ func TestCLI_GreenWithPRFlagsOpensPullRequest(t *testing.T) {
 func TestCLI_GreenTwiceOnSameBranchOpensNoSecondPullRequest(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 	bodyPath := writePRBodyFile(t, "the login flow is done")
 
@@ -1095,7 +1111,7 @@ func TestCLI_GreenTwiceOnSameBranchOpensNoSecondPullRequest(t *testing.T) {
 
 func TestCLI_RedWithPRFlagsOpensNoPullRequest(t *testing.T) {
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "false"}`})
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 	bodyPath := writePRBodyFile(t, "the login flow is done")
 
@@ -1114,7 +1130,7 @@ func TestCLI_RedWithPRFlagsOpensNoPullRequest(t *testing.T) {
 func TestCLI_GreenWithoutPRFlagsOpensNoPullRequest(t *testing.T) {
 	requirePublicationPlatform(t)
 	requireDocker(t)
-	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true", "image": "alpine"}`})
+	dir := newTestRepo(t, map[string]string{".inspector.json": `{"check": "true"}`})
 	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
 
 	code, stdout, _ := runCLI(t, dir, "--branch", "feature")

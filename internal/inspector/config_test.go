@@ -21,7 +21,7 @@ func TestLoadConfig_Missing(t *testing.T) {
 
 func TestLoadConfig_EmptyCheck(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "   ", "image": "alpine"}`})
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "   "}`})
 
 	_, err := LoadConfig(dir)
 	if !errors.Is(err, ErrNoCheckCommand) {
@@ -31,7 +31,7 @@ func TestLoadConfig_EmptyCheck(t *testing.T) {
 
 func TestLoadConfig_Valid(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "golang:1.22"}`})
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check"}`})
 
 	cfg, err := LoadConfig(dir)
 	if err != nil {
@@ -40,60 +40,51 @@ func TestLoadConfig_Valid(t *testing.T) {
 	if cfg.Check != "make check" {
 		t.Fatalf("check = %q, want %q", cfg.Check, "make check")
 	}
-	if cfg.Image != "golang:1.22" {
-		t.Fatalf("image = %q, want %q", cfg.Image, "golang:1.22")
+}
+
+// Both fields issue #47 retired are refused by name rather than read
+// past. "image" because the check runs in whatever ProjectDockerfileName
+// builds, so a config naming a different one says something untrue about
+// the run; "network" because there is no network left to ask for, and a
+// key that still appears to be a setting would read as one.
+func TestLoadConfig_RefusesRetiredKeys(t *testing.T) {
+	cases := map[string]struct {
+		config string
+		want   error
+	}{
+		"image":            {`{"check": "make check", "image": "golang:1.22"}`, ErrRetiredImageKey},
+		"empty image":      {`{"check": "make check", "image": "   "}`, ErrRetiredImageKey},
+		"network true":     {`{"check": "make check", "network": true}`, ErrRetiredNetworkKey},
+		"network false":    {`{"check": "make check", "network": false}`, ErrRetiredNetworkKey},
+		"both, image wins": {`{"check": "make check", "image": "alpine", "network": true}`, ErrRetiredImageKey},
+	}
+	for name, tc := range cases {
+		dir := t.TempDir()
+		writeFiles(t, dir, map[string]string{ConfigFileName: tc.config})
+
+		_, err := LoadConfig(dir)
+		if !errors.Is(err, tc.want) {
+			t.Fatalf("%s: err = %v, want %v", name, err, tc.want)
+		}
 	}
 }
 
-func TestLoadConfig_NoImage(t *testing.T) {
+func TestLoadConfig_AcceptsAConfigWithNeitherRetiredKey(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check"}`})
 
-	_, err := LoadConfig(dir)
-	if !errors.Is(err, ErrNoImage) {
-		t.Fatalf("expected ErrNoImage, got %v", err)
-	}
-}
-
-func TestLoadConfig_EmptyImage(t *testing.T) {
-	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "   "}`})
-
-	_, err := LoadConfig(dir)
-	if !errors.Is(err, ErrNoImage) {
-		t.Fatalf("expected ErrNoImage, got %v", err)
-	}
-}
-
-func TestLoadConfig_ReadsNetwork(t *testing.T) {
-	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "network": true}`})
-
 	cfg, err := LoadConfig(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cfg.Network {
-		t.Fatal("Network = false, want true")
-	}
-}
-
-func TestLoadConfig_NetworkDefaultsFalse(t *testing.T) {
-	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine"}`})
-
-	cfg, err := LoadConfig(dir)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.Network {
-		t.Fatal("Network = true, want false (the check command must opt in)")
+	if cfg.Image != nil || cfg.Network != nil {
+		t.Fatalf("Image = %s, Network = %s, want both absent", cfg.Image, cfg.Network)
 	}
 }
 
 func TestLoadConfig_ReadsPathLists(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "protectedPaths": ["script/check", "*_test.go"], "testPaths": ["*_test.go"]}`})
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "protectedPaths": ["script/check", "*_test.go"], "testPaths": ["*_test.go"]}`})
 
 	cfg, err := LoadConfig(dir)
 	if err != nil {
@@ -113,7 +104,7 @@ func TestLoadConfig_ReadsPathLists(t *testing.T) {
 // files in a project that never asked for the judgment.
 func TestLoadConfig_PathListsDefaultToNone(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine"}`})
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check"}`})
 
 	cfg, err := LoadConfig(dir)
 	if err != nil {
@@ -149,7 +140,7 @@ func TestConfig_Limits_Defaults(t *testing.T) {
 
 func TestLoadConfig_ReadsLimits(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "memory": "4g", "cpus": "1", "pidsLimit": 64}`})
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "memory": "4g", "cpus": "1", "pidsLimit": 64}`})
 
 	cfg, err := LoadConfig(dir)
 	if err != nil {
@@ -187,7 +178,7 @@ func TestConfig_Timeout_Configured(t *testing.T) {
 
 func TestLoadConfig_ReadsTimeoutSeconds(t *testing.T) {
 	dir := t.TempDir()
-	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "image": "alpine", "timeoutSeconds": 120}`})
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "timeoutSeconds": 120}`})
 
 	cfg, err := LoadConfig(dir)
 	if err != nil {

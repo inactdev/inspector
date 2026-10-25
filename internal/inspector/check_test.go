@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,19 +38,6 @@ func requireDocker(t *testing.T) {
 	if err := container.EnsureAvailable(); err != nil {
 		t.Skipf("no usable container runtime, skipping: %v", err)
 	}
-}
-
-// requireInternet skips a test that needs to actually reach the outside
-// world, the same way requireDocker skips one that needs a runtime: a
-// machine with Docker but no outbound access, or an example.com blip,
-// shouldn't fail the suite.
-func requireInternet(t *testing.T) {
-	t.Helper()
-	conn, err := net.DialTimeout("tcp", "example.com:80", 5*time.Second)
-	if err != nil {
-		t.Skipf("no outbound internet access, skipping: %v", err)
-	}
-	conn.Close()
 }
 
 // failingDockerKill puts a docker shim first on PATH that hands every
@@ -105,9 +91,9 @@ exec %q "$@"
 // written, and a test that leaves it behind litters the temp directory
 // once per run. Tests that have to look inside it read
 // result.Workspace.Root, which stays valid until the test returns.
-func runCheck(t *testing.T, repoRoot, command, image string, limits container.Limits, network bool, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
+func runCheck(t *testing.T, repoRoot, command, image string, limits container.Limits, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
 	t.Helper()
-	result, err := RunCheck(repoRoot, command, image, limits, network, timeout, stdout, stderr)
+	result, err := RunCheck(repoRoot, command, image, limits, timeout, stdout, stderr)
 	t.Cleanup(result.Workspace.Cleanup)
 	return result, err
 }
@@ -124,7 +110,7 @@ func TestRunCheck_Success(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := runCheck(t, dir, "echo hi", testImage, container.Limits{}, false, testTimeout, &stdout, &stderr)
+	result, err := runCheck(t, dir, "echo hi", testImage, container.Limits{}, testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +130,7 @@ func TestRunCheck_Failure(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := runCheck(t, dir, "echo boom >&2; exit 7", testImage, container.Limits{}, false, testTimeout, &stdout, &stderr)
+	result, err := runCheck(t, dir, "echo boom >&2; exit 7", testImage, container.Limits{}, testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,7 +151,7 @@ func TestRunCheck_CapturesInterleavedStreams(t *testing.T) {
 	dir := t.TempDir()
 	const lines = 200
 
-	result, err := runCheck(t, dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -190,7 +176,7 @@ func TestRunCheck_SameWriterForBothStreams(t *testing.T) {
 	const lines = 200
 	var combined bytes.Buffer
 
-	result, err := runCheck(t, dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, container.Limits{}, false, testTimeout, &combined, &combined)
+	result, err := runCheck(t, dir, fmt.Sprintf("for i in $(seq 1 %d); do echo out; echo err >&2; done", lines), testImage, container.Limits{}, testTimeout, &combined, &combined)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -219,7 +205,7 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	dir := t.TempDir()
 	const size = 500_000
 
-	result, err := runCheck(t, dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -267,7 +253,7 @@ func TestRunCheck_CompoundCommandSurvivingKilledChild(t *testing.T) {
 	requireDocker(t)
 	dir := t.TempDir()
 
-	result, err := runCheck(t, dir, `sh -c 'kill -9 $$' && true`, testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, `sh -c 'kill -9 $$' && true`, testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -287,7 +273,7 @@ func TestRunCheck_Timeout(t *testing.T) {
 	dir := t.TempDir()
 
 	start := time.Now()
-	result, err := runCheck(t, dir, "sleep 30", testImage, container.Limits{}, false, 300*time.Millisecond, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, "sleep 30", testImage, container.Limits{}, 300*time.Millisecond, io.Discard, io.Discard)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -329,7 +315,7 @@ func TestRunCheck_TimeoutKillsChildProcesses(t *testing.T) {
 	requireDocker(t)
 	dir := t.TempDir()
 
-	result, err := runCheck(t, dir, "( sleep 3 && echo alive > survived ) & wait", testImage, container.Limits{}, false, 300*time.Millisecond, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, "( sleep 3 && echo alive > survived ) & wait", testImage, container.Limits{}, 300*time.Millisecond, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -355,7 +341,7 @@ func TestRunCheck_RunsFromWorkspaceDir(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 
-	result, err := runCheck(t, dir, "pwd", testImage, container.Limits{}, false, testTimeout, &stdout, &stderr)
+	result, err := runCheck(t, dir, "pwd", testImage, container.Limits{}, testTimeout, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -378,7 +364,7 @@ func TestRunCheck_BindMountsOnlyTheRepo(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, outside, map[string]string{"secret.txt": "should not be visible"})
 
-	result, err := runCheck(t, dir, fmt.Sprintf("test -e %s && echo LEAKED || echo contained", outside), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, fmt.Sprintf("test -e %s && echo LEAKED || echo contained", outside), testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -411,7 +397,7 @@ func TestRunCheck_CannotWriteTrackedSource(t *testing.T) {
 		"printf new > pkg/added.txt && echo ADDED_FILE_IN_TRACKED_DIR",
 		"rm -f tracked.txt && echo REMOVED_TRACKED_FILE",
 		"true",
-	}, "; "), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	}, "; "), testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -460,7 +446,7 @@ func TestRunCheck_BuildOutputAndReportsLandInTheWorkspace(t *testing.T) {
 		"echo installed > node_modules/dep/index.js",
 		"printf 'mode: set\n' > coverage/coverage.out",
 		"echo ORDINARY_CHECK_PASSED",
-	}, " && "), testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	}, " && "), testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -492,7 +478,7 @@ func TestRunCheck_GitWorksFromASubdirectoryOfTheWorkspace(t *testing.T) {
 	requireDocker(t)
 	dir := newTestWorktree(t, map[string]string{"pkg/a.txt": "one\n"})
 
-	result, err := runCheck(t, dir, "cd pkg && git rev-parse --show-toplevel && git log --oneline -1", gitTestImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, "cd pkg && git rev-parse --show-toplevel && git log --oneline -1", gitTestImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -521,7 +507,7 @@ func TestRunCheck_UntrackedPathsStayWritable(t *testing.T) {
 	})
 	writeFiles(t, dir, map[string]string{"node_modules/dep/index.js": "cached\n"})
 
-	result, err := runCheck(t, dir, "cat node_modules/dep/index.js && printf reinstalled > node_modules/dep/index.js && echo REINSTALLED", testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, "cat node_modules/dep/index.js && printf reinstalled > node_modules/dep/index.js && echo REINSTALLED", testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -537,64 +523,24 @@ func TestRunCheck_UntrackedPathsStayWritable(t *testing.T) {
 	}
 }
 
-func TestRunCheck_NoNetworkByDefault(t *testing.T) {
+// TestRunCheck_NetworkIsDenied is the issue #47 requirement at this
+// layer: the check container has no network and RunCheck takes no
+// parameter that could give it one. The internet-reachability test that
+// used to sit beside this one, proving the "network": true opt-in worked,
+// is gone with the opt-in itself.
+func TestRunCheck_NetworkIsDenied(t *testing.T) {
 	requireDocker(t)
 	dir := t.TempDir()
 
-	result, err := runCheck(t, dir, "wget -q -T 3 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, "wget -q -T 3 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if strings.Contains(result.Output, "REACHED") {
-		t.Fatal("check command reached the network with network left at its false default")
+		t.Fatal("check command reached the network; the check container must have none")
 	}
 	if !strings.Contains(result.Output, "blocked") {
 		t.Fatalf("Output = %q, want it to report the network as unreachable", result.Output)
-	}
-}
-
-func TestRunCheck_NetworkOptIn(t *testing.T) {
-	requireDocker(t)
-	requireInternet(t)
-	dir := t.TempDir()
-
-	result, err := runCheck(t, dir, "wget -q -T 5 -O /dev/null http://example.com && echo REACHED || echo blocked", testImage, container.Limits{}, true, testTimeout, io.Discard, io.Discard)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(result.Output, "REACHED") {
-		t.Fatalf("check command could not reach the network with network: true - Output = %q (this test needs outbound internet access to pass)", result.Output)
-	}
-}
-
-func TestRunCheck_NetworkOptInLogsDeprecationWarning(t *testing.T) {
-	// This opt-in is temporary (Fabrica's own check still needs it for
-	// `npm ci`) - every run that uses it must say so, not just the
-	// README, so the person reading a report is reminded too.
-	requireDocker(t)
-	dir := t.TempDir()
-	var stderr bytes.Buffer
-
-	_, err := runCheck(t, dir, "true", testImage, container.Limits{}, true, testTimeout, io.Discard, &stderr)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(stderr.String(), "goes away once your project commits its own image") {
-		t.Fatalf("stderr = %q, want a deprecation warning about the network opt-in", stderr.String())
-	}
-}
-
-func TestRunCheck_NoDeprecationWarningWithoutNetworkOptIn(t *testing.T) {
-	requireDocker(t)
-	dir := t.TempDir()
-	var stderr bytes.Buffer
-
-	_, err := runCheck(t, dir, "true", testImage, container.Limits{}, false, testTimeout, io.Discard, &stderr)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if strings.Contains(stderr.String(), "goes away once your project commits its own image") {
-		t.Fatalf("stderr = %q, should not warn about an opt-in that wasn't used", stderr.String())
 	}
 }
 
@@ -608,7 +554,7 @@ func TestRunCheck_UnstoppableContainerIsReported(t *testing.T) {
 	dir := t.TempDir()
 	var stderr bytes.Buffer
 
-	result, err := runCheck(t, dir, "sleep 30", testImage, container.Limits{}, false, 500*time.Millisecond, io.Discard, &stderr)
+	result, err := runCheck(t, dir, "sleep 30", testImage, container.Limits{}, 500*time.Millisecond, io.Discard, &stderr)
 	if err != nil {
 		t.Fatalf("a refused kill must stay a verdict, not become an infrastructure error: %v", err)
 	}
@@ -637,7 +583,7 @@ func TestRunCheck_UnusableImageIsInfrastructureFailure(t *testing.T) {
 	requireDocker(t)
 	dir := t.TempDir()
 
-	_, err := runCheck(t, dir, "true", "inspector-test-image-does-not-exist-xyz", container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	_, err := runCheck(t, dir, "true", "inspector-test-image-does-not-exist-xyz", container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if err == nil {
 		t.Fatal("expected an error for an image that was never run, not a swallowed CheckResult")
 	}
@@ -662,7 +608,7 @@ func TestRunCheck_RemoteDockerIsRefused(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "")
 	repoDir := t.TempDir()
 
-	_, err := runCheck(t, repoDir, "true", testImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)
+	_, err := runCheck(t, repoDir, "true", testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
 	if !errors.Is(err, container.ErrRemoteDocker) {
 		t.Fatalf("RunCheck() = %v, want container.ErrRemoteDocker", err)
 	}

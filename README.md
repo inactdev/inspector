@@ -54,9 +54,9 @@ copy only goes stale. `jq` is on it as a dependency of the shipped gate script
 rather than only of its tests - it is what inspector-gate.sh parses GitHub's API
 responses with. `script/check` checks for every tool on that list before it runs
 anything and names whichever one is missing. That is also why inspector's own
-`.inspector.json` declares `"image": "cimg/go:1.22"` rather than `golang:1.22`:
-it carries all of them together, and the check container has no network to
-install anything with.
+`Dockerfile.inspector` builds on `cimg/go:1.22` rather than `golang:1.22`: it
+carries all of them together, and the check container has no network to install
+anything with.
 
 Also requires [Docker](https://docs.docker.com/get-docker/) - the check
 command runs inside a container, not on your machine directly. Without a
@@ -65,23 +65,64 @@ than falling back to running the check unsandboxed; see below.
 
 ## Use
 
-In the repo you want inspected, add `.inspector.json` at the root, naming that
-project's own check command and the container image it runs in - inspector
-never guesses at either:
+In the repo you want inspected, add two files at the root. `.inspector.json`
+names that project's own check command - inspector never guesses at one:
 
 ```json
 {
-  "check": "npm test && npm run lint",
-  "image": "node:20"
+  "check": "npm test && npm run lint"
 }
 ```
 
-`image` has to have the project's own toolchain in it, the same way `check`
-has to be the project's own command - inspector ships no images and builds
-none for you. The check command runs with that image, from `/workspace`, its
-own working directory, where it finds the commit under inspection. If the
-image is missing or unusable, inspector refuses the same way it refuses a
-missing check command, rather than quietly doing nothing.
+and `Dockerfile.inspector` is the environment that command runs in:
+
+```dockerfile
+FROM node:20
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+```
+
+inspector builds that file at check time and runs the check command in the
+result, from `/workspace`, its own working directory, where it finds the commit
+under inspection. A project that commits no `Dockerfile.inspector` is refused
+by that file's name, the same way a project with no check command is refused -
+and so is a build that fails, with docker's log kept.
+
+**The path is fixed and there is no config key for it.** The same image is
+meant to be the base of the box the work is *written* in, so what a check runs
+against cannot differ from what the work was built against - one file, one
+name, in both places.
+
+The built image is tagged `inspector-check:<hash>`, derived from the
+Dockerfile's own content together with the image ID each of its `FROM`s
+resolves to. Change either and the next run builds a new image; change neither
+and it reuses the one already on the machine. Two consequences worth knowing:
+
+- **Pin your base by digest if you want it frozen.** A base image already on
+  the machine is not re-pulled, exactly as `docker build` itself behaves
+  without `--pull`, so two runs of the same commit can never disagree because
+  a floating tag moved between them. `FROM node:20` is resolved to whatever
+  `node:20` is here (pulled once if it is missing); `FROM node@sha256:...`
+  cannot drift at all.
+- **A Dockerfile that copies anything from the repository is rebuilt every
+  run** - the tag cannot see the build context, and the whole point of
+  `COPY package-lock.json` is that its content changes. Docker's own layer
+  cache is what makes that rebuild cheap. A Dockerfile that only installs a
+  toolchain (no `COPY`, no `ADD`, no `RUN --mount`) skips the build entirely
+  once it has been built once.
+
+Two things inspector refuses rather than guesses at: a `FROM` that names its
+image through a variable (`FROM golang:${VERSION}`), because it has to resolve
+that base to a digest to tag what it builds, and a `# escape=` parser
+directive, because it would be reading the file under different rules than
+docker builds it under. Name the base literally.
+
+The build context is the repository root, so a `.dockerignore` is worth having
+for the same reason it always is - and worth knowing about: the working tree is
+clean by the time a check runs, so tracked content is the commit's, but a
+gitignored leftover such as `node_modules` at a path the Dockerfile copies
+would reach the image even though it is not part of the commit.
 
 **The check command cannot modify tracked source.** Every top-level path git
 tracks - and `.git` itself - is mounted read-only; `/workspace` is otherwise a
@@ -157,29 +198,34 @@ repository) or forwarded (a future key's value may not be credential-free),
 and so is a worktree whose git directory cannot be reached at all: a refusal
 and exit `2`, never a red.
 
-The container gets no network access by default. A check command that needs
-it - installing dependencies is the common case - has to opt in:
+**The check container has no network, and there is no way to ask for one.**
+`--network none`, every run, no exceptions. That is not incidental: the same
+container that keeps a hostile or broken check command from reaching the rest
+of your machine is also the thing standing between it and the network, which
+is how it would exfiltrate anything it found.
+
+This is what `Dockerfile.inspector` is for. Installing dependencies is the one
+thing a check command legitimately needed the network for, and that now happens
+at build time, where the network *is* available, rather than at check time:
 
 ```json
 {
-  "check": "npm ci && npm test && npm run lint",
-  "image": "node:20",
-  "network": true
+  "check": "npm test && npm run lint"
 }
 ```
 
-That default is deliberate, not incidental: the same container that keeps a
-hostile or broken check command from reaching the rest of your machine is also
-the thing standing between it and the network, which is how it would exfiltrate
-anything it found. `network` is honored for now, but it is a deliberately
-temporary opt-in, not a settled design: the eventual intent is that nothing
-inside the check container ever needs the network at all, once a project
-commits its own image with its dependencies already baked in rather than
-installing them at check time - tracked as issue #47, not yet built (see
-"Status" below). Every run that uses `network: true` logs that on stderr, in
-the report alongside the check's own output, as a standing reminder that it is
-going away. Turning it on trusts the check command with outbound access in the
-meantime; leave it off for anything you haven't read.
+```dockerfile
+FROM node:20
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+```
+
+A `.inspector.json` that still carries the old `"network"` opt-in is refused
+by name, with any value, rather than quietly ignored - as every run that used
+it said would happen. So is one that still names an `"image"`: the check runs
+in whatever `Dockerfile.inspector` builds, and a config naming a different
+image would say something untrue about the run. Delete both keys.
 
 The container also runs as the host user who invoked inspector rather than the
 image's own default (commonly root) - `docker run --user <uid>:<gid>` - so a
@@ -206,7 +252,6 @@ suite; a project whose checks legitimately need more raises any of them in
 ```json
 {
   "check": "go test ./...",
-  "image": "golang:1.22",
   "memory": "4g",
   "cpus": "4",
   "pidsLimit": 1024
@@ -227,7 +272,6 @@ your own:
 ```json
 {
   "check": "npm test && npm run lint",
-  "image": "node:20",
   "timeoutSeconds": 1800
 }
 ```
@@ -533,7 +577,6 @@ vendor seam and the same environment-read key `inspector review` uses:
 ```
 {
   "check": "script/check",
-  "image": "cimg/go:1.22",
   "protectedPaths": ["script/check", "*_test.go"],
   "testPaths": ["*_test.go"]
 }
@@ -939,13 +982,13 @@ repository out, so it reads `.github/scripts/inspector-gate.sh` from the base
 branch through the GitHub API and runs that; with the workflow alone in place,
 every run fails closed saying it could not load its own definition.
 
-Protected paths are `.inspector.json` and everything under `.github/` always,
-plus whatever a project lists under `protectedPaths` in its `.inspector.json`:
+Protected paths are `.inspector.json`, `Dockerfile.inspector`, and everything
+under `.github/` always, plus whatever a project lists under `protectedPaths`
+in its `.inspector.json`:
 
 ```json
 {
   "check": "check.sh",
-  "image": "node:20",
   "protectedPaths": ["check.sh", "deploy/*", "*.tf"]
 }
 ```
@@ -955,6 +998,12 @@ One glob pattern per entry. A `*` matches any characters, `/` included, so
 separate recursive `**` wildcard - it is just two `*` in a row, so a leading
 `**/` still requires a literal `/` and `**/*.tf` will *not* match a `main.tf`
 at the repository root. Write `*.tf` when you mean every `.tf` file.
+
+`Dockerfile.inspector` is in that floor because the check environment used to
+be named by `.inspector.json`'s `"image"` field, which the floor already
+covered: swapping the box a check runs in is another way to make a failing
+check stop failing, so moving that declaration into its own file must not
+narrow what the gate protects.
 
 **Your own check command is not protected automatically - list it under
 `protectedPaths` yourself.** This was tried the other way: deriving a pattern
@@ -1065,15 +1114,18 @@ date.
 
 The check (issue #1) is built: locally, `inspector` runs a project's own check
 command against HEAD, inside a container (issue #13), and reports green or
-red, refusing loudly when no check command or image is configured, or no
+red, refusing loudly when no check command is configured, when the project
+commits no `Dockerfile.inspector` to build that container from, or when no
 usable container runtime is found. That container is memory-, CPU-, and
 process-bounded and runs as the inviting host user rather than root (issue
 #43), and the commit under check is mounted read-only inside it with a
 throwaway writable workspace in its place, so a check command cannot modify
-the code it is being judged on (issue #27); it has no network access by
-default, with a temporary `network: true`
-opt-in still honored until projects commit their own image with dependencies
-baked in - issue #47, not yet built. Inspector-owned publication (issue #18) is
+the code it is being judged on (issue #27). Issue #47 closed the last part of
+that: the image is built from the project's own committed Dockerfile at check
+time, a project without one is refused by the file's name, and the container
+now runs with no network and no opt-in to ask for one - the retired `"image"`
+and `"network"` config keys are refused rather than ignored.
+Inspector-owned publication (issue #18) is
 also built: it stages a green commit, posts its status, then moves an explicitly
 named non-default branch; a red result remains local by v1 policy. That branch
 update is fast-forward only unless the caller authorizes replacing its history
