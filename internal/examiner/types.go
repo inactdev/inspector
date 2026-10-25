@@ -90,8 +90,20 @@ type Result struct {
 	// Vendor names which model vendor produced this result, e.g. "anthropic
 	// (default, no flag given)" or "openrouter" - set by the caller so the
 	// choice is never silent in the report or the posted stamp.
-	Vendor             string `json:"vendor,omitempty"`
-	RuntimeFingerprint string `json:"runtimeFingerprint"`
+	Vendor string `json:"vendor,omitempty"`
+	// Guidebook says whether the feature map driving this examination was a
+	// guidebook a human signed, an unsigned one, or a hand-written document
+	// with no confirmation line at all. Every result carries it: an unconfirmed
+	// guidebook is why capabilities could not be tested, and a reader must not
+	// have to work that out from the outcomes.
+	Guidebook string `json:"guidebook,omitempty"`
+	// GuidebookWithheldPass means an unconfirmed guidebook is what turned a
+	// capability the evidence supported into could-not-be-tested. It is the
+	// fact a caller acts on, rather than reading Guidebook's prose - and it is
+	// narrower than "the guidebook is unsigned", so a run that confirmed
+	// nothing because the app was unreachable never blames the guidebook.
+	GuidebookWithheldPass bool   `json:"guidebookWithheldPass,omitempty"`
+	RuntimeFingerprint    string `json:"runtimeFingerprint"`
 }
 
 // ChangedFileList is Fabrica's names-only record of every worker-changed file.
@@ -156,6 +168,12 @@ type ExaminationRecord struct {
 	Attempts     map[string][]AppAttempt
 	AttemptCount int
 	Budget       int
+	// Guidebook is the confirmation state of the feature map this run was given
+	// (issue #22). An unconfirmed guidebook is a document nobody has vouched
+	// for, so DeriveResult refuses to read any observation made under it as a
+	// pass. The zero value is a document with no confirmation line, which is
+	// how every hand-written feature map behaves.
+	Guidebook GuidebookConfirmation
 }
 
 // NewExaminationRecord starts a bounded record. The model never writes a final
@@ -286,12 +304,20 @@ func (r *ExaminationRecord) AddAssessment(assessment Assessment) error {
 // with no successful observation, or no assessment of one, is explicitly
 // could-not-be-tested. A found failure remains Red even when the examination is
 // incomplete; the separate incomplete mark preserves both facts.
+//
+// An unconfirmed guidebook turns every confirmation into could-not-be-tested.
+// The instructions the examiner drove the app with were a draft nobody vouched
+// for, so a successful response proves the draft's own scenario ran, not that
+// the app does what was asked. A found bug is left red rather than softened:
+// unreviewed instructions are a reason to doubt a pass, never a reason to clear
+// a failure.
 func (r *ExaminationRecord) DeriveResult() (Result, error) {
 	if len(r.Capabilities) == 0 {
 		return Result{}, errors.New("examiner proposed no capabilities")
 	}
 	verdict := Verdict{}
-	result := Result{Kind: Green}
+	unconfirmedGuidebook := r.Guidebook.Unconfirmed()
+	result := Result{Kind: Green, Guidebook: r.Guidebook.Describe()}
 	for _, id := range sortedCapabilityIDs(r.Capabilities) {
 		capability := r.Capabilities[id]
 		outcome := Outcome{ID: id, Claim: capability.Claim, Scenario: capability.Scenario, TestPath: capability.TestPath, Attempts: r.Attempts[id]}
@@ -314,6 +340,12 @@ func (r *ExaminationRecord) DeriveResult() (Result, error) {
 		outcome.Verdict = assessment.Verdict
 		outcome.Evidence = assessment.Evidence
 		outcome.ProposedRegression = assessment.ProposedRegression
+		if unconfirmedGuidebook && outcome.Verdict == Confirmed {
+			outcome.Verdict = CouldNotBeTested
+			result.GuidebookWithheldPass = true
+			outcome.Evidence = fmt.Sprintf("the guidebook this examination was driven from is unconfirmed - %s - so a successful response cannot be read as a pass; what was observed: %s", r.Guidebook.Reason, assessment.Evidence)
+			verdict.ExaminationIncomplete = true
+		}
 		verdict.Outcomes = append(verdict.Outcomes, outcome)
 		if outcome.Verdict == NotConfirmed {
 			result.Kind = Red
@@ -329,6 +361,11 @@ func (r *ExaminationRecord) DeriveResult() (Result, error) {
 	if result.Kind == Green && verdict.ExaminationIncomplete {
 		result.Kind = Refused
 		result.Message = "one or more claimed capabilities could not be tested; this is not a finding that the work is wrong"
+		if result.GuidebookWithheldPass {
+			// Named outright, because the fix is a person reading the guidebook
+			// and signing its confirmed line - not another examination run.
+			result.Message = fmt.Sprintf("nothing could be confirmed: the guidebook this examination was driven from is unconfirmed - %s. This is not a finding that the work is wrong; confirm the guidebook, then examine again", r.Guidebook.Reason)
+		}
 	}
 	result.Verdict = verdict
 	return result, nil

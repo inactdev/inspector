@@ -1,6 +1,7 @@
 package documenter
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -228,6 +229,41 @@ func TestVerifyClaim_RejectsAnEmptyQuoteAndAnOutOfRangeLine(t *testing.T) {
 	}
 	if err := corpus.VerifyClaim("nowhere.md", 1, "anything"); err == nil {
 		t.Fatal("VerifyClaim() accepted a file outside the corpus")
+	}
+}
+
+// TestLoadCorpus_EmptyCorpusIsASentinel keeps the one refusal a second reader
+// of this corpus has to recognize. The guidebook generator (issue #22) reads
+// the same tracked text and must refuse in its own words, so the error says
+// "no readable tracked text file" through ErrNoCorpus rather than only in
+// prose about documentation this caller was never asked about.
+func TestLoadCorpus_EmptyCorpusIsASentinel(t *testing.T) {
+	_, err := LoadCorpus(newRepo(t, map[string]string{"blob.bin": "\x00\x01\x02"}))
+	if !errors.Is(err, ErrNoCorpus) {
+		t.Fatalf("LoadCorpus() error = %v, want it to wrap ErrNoCorpus", err)
+	}
+}
+
+// TestCorpus_PathsAndLinesServeASecondReader covers what the guidebook's
+// deterministic fact extraction walks. Lines hands back a copy: the corpus is
+// read-only to everything downstream, and a caller that could edit it in place
+// would make that a convention rather than a fact.
+func TestCorpus_PathsAndLinesServeASecondReader(t *testing.T) {
+	corpus := loadCorpus(t, map[string]string{"a.md": "first\nsecond\n", "b.md": "only\n"})
+	if paths := corpus.Paths(); len(paths) != 2 || paths[0] != "a.md" || paths[1] != "b.md" {
+		t.Fatalf("Paths() = %v, want both files in corpus order", paths)
+	}
+	lines, ok := corpus.Lines("a.md")
+	if !ok || len(lines) != 2 || lines[1] != "second" {
+		t.Fatalf("Lines() = %v, %v", lines, ok)
+	}
+	lines[0] = "tampered"
+	again, _ := corpus.Lines("a.md")
+	if again[0] != "first" {
+		t.Error("Lines() handed out the corpus's own slice, so a caller can rewrite what every other reader sees")
+	}
+	if _, ok := corpus.Lines("missing.md"); ok {
+		t.Error("Lines() reported a file the corpus does not hold")
 	}
 }
 

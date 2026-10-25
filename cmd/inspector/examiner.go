@@ -174,6 +174,11 @@ func examinerFailureDescription(result examiner.Result) string {
 }
 
 func examinerIncompleteDescription(result examiner.Result) string {
+	if result.GuidebookWithheldPass {
+		// The one incomplete examination whose fix is a person rather than
+		// another run, so the status says so where the Client reads statuses.
+		return "examiner: examination incomplete: the guidebook it was driven from is unconfirmed, so nothing could be confirmed"
+	}
 	return "examiner: examination incomplete: " + untestedClaims(result)
 }
 
@@ -200,6 +205,12 @@ func printExaminerResult(stdout, stderr io.Writer, result examiner.Result) {
 		fmt.Fprintln(stdout, string(data))
 	}
 	fmt.Fprintf(stdout, "vendor: %s\n", result.Vendor)
+	if result.Guidebook != "" {
+		// Printed on every examination, confirmed or not: which document the
+		// examiner was driven from, and whether anybody vouched for it, decides
+		// how much this verdict is worth.
+		fmt.Fprintf(stdout, "guidebook: %s\n", result.Guidebook)
+	}
 	for _, outcome := range result.Verdict.Outcomes {
 		switch outcome.Verdict {
 		case examiner.Confirmed:
@@ -222,6 +233,10 @@ func printExaminerResult(stdout, stderr io.Writer, result examiner.Result) {
 		fmt.Fprintf(stderr, "refused: %s\n", result.Message)
 	}
 	if result.Verdict.ExaminationIncomplete {
+		if result.GuidebookWithheldPass {
+			fmt.Fprintf(stderr, "examination incomplete: nothing could be confirmed - %s\n", result.Guidebook)
+			return
+		}
 		fmt.Fprintf(stderr, "examination incomplete: %s\n", untestedClaims(result))
 	}
 }
