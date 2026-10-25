@@ -15,16 +15,23 @@ import (
 	"testing"
 
 	"github.com/inactdev/inspector/internal/container"
+	"github.com/inactdev/inspector/internal/dockertest"
 	"github.com/inactdev/inspector/internal/inspector"
 )
 
 // requireDocker skips a test that genuinely needs a live container
 // runtime, rather than failing on a machine without one.
+//
+// `alpine` is the image every one of those tests puts in the project's
+// .inspector.json, and a daemon that cannot obtain it is not a usable runtime
+// for them - so it is gated here rather than failing the end-to-end run for
+// something no part of inspector did.
 func requireDocker(t *testing.T) {
 	t.Helper()
 	if err := container.EnsureAvailable(); err != nil {
 		t.Skipf("no usable container runtime, skipping: %v", err)
 	}
+	dockertest.RequireImage(t, "alpine")
 }
 
 func requirePublicationPlatform(t *testing.T) {

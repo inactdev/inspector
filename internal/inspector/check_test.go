@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/inactdev/inspector/internal/container"
+	"github.com/inactdev/inspector/internal/dockertest"
 )
 
 // testTimeout is generous enough that no test below should ever hit it -
@@ -34,11 +35,17 @@ const gitTestImage = "buildpack-deps:bookworm-scm"
 // runtime, rather than failing on a machine without one - the same
 // tolerance LoadConfig's own permission-bit test already extends to a
 // root-run suite.
+//
+// A reachable daemon that cannot obtain testImage is no more usable to these
+// tests than no daemon, so the image is part of the same gate; the few tests
+// that run gitTestImage ask for that one as well. Getting it here also keeps a
+// cold image's download out of the short deadlines the timeout tests assert on.
 func requireDocker(t *testing.T) {
 	t.Helper()
 	if err := container.EnsureAvailable(); err != nil {
 		t.Skipf("no usable container runtime, skipping: %v", err)
 	}
+	dockertest.RequireImage(t, testImage)
 }
 
 // requireInternet skips a test that needs to actually reach the outside
@@ -490,6 +497,7 @@ func TestRunCheck_GitWorksFromASubdirectoryOfTheWorkspace(t *testing.T) {
 	// from any subdirectory would be told it is not in a repository,
 	// and go red for a reason that has nothing to do with the code.
 	requireDocker(t)
+	dockertest.RequireImage(t, gitTestImage)
 	dir := newTestWorktree(t, map[string]string{"pkg/a.txt": "one\n"})
 
 	result, err := runCheck(t, dir, "cd pkg && git rev-parse --show-toplevel && git log --oneline -1", gitTestImage, container.Limits{}, false, testTimeout, io.Discard, io.Discard)

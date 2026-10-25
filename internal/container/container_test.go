@@ -9,17 +9,26 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/inactdev/inspector/internal/dockertest"
 )
 
 // requireDocker skips a test that genuinely needs a live container
 // runtime, rather than failing on a machine without one - the same
 // tolerance LoadConfig's own permission-bit test already extends to a
 // root-run suite (internal/inspector/config_test.go).
+//
+// `alpine` is what every live test in this package runs except the git ones,
+// which ask for gitImage themselves, and the one that deliberately names an
+// image nobody has. A daemon that cannot obtain the image is not a usable
+// runtime for them, so it is part of the same gate rather than an error
+// arriving mid-test.
 func requireDocker(t *testing.T) {
 	t.Helper()
 	if err := EnsureAvailable(); err != nil {
 		t.Skipf("no usable container runtime, skipping: %v", err)
 	}
+	dockertest.RequireImage(t, "alpine")
 }
 
 func TestEnsureAvailable_NotInstalled(t *testing.T) {

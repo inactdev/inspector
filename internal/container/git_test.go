@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/inactdev/inspector/internal/dockertest"
 )
 
 // gitImage is a small official library image whose whole purpose is
@@ -86,6 +88,9 @@ func git(t *testing.T, dir string, args ...string) {
 // its combined output.
 func runGitCheck(t *testing.T, worktree, command string) (string, error) {
 	t.Helper()
+	// gitImage rather than the alpine requireDocker already asked for: this
+	// helper is what knows which image these three tests run.
+	dockertest.RequireImage(t, gitImage)
 
 	mounts, err := ResolveGitMounts(worktree)
 	if err != nil {
