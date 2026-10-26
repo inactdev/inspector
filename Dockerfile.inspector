@@ -1,0 +1,22 @@
+# The image inspector runs this project's own check command in.
+#
+# Every project inspector judges commits one of these at its repository
+# root, under exactly this name, and inspector builds it at check time and
+# runs `script/check` inside the result (issue #47, see
+# notes/20261025-project-image-from-committed-dockerfile.md). It is also
+# meant to be the base of the box the work is written in, so what a check
+# runs against cannot differ from what the work was built against.
+#
+# cimg/go:1.22, not golang:1.22, because script/check needs more than a Go
+# toolchain: gcc and CGO_ENABLED=1 for `go test -race`, plus every shell
+# tool .github/scripts/required-tools.sh names - `jq` among them, which
+# golang:1.22 does not carry and which is a real runtime dependency of the
+# shipped inspector-gate script, not only of its tests. A replacement base
+# has to carry that whole list already: the check container has no
+# network, so nothing can be installed while the check runs.
+#
+# Nothing is installed here because there is nothing to install - this
+# project's Go module has no external dependencies at all (see go.mod).
+# A project that does have them installs them here, at build time, where
+# the network is still available.
+FROM cimg/go:1.22

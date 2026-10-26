@@ -25,11 +25,20 @@ const ConfigFileName = ".inspector.json"
 // protected.
 var ErrNoCheckCommand = errors.New("no check command configured")
 
-// ErrNoImage means the repo has no container image configured. The
-// check command runs inside a container built from it - inspector never
-// guesses one, the same way it never guesses the check command itself:
-// the project's own toolchain has to be in the image or nothing runs.
-var ErrNoImage = errors.New("no container image configured")
+// ErrRetiredImageKey means .inspector.json still names an "image". The
+// check container is built from the project's own committed Dockerfile
+// (ProjectDockerfileName) and from nothing else, so a configured image
+// name no longer selects anything. Refused rather than ignored: a config
+// naming one image while the check runs in another is exactly the
+// worker-box/judge-box divergence issue #47 closes.
+var ErrRetiredImageKey = errors.New("the \"image\" field has been retired")
+
+// ErrRetiredNetworkKey means .inspector.json still carries the "network"
+// opt-in, with any value. The check container runs with no network and
+// there is nothing left to opt into (issue #47): a project's dependencies
+// belong in the image its own Dockerfile builds, which is what the opt-in
+// was waiting for.
+var ErrRetiredNetworkKey = errors.New("the \"network\" opt-in has been retired")
 
 // DefaultTimeout bounds how long a check command may run when the
 // project doesn't set timeoutSeconds. SPEC.md has Fabrica invoking
@@ -46,18 +55,17 @@ type Config struct {
 	// inspector's - inspector never guesses at a test runner or build
 	// tool.
 	Check string `json:"check"`
-	// Image is the container image Check runs in - the project's own
-	// toolchain, declared the same way Check itself is. inspector builds
-	// nothing and ships nothing; see README.md.
-	Image string `json:"image"`
-	// Network, when true, gives the container network access. Default
-	// false: the check command can reach the bind-mounted repo and
-	// nothing else. This is a deliberately temporary opt-in - Fabrica's
-	// own check currently needs it for `npm ci` when node_modules is
-	// missing - that goes away once projects commit their own image
-	// with dependencies baked in (issue #47); every run that uses it
-	// logs as much. See README.md.
-	Network bool `json:"network,omitempty"`
+	// Image and Network are two retired fields, kept here only so a
+	// config that still carries either is refused by name rather than
+	// read past in silence. The image the check runs in now comes from
+	// the project's own committed ProjectDockerfileName and from nothing
+	// else, and the container has no network with no way to ask for one
+	// (issue #47). json.RawMessage rather than their old types because
+	// what is refused is the key's presence, whatever its value: a
+	// "network": false that inspector accepted would read as a setting
+	// that still does something.
+	Image   json.RawMessage `json:"image,omitempty"`
+	Network json.RawMessage `json:"network,omitempty"`
 	// Memory, CPUs, and PIDsLimit bound the resources the check
 	// container's cgroup may use - docker run's own --memory, --cpus,
 	// and --pids-limit values. Empty/zero (the default) leaves
@@ -105,8 +113,9 @@ func (c *Config) Limits() container.Limits {
 }
 
 // LoadConfig reads ConfigFileName from repoRoot. It returns
-// ErrNoCheckCommand if the file is absent or names an empty check command,
-// and ErrNoImage if it names an empty (or absent) image.
+// ErrNoCheckCommand if the file is absent or names an empty check
+// command, and ErrRetiredImageKey or ErrRetiredNetworkKey if it still
+// carries one of the two fields issue #47 retired.
 func LoadConfig(repoRoot string) (*Config, error) {
 	path := filepath.Join(repoRoot, ConfigFileName)
 	data, err := os.ReadFile(path)
@@ -124,8 +133,11 @@ func LoadConfig(repoRoot string) (*Config, error) {
 	if strings.TrimSpace(cfg.Check) == "" {
 		return nil, ErrNoCheckCommand
 	}
-	if strings.TrimSpace(cfg.Image) == "" {
-		return nil, ErrNoImage
+	if cfg.Image != nil {
+		return nil, ErrRetiredImageKey
+	}
+	if cfg.Network != nil {
+		return nil, ErrRetiredNetworkKey
 	}
 	return &cfg, nil
 }

@@ -133,22 +133,24 @@ func TestNew_SourceMountsAreReadOnlyAndWritableMountsAreNot(t *testing.T) {
 	}
 }
 
-func TestNew_NoNetworkByDefault(t *testing.T) {
-	cmd := New(context.Background(), Run{WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine"})
-
-	if !strings.Contains(strings.Join(cmd.Args, " "), "--network none") {
-		t.Fatalf("docker args = %q, want --network none by default", cmd.Args)
+// TestNew_NetworkIsAlwaysDenied is the whole of issue #47's last
+// requirement at this layer: there is no field, flag or config key left
+// that produces a Run without --network none. Asserted over every shape
+// of Run this package builds, so adding an opt-in back cannot pass by
+// only touching one of them.
+func TestNew_NetworkIsAlwaysDenied(t *testing.T) {
+	runs := map[string]Run{
+		"bare":       {WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine"},
+		"with user":  {WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine", User: "1000:1000"},
+		"with mount": {WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine", SourceMounts: []Mount{{Source: "/host/repo/cmd", Target: WorkspaceDir + "/cmd"}}},
+		"with limits": {WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine",
+			Limits: Limits{Memory: "4g", CPUs: "1.5", PIDsLimit: 128}},
 	}
-}
-
-func TestNew_NetworkOptsIn(t *testing.T) {
-	// Temporary opt-in: keep honoring it until projects commit their
-	// own image with dependencies baked in (issue #47). See
-	// Run.Network's own doc comment.
-	cmd := New(context.Background(), Run{WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine", Network: true})
-
-	if strings.Contains(strings.Join(cmd.Args, " "), "--network none") {
-		t.Fatalf("docker args = %q, should not restrict network when Network is true", cmd.Args)
+	for name, run := range runs {
+		cmd := New(context.Background(), run)
+		if !strings.Contains(strings.Join(cmd.Args, " "), "--network none") {
+			t.Fatalf("%s: docker args = %q, want --network none with no way to opt out", name, cmd.Args)
+		}
 	}
 }
 

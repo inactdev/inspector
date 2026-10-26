@@ -113,10 +113,10 @@ type Run struct {
 	ReadOnlyMounts []Mount
 	// Command is run with `sh -c` inside the container, from WorkspaceDir.
 	Command string
-	// Image is the project's own container image, declared in
-	// .inspector.json - inspector never guesses one, the same way it
-	// never guesses a check command: the project's toolchain has to be
-	// in it or nothing runs.
+	// Image is the project's own container image, built from the
+	// Dockerfile the project commits for it - inspector never guesses
+	// one, the same way it never guesses a check command: the project's
+	// toolchain has to be in it or nothing runs. See BuildProjectImage.
 	Image string
 	// Limits bounds the container's memory, CPU, and process count.
 	// See Limits and the Default* constants above.
@@ -125,13 +125,6 @@ type Run struct {
 	// runs as. Empty leaves the image's own default user (commonly
 	// root). See ResolveUser - New never guesses this on its own.
 	User string
-	// Network, when true, gives the container network access instead
-	// of the default `--network none`. This is a deliberately
-	// temporary opt-in (see .inspector.json's "network" field and
-	// check.go's RunCheck): it exists only until projects commit their
-	// own image with dependencies baked in (issue #47), at which point
-	// nothing inside the container will need the network for anything.
-	Network bool
 }
 
 // Cmd is one containerized run in progress: the *exec.Cmd for the
@@ -262,14 +255,15 @@ func New(ctx context.Context, r Run) *Cmd {
 		args = append(args, "--user", r.User, "-e", "HOME=/tmp")
 	}
 
-	// Denied by default - the same containment this package exists
-	// for otherwise would stop at the repo's own files and let the
-	// network stand between a hostile check and exfiltrating whatever
-	// it found. Network opts out of that; see its own doc comment for
-	// why that opt-in is temporary.
-	if !r.Network {
-		args = append(args, "--network", "none")
-	}
+	// Denied, with no opt-in to grant it (issue #47): the same
+	// containment this package exists for would otherwise stop at the
+	// repo's own files and let the network stand between a hostile check
+	// and exfiltrating whatever it found. A check command needs nothing
+	// from the network now that the project's dependencies are baked
+	// into the image BuildProjectImage builds from the project's own
+	// committed Dockerfile - installing them at check time is what the
+	// retired "network": true opt-in existed for.
+	args = append(args, "--network", "none")
 
 	args = append(args, r.Image, "sh", "-c", r.Command)
 	return NewCommand(ctx, "inspector-check-", args...)

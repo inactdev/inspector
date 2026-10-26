@@ -20,18 +20,25 @@ const LatestReportName = "latest.json"
 
 // Report is the local record of one inspector run.
 type Report struct {
-	Commit       string    `json:"commit"`
-	Repo         string    `json:"repo"`
-	Claim        string    `json:"claim,omitempty"`
-	CheckCommand string    `json:"checkCommand"`
-	Outcome      Outcome   `json:"outcome"`
-	StartedAt    time.Time `json:"startedAt"`
-	FinishedAt   time.Time `json:"finishedAt"`
-	DurationMS   int64     `json:"durationMs"`
-	ExitCode     int       `json:"exitCode"`
-	Signal       string    `json:"signal,omitempty"`
-	TimedOut     bool      `json:"timedOut,omitempty"`
-	Output       string    `json:"output"`
+	Commit       string  `json:"commit"`
+	Repo         string  `json:"repo"`
+	Claim        string  `json:"claim,omitempty"`
+	CheckCommand string  `json:"checkCommand"`
+	Outcome      Outcome `json:"outcome"`
+	// Image is the local tag of the container image this check ran in,
+	// built from the project's own ProjectDockerfileName, and ImageBases
+	// names each base that file pulled in with the image ID docker
+	// resolved it to. Together they are what the tag is derived from, and
+	// the only record of which environment judged this commit.
+	Image      string            `json:"image,omitempty"`
+	ImageBases map[string]string `json:"imageBases,omitempty"`
+	StartedAt  time.Time         `json:"startedAt"`
+	FinishedAt time.Time         `json:"finishedAt"`
+	DurationMS int64             `json:"durationMs"`
+	ExitCode   int               `json:"exitCode"`
+	Signal     string            `json:"signal,omitempty"`
+	TimedOut   bool              `json:"timedOut,omitempty"`
+	Output     string            `json:"output"`
 	// PullRequestURL is set after the fact, once a green run has opened
 	// or found the pull request for its published branch - WriteReport
 	// runs before that step even exists, so RecordPullRequestURL is what
@@ -114,6 +121,33 @@ func WriteReport(repoRoot string, r Report) (string, error) {
 		return "", fmt.Errorf("writing %s: %w", latest, err)
 	}
 
+	return path, nil
+}
+
+// ImageBuildLogName holds the output of the most recent check-image
+// build that failed, under RunsDirName with every other note this run
+// leaves behind. Overwritten rather than accumulated, like
+// LatestReportName: a build that failed is acted on now, and the one
+// before it has already been superseded by the attempt that replaced it.
+const ImageBuildLogName = "image-build.log"
+
+// WriteImageBuildLog keeps docker's own output from a failed check-image
+// build, which is the only thing that says why it failed, and returns the
+// path it was written to. Notes only, never authority - the refusal
+// itself is the result; this is what a human reads to fix it.
+func WriteImageBuildLog(repoRoot, dockerfile, log string) (string, error) {
+	dir := filepath.Join(repoRoot, RunsDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating %s: %w", dir, err)
+	}
+	if err := ensureIgnored(dir); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, ImageBuildLogName)
+	header := fmt.Sprintf("# docker build of %s failed; its output follows.\n", dockerfile)
+	if err := os.WriteFile(path, []byte(header+log), 0o644); err != nil {
+		return "", fmt.Errorf("writing %s: %w", path, err)
+	}
 	return path, nil
 }
 

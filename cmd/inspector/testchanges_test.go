@@ -496,7 +496,7 @@ func TestCLI_GreenRecordsAndPrintsThePassingTestReview(t *testing.T) {
 	requireDocker(t)
 	dir, _ := newRepoWithRecordedBase(t,
 		map[string]string{
-			".inspector.json": `{"check": "true", "image": "alpine", "testPaths": ["*_test.go"]}`,
+			".inspector.json": `{"check": "true", "testPaths": ["*_test.go"]}`,
 			"feature_test.go": featureTest,
 		},
 		func(dir string) {

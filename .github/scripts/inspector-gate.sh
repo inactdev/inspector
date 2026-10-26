@@ -55,8 +55,15 @@ set -euo pipefail
 
 # ALWAYS_PROTECTED protects the gate's own definition regardless of what a
 # project's .inspector.json adds under protectedPaths: the workflow files,
-# this script (and any sibling under .github/scripts), and .inspector.json
-# itself, which could otherwise edit its own protectedPaths list away.
+# this script (and any sibling under .github/scripts), .inspector.json
+# itself, which could otherwise edit its own protectedPaths list away, and
+# Dockerfile.inspector, which is the environment the check command is run
+# in. That last one is here because inspector#47 moved it: the image used
+# to be named by .inspector.json's "image" field, already covered by the
+# line below, and leaving its replacement unprotected would have quietly
+# narrowed what this list covers. Swapping the box a check runs in is
+# another way to make a failing check stop failing, which is exactly what
+# SPEC.md section 8 is about.
 #
 # A project's own check command is NOT derived automatically from
 # .inspector.json's "check" field and added here - that was tried and
@@ -70,7 +77,8 @@ set -euo pipefail
 # it knows the concrete value at install time and can write it where a
 # human sees and confirms it. Guessing at runtime is the wrong layer.
 ALWAYS_PROTECTED='.github/**
-.inspector.json'
+.inspector.json
+Dockerfile.inspector'
 
 # status_verdict prints two tab-separated fields for one context's status
 # state: "green" or "red", then a reason (empty for green). Absent (empty

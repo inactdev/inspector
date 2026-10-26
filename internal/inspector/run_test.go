@@ -20,7 +20,7 @@ func runOpts(dir string) (Options, *bytes.Buffer, *bytes.Buffer) {
 func TestRun_Green(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "true", "image": "alpine"}`,
+		ConfigFileName: `{"check": "true"}`,
 	})
 	opts, _, _ := runOpts(dir)
 
@@ -42,7 +42,7 @@ func TestRun_Green(t *testing.T) {
 func TestRun_Red(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "false", "image": "alpine"}`,
+		ConfigFileName: `{"check": "false"}`,
 	})
 	opts, _, _ := runOpts(dir)
 
@@ -61,7 +61,7 @@ func TestRun_Red(t *testing.T) {
 func TestRun_TimedOutCheckIsRefusedNotRed(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "sleep 30", "image": "alpine", "timeoutSeconds": 1}`,
+		ConfigFileName: `{"check": "sleep 30", "timeoutSeconds": 1}`,
 	})
 	opts, _, _ := runOpts(dir)
 
@@ -94,7 +94,7 @@ func TestRun_TimedOutCheckWhoseContainerDockerRefusedToStop(t *testing.T) {
 	// situation where knowing the truth matters.
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "sleep 30", "image": "alpine", "timeoutSeconds": 1}`,
+		ConfigFileName: `{"check": "sleep 30", "timeoutSeconds": 1}`,
 	})
 	failingDockerKill(t)
 	opts, _, stderr := runOpts(dir)
@@ -127,7 +127,7 @@ func TestRun_TimedOutCheckWhoseContainerDockerRefusedToStop(t *testing.T) {
 func TestRun_DefaultTimeoutAppliesWhenUnconfigured(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "true", "image": "alpine"}`,
+		ConfigFileName: `{"check": "true"}`,
 	})
 	opts, _, _ := runOpts(dir)
 
@@ -156,7 +156,7 @@ func TestRun_SignalKilledCheckIsRefusedNotRed(t *testing.T) {
 	// the machine ran out of memory.
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "sh -c 'kill -9 $$' && true", "image": "alpine"}`,
+		ConfigFileName: `{"check": "sh -c 'kill -9 $$' && true"}`,
 	})
 	opts, _, _ := runOpts(dir)
 
@@ -182,7 +182,7 @@ func TestRun_SignalKilledCheckIsRefusedNotRed(t *testing.T) {
 func TestRun_ReportWriteFailureKeepsVerdict(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "true", "image": "alpine"}`,
+		ConfigFileName: `{"check": "true"}`,
 	})
 	// Occupy RunsDirName with a plain file, so WriteReport's MkdirAll
 	// fails - portable across privilege levels, unlike a permission-bit
@@ -214,7 +214,7 @@ func TestRun_ConsecutiveRunsBothSucceed(t *testing.T) {
 	// moment inspector writes its first report.
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "true", "image": "alpine"}`,
+		ConfigFileName: `{"check": "true"}`,
 	})
 
 	for i := 0; i < 2; i++ {
@@ -248,9 +248,40 @@ func TestRun_RefusesWithoutConfig(t *testing.T) {
 	}
 }
 
-func TestRun_RefusesWithoutImage(t *testing.T) {
+// TestRun_RefusesWithoutACommittedDockerfile is the issue #47
+// requirement: a project with no committed image to build from is
+// refused, by the name of the file it has to add. No docker needed - this
+// refusal lands before any container work.
+func TestRun_RefusesWithoutACommittedDockerfile(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{
 		ConfigFileName: `{"check": "true"}`,
+	})
+	runGitT(t, dir, "rm", "-q", ProjectDockerfileName)
+	runGitT(t, dir, "commit", "-q", "-m", "drop the check image")
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused", result.Outcome)
+	}
+	if !strings.Contains(result.Message, ProjectDockerfileName) {
+		t.Fatalf("refusal message should name the file to add, got: %s", result.Message)
+	}
+	if result.ReportPath != "" {
+		t.Fatal("a refusal that never ran a check should not write a report")
+	}
+}
+
+// A Dockerfile that is present but gitignored is the one way a file can
+// survive the clean-tree check without being in the commit, which would
+// leave the image the check ran in invisible to anyone reviewing the work.
+func TestRun_RefusesAnUncommittedDockerfile(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{
+		ConfigFileName: `{"check": "true"}`,
+		".gitignore":   ProjectDockerfileName + "\n",
 	})
 	opts, _, _ := runOpts(dir)
 
@@ -261,11 +292,89 @@ func TestRun_RefusesWithoutImage(t *testing.T) {
 	if result.Outcome != Refused {
 		t.Fatalf("Outcome = %v, want Refused", result.Outcome)
 	}
-	if !strings.Contains(result.Message, "image") {
-		t.Fatalf("refusal message should mention the missing image, got: %s", result.Message)
+	if !strings.Contains(result.Message, "does not track it") {
+		t.Fatalf("refusal message should say the file is not committed, got: %s", result.Message)
 	}
-	if !strings.Contains(result.Message, ConfigFileName) {
-		t.Fatalf("refusal message should name %s, got: %s", ConfigFileName, result.Message)
+}
+
+// Both retired keys are refused rather than ignored, naming the file that
+// replaced them (issue #47). A config that still carries one describes a
+// run inspector will not perform.
+func TestRun_RefusesRetiredConfigKeys(t *testing.T) {
+	cases := map[string]struct {
+		config string
+		want   string
+	}{
+		"image":   {`{"check": "true", "image": "alpine"}`, "\"image\""},
+		"network": {`{"check": "true", "network": true}`, "\"network\""},
+	}
+	for name, tc := range cases {
+		dir := newTestRepo(t, map[string]string{ConfigFileName: tc.config})
+		opts, _, _ := runOpts(dir)
+
+		result, err := Run(opts)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if result.Outcome != Refused {
+			t.Fatalf("%s: Outcome = %v, want Refused", name, result.Outcome)
+		}
+		if !strings.Contains(result.Message, tc.want) || !strings.Contains(result.Message, ProjectDockerfileName) {
+			t.Fatalf("%s: refusal should name the retired key and the file that replaced it, got: %s", name, result.Message)
+		}
+	}
+}
+
+// A Dockerfile that does not build is a refusal with its log kept, never
+// a red: a project whose check environment will not build has not been
+// found wrong about its code.
+func TestRun_RefusesWhenTheCheckImageDoesNotBuild(t *testing.T) {
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{
+		ConfigFileName:        `{"check": "true"}`,
+		ProjectDockerfileName: "FROM " + testImage + "\nRUN echo this-build-fails-on-purpose >&2; exit 3\n",
+	})
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused (message: %s)", result.Outcome, result.Message)
+	}
+	if !strings.Contains(result.Message, ProjectDockerfileName) {
+		t.Fatalf("refusal should name the file that failed to build, got: %s", result.Message)
+	}
+	logPath := filepath.Join(dir, RunsDirName, ImageBuildLogName)
+	if !strings.Contains(result.Message, logPath) {
+		t.Fatalf("refusal should name where the build log was kept, got: %s", result.Message)
+	}
+	if !strings.Contains(readFile(t, logPath), "this-build-fails-on-purpose") {
+		t.Fatalf("%s should hold docker's own output for the failed build", logPath)
+	}
+}
+
+// The report names the image the check ran in, so a reader can tell which
+// environment judged this commit rather than only which command ran.
+func TestRun_ReportNamesTheCheckImage(t *testing.T) {
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{ConfigFileName: `{"check": "true"}`})
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Green {
+		t.Fatalf("Outcome = %v, want Green (message: %s)", result.Outcome, result.Message)
+	}
+	data := readFile(t, result.ReportPath)
+	if !strings.Contains(data, container.ProjectImageRepository+":") {
+		t.Fatalf("report should name the built check image, got: %s", data)
+	}
+	if !strings.Contains(data, testImage) {
+		t.Fatalf("report should name the base image the check image was built from, got: %s", data)
 	}
 }
 
@@ -276,7 +385,7 @@ func TestRun_RefusesWithoutContainerRuntime(t *testing.T) {
 	// to the container-availability check, so the reduced PATH below
 	// keeps a git symlink and drops everything else - docker included.
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "true", "image": "alpine"}`,
+		ConfigFileName: `{"check": "true"}`,
 	})
 	opts, _, _ := runOpts(dir)
 
@@ -304,7 +413,7 @@ func TestRun_RefusesWithoutContainerRuntime(t *testing.T) {
 
 func TestRun_RefusesOnDirtyWorkingTree(t *testing.T) {
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "true", "image": "alpine"}`,
+		ConfigFileName: `{"check": "true"}`,
 	})
 	writeFiles(t, dir, map[string]string{"dirty.txt": "uncommitted"})
 	opts, _, _ := runOpts(dir)
@@ -337,7 +446,7 @@ func TestRun_RefusesOnNonRepo(t *testing.T) {
 func TestRun_RecordsClaimInReport(t *testing.T) {
 	requireDocker(t)
 	dir := newTestRepo(t, map[string]string{
-		ConfigFileName: `{"check": "true", "image": "alpine"}`,
+		ConfigFileName: `{"check": "true"}`,
 	})
 	opts, _, _ := runOpts(dir)
 	opts.Claim = "implemented the login flow"
@@ -360,7 +469,8 @@ func TestRun_GreenFromLinkedWorktreeWhoseCheckUsesGit(t *testing.T) {
 	requireDocker(t)
 	dockertest.RequireImage(t, gitTestImage)
 	dir := newTestWorktree(t, map[string]string{
-		ConfigFileName: `{"check": "git log --oneline -1 && git status --porcelain", "image": "` + gitTestImage + `"}`,
+		ConfigFileName:        `{"check": "git log --oneline -1 && git status --porcelain"}`,
+		ProjectDockerfileName: "FROM " + gitTestImage + "\n",
 	})
 	opts, _, _ := runOpts(dir)
 
@@ -382,7 +492,7 @@ func TestRun_RefusesWhenTheGitDirCannotBeMadeAvailable(t *testing.T) {
 	// (which ignores unknown extensions at format version 0) works.
 	requireDocker(t)
 	dir := newTestWorktree(t, map[string]string{
-		ConfigFileName: `{"check": "true", "image": "alpine"}`,
+		ConfigFileName: `{"check": "true"}`,
 	})
 	runGitT(t, dir, "config", "extensions.inspectorTest", "1")
 	opts, _, _ := runOpts(dir)

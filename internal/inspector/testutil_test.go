@@ -7,8 +7,17 @@ import (
 	"testing"
 )
 
+// defaultTestDockerfile is the check image a test repo gets when the test
+// does not name its own. Every project inspector judges has to commit a
+// ProjectDockerfileName for its check command to run in (issue #47), and
+// almost none of the tests below is about which image that is - so this
+// keeps them stating only what they are actually testing. The few that
+// care pass their own, and the one that tests its absence removes it.
+const defaultTestDockerfile = "FROM " + testImage + "\n"
+
 // newTestRepo creates a fresh git repo in a temp dir with one commit
-// containing the given files, and returns the repo root.
+// containing the given files - plus a default ProjectDockerfileName when
+// the caller named none - and returns the repo root.
 func newTestRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -17,6 +26,14 @@ func newTestRepo(t *testing.T, files map[string]string) string {
 	runGitT(t, dir, "config", "user.email", "test@example.com")
 	runGitT(t, dir, "config", "user.name", "Test")
 
+	if _, named := files[ProjectDockerfileName]; !named {
+		withDockerfile := make(map[string]string, len(files)+1)
+		for name, content := range files {
+			withDockerfile[name] = content
+		}
+		withDockerfile[ProjectDockerfileName] = defaultTestDockerfile
+		files = withDockerfile
+	}
 	writeFiles(t, dir, files)
 
 	runGitT(t, dir, "add", "-A")
