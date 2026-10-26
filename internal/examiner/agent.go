@@ -89,9 +89,21 @@ func RunAgent(ctx context.Context, opts AgentOptions) (runErr error) {
 		return fmt.Errorf("examiner output directory: %w", err)
 	}
 
+	// Read from the feature map the agent was given, before any capability is
+	// proposed: the confirmation state belongs to the document this run was
+	// actually driven from, never to a separate claim about it.
+	guidebook := ParseGuidebookConfirmation(featureMap)
+
 	initial := fmt.Sprintf("REQUEST (derive the requested capabilities from this, never a worker checklist):\n%s\n\nFEATURE MAP (features and how to drive the running app):\n%s\n\nALWAYS-TRUE LIST (project invariants):\n%s\n\nCHANGED FILE NAMES (worker output, names only):\n%s\n\nPRE-TASK CHANGED TESTS (from the task starting commit, never worker content):\n%s", request, featureMap, alwaysTrue, changedFilesData, baseTestsData)
+	if guidebook.Unconfirmed() {
+		// Told to the model as well as enforced below, so it spends its budget
+		// knowing what the run can and cannot establish rather than reporting a
+		// pass the record will not grant.
+		initial += fmt.Sprintf("\n\nGUIDEBOOK STATE: the feature map above is an UNCONFIRMED guidebook (%s). Examine as usual and report honestly, but note that Inspector will record every capability you would confirm as could_not_be_tested, because nobody has vouched for these instructions. A bug you find is still a bug.", guidebook.Reason)
+	}
 	messages := []llm.Message{{Role: "user", Content: []llm.Block{{Type: llm.Text, Text: initial}}}}
 	record := NewExaminationRecord(opts.Budget)
+	record.Guidebook = guidebook
 	defer func() {
 		if runErr == nil || len(record.Capabilities) == 0 {
 			return

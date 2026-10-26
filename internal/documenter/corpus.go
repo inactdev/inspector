@@ -2,6 +2,7 @@ package documenter
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -40,6 +41,12 @@ const (
 	// by more than this is a pointer nobody can follow.
 	claimLineSlack = 2
 )
+
+// ErrNoCorpus means the working tree held no readable tracked text file at
+// all. It is a sentinel so a second caller over the same corpus - the guidebook
+// generator reads the project's tracked text too - can refuse in its own words
+// instead of reporting a documentation problem it was never asked about.
+var ErrNoCorpus = errors.New("no readable tracked text file")
 
 // SkipReason names why one tracked file is not in the corpus.
 type SkipReason string
@@ -143,7 +150,7 @@ func LoadCorpus(repoPath string) (*Corpus, error) {
 		corpus.files = append(corpus.files, corpusFile{path: path, lines: splitLines(content)})
 	}
 	if len(corpus.files) == 0 {
-		return nil, fmt.Errorf("found no readable tracked text file under %s, so there is no documentation to re-read; asking whether the change falsified something would report nothing found when nothing was looked at", root)
+		return nil, fmt.Errorf("found %w under %s, so there is no documentation to re-read; asking whether the change falsified something would report nothing found when nothing was looked at", ErrNoCorpus, root)
 	}
 	return corpus, nil
 }
@@ -178,6 +185,31 @@ func (c *Corpus) Root() string { return c.root }
 func (c *Corpus) Has(path string) bool {
 	_, ok := c.index[path]
 	return ok
+}
+
+// Paths is every corpus file, in corpus order, for a caller that walks the
+// project's own text rather than searching it - what the guidebook generator's
+// deterministic fact extraction does before any model sees anything.
+func (c *Corpus) Paths() []string {
+	paths := make([]string, 0, len(c.files))
+	for _, file := range c.files {
+		paths = append(paths, file.path)
+	}
+	return paths
+}
+
+// Lines is one corpus file's text, already split, with the number a reader
+// cites being the index plus one. It returns a copy: the corpus is read-only to
+// everything downstream of LoadCorpus, and handing out its own slice would make
+// that a convention rather than a fact.
+func (c *Corpus) Lines(path string) ([]string, bool) {
+	position, ok := c.index[path]
+	if !ok {
+		return nil, false
+	}
+	lines := make([]string, len(c.files[position].lines))
+	copy(lines, c.files[position].lines)
+	return lines, true
 }
 
 // Summary is what this run read, and what it did not.

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/inactdev/inspector/internal/container"
+	"github.com/inactdev/inspector/internal/dockertest"
 )
 
 func runOpts(dir string) (Options, *bytes.Buffer, *bytes.Buffer) {
@@ -357,6 +358,7 @@ func TestRun_GreenFromLinkedWorktreeWhoseCheckUsesGit(t *testing.T) {
 	// git call a check made failed and the run came back red for a
 	// reason that had nothing to do with the code.
 	requireDocker(t)
+	dockertest.RequireImage(t, gitTestImage)
 	dir := newTestWorktree(t, map[string]string{
 		ConfigFileName: `{"check": "git log --oneline -1 && git status --porcelain", "image": "` + gitTestImage + `"}`,
 	})

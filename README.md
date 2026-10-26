@@ -763,6 +763,78 @@ a completed review exits `0` whatever it found. One honest limit: the corpus is
 read from the working tree as it now stands, and inspector does not check that
 tree against `--diff`.
 
+## Guidebook
+
+`inspector guidebook` writes the examiner's operating instructions for a
+project: what the app's features are, how to start it, how to drive each
+feature, how to observe the result, and what cannot be tested here.
+
+It exists because of the gap the examiner's own restriction creates. The
+examiner is given a running app and no source, which is the whole mechanism -
+and an AI that cannot read the code also cannot discover from the code how to
+start the app, reach a screen, or call an endpoint. Without something teaching
+it, a fresh-eyes judge either guesses or reports "could not be tested" on
+everything. So this command has exactly the access the examiner is denied, and
+converts it into operating instructions once, at setup time. Same layer as the
+installer (issue #5): something that knows the concrete project and writes
+something a human sees and accepts.
+
+```
+ANTHROPIC_API_KEY=... inspector guidebook --repo /path/to/project --model claude-sonnet-4-5
+```
+
+**Facts first, and the facts stay in the output.** Inspector extracts the
+project's deterministic facts itself - the check command and image from
+`.inspector.json`, manifests, run scripts, compose services, published ports,
+Dockerfile directives, HTTP route registrations, CLI entry points, command
+flags, environment variables, listen addresses - each with the file and line it
+came from. The model then writes the prose over those facts and must cite them
+by id; inspector rejects an id it did not extract, and rejects a feature or a
+`Launch` section resting on nothing. The finished document ends with every fact
+listed verbatim, so a reader can tell what was read from what was concluded.
+
+That half needs no credential and writes nothing, which makes it worth running
+on its own:
+
+```
+inspector guidebook --facts-only --repo /path/to/project
+```
+
+**Inspector renders the document; the model never lays it out.** The file is
+`INSPECTOR-GUIDEBOOK.md` at the project root, beside `.inspector.json`,
+committed, with fixed sections in a fixed order - `Launch`, `Doctor`, `Drive`,
+`Evidence`, `Cleanup`, `Cannot be tested here` - then `Features`, one entry per
+user-facing feature with exactly four headings: sub-features, how to get to it
+from the user's point of view, driving it with the harness, and gotchas. A
+missing section is a refusal rather than a quiet gap, because each one answers a
+question the examiner would otherwise guess at. `Launch` and `Doctor` must carry
+a real fenced command: somebody executes those two before any judgment happens,
+and "start it the usual way" has never started anything.
+
+**Running it twice never costs you a confirmed guidebook.** The real file is
+created with `O_EXCL` and is never written over. When it already exists, this
+run leaves it exactly as it is and writes `INSPECTOR-GUIDEBOOK.draft.md` beside
+it for a person to diff; an earlier draft is replaced, and the command says so.
+A guidebook on disk may have been read, corrected and signed by hand, and a
+generator that discards that teaches everyone to stop confirming.
+
+**Nothing it writes is authority.** A generated guidebook's front matter says
+`confirmed: no` until a person follows every command in it and replaces that
+line with `confirmed: YYYY-MM-DD Their Name`. Until then the examiner records
+every capability driven from it as `could_not_be_tested` - see the Examiner
+section. The command says this loudly on stderr, because a guidebook mistaken
+for authority is the failure this whole shape exists to prevent.
+
+It posts no commit status and gates no merge, exits `0` when it wrote a
+guidebook and `2` when it refused, and never regenerates anything during an
+examination: generating reads the repository, examining does not, and the two
+are different commands.
+
+[examples/inspector/](examples/inspector/) is a generated guidebook for this
+repository - deliberately the hard case, since inspector has no HTTP interface
+at all - together with the trial that followed every command in it and the three
+things that trial corrected.
+
 ## Examiner
 
 `inspector examine` is the independent outcome judge. It derives scenarios from
@@ -773,8 +845,18 @@ The first version drives HTTP backends. It does not drive native iOS screens, so
 an Inkwell examination covers its backend only. The hand-written first
 [Inkwell feature map](examples/inkwell/EXAMINER_GUIDEBOOK.md) and
 [always-true list](examples/inkwell/INKWELL_ALWAYS_TRUE.md) are worked examples.
-Issue #22 will generate confirmed feature maps for other projects, and #24 owns
-the always-true list producer.
+The Guidebook section below owns generating a feature map for any project
+(issue #22); #24 owns the always-true list producer.
+
+`--feature-map` may be either a hand-written document like Inkwell's or a
+generated guidebook. A generated one carries a `confirmed` line, and the
+examiner reads it: until that line names a date and a person, every capability
+it would have confirmed is recorded as `could_not_be_tested`, the examination is
+marked incomplete, and the status is `error`. A found bug stays `failure` -
+unreviewed instructions are a reason to doubt a pass, never a reason to clear a
+failure. Which of the three states applied is printed as a `guidebook:` line and
+carried in the JSON verdict, so an examination that confirmed nothing because
+nobody signed its guidebook never reads like one that found the app wanting.
 
 Build the trusted runtime once, before examining. This build is local; the
 examination command never builds or pulls an image while it has app access and
@@ -1093,7 +1175,14 @@ judgment (issue #16, above) is built as well: `inspector document` asks both
 whether the change is described and - the question that gets missed - whether
 the change made something already written untrue, re-reading the project's own
 tracked text so it finds the stale claim in files the change never touched. It
-reports and posts no status. The gate-file sync (above) is built too: a
+reports and posts no status. The guidebook generator (issue #22, above) is
+built: `inspector guidebook` extracts a project's deterministic facts itself,
+has a model write the examiner's operating instructions over them, renders one
+fixed-shape `INSPECTOR-GUIDEBOOK.md` at the project root without ever
+overwriting a confirmed one, and leaves it unconfirmed until a person signs it -
+which the examiner now reads, recording every capability driven from an
+unsigned guidebook as could-not-be-tested. The gate-file sync (above) is built
+too: a
 change to either gate file on `main` opens or updates one pull request per
 listed consumer, carrying both files and naming the commit. Still to come: the
 installer - see
