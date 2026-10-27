@@ -103,6 +103,20 @@ Status context `inspector-always`, exit `0`/`1`/`2` mirroring the examiner.
   finding into a proposed line.
 - **It is not wired into `inspector run` or the gate.** It is its own command
   and its own status, the same way `inspector examine` is.
+- **It does not touch `.inspector.json`.** The list has to be named under that
+  file's `protectedPaths` to be protected at all, and that entry is the one
+  thing this delivery cannot add for itself: the config is the rules of the
+  game and stays human (fabrica#97 item 4). It is carried as a proposal in the
+  pull request description instead.
+
+  Which is also the sharp edge to know when a config key is retired in code:
+  removing the key has to be paired, in the same change, with removing it from
+  *this* repository's own `.inspector.json`. `Load` refuses a retired key by
+  name rather than ignoring it, so a config left naming one is refused before
+  any check runs - and because a worker branch may not edit that file, every
+  branch rebased onto such a default branch is blocked until a human removes
+  the key. Issue #47's `image` and `network` are the first two keys this
+  applies to.
 - Inspector's own `.inspector-always.json` is seeded with lines inferred from
   its tests and every one of them is `confirmed: false` with no falsifier, so
   Inspector's own `inspector-always` run reports `error` and names each line as
