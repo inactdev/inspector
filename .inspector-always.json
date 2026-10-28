@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "note": "Inspector's own always-true list: the promises this project makes, whichever task is in flight. Seeded by inference from the project's own tests (issue #24) and NOT yet confirmed by a person - every line is confirmed:false until the owner accepts it. No line carries a falsifier yet, so `inspector always` reports every one of them as not-runnable and posts error rather than success: check 3 brings up an HTTP app and mounts no repository, and Inspector is a command-line tool with no app to bring up. A line becomes runnable when it can be falsified from inside that boundary.",
+  "promises": [
+    {
+      "id": "check-never-runs-on-the-host",
+      "promise": "A project's check command never runs on the machine that invoked inspector. With no usable Docker, inspector refuses loudly instead of falling back to running it directly.",
+      "confirmed": false,
+      "source": "inferred from TestEnsureAvailable_NotInstalled and TestEnsureAvailable_Live"
+    },
+    {
+      "id": "check-cannot-modify-the-commit-it-judges",
+      "promise": "A check command cannot modify tracked source: every tracked top-level entry of the commit under check is mounted read-only, so a check that edits the code it is being judged on fails rather than manufacturing a pass.",
+      "confirmed": false,
+      "source": "inferred from TestCLI_GreenCheckCannotWriteTrackedCode and TestCLI_RedCheckCannotWriteTrackedCode"
+    },
+    {
+      "id": "check-container-cannot-read-host-git-credentials",
+      "promise": "A check command cannot read the host's git configuration. Only an allowlisted [core] and [extensions] copy reaches the container, so nothing in a git directory that could carry a credential is readable from inside it.",
+      "confirmed": false,
+      "source": "inferred from TestContainerCannotReadHostGitConfig"
+    },
+    {
+      "id": "check-container-cannot-commit",
+      "promise": "A check command cannot write to the repository's history: git is reachable for reading inside the container and a commit from there fails.",
+      "confirmed": false,
+      "source": "inferred from TestContainerCannotCommit"
+    },
+    {
+      "id": "a-timed-out-check-leaves-nothing-running",
+      "promise": "A check command that outlives its timeout is killed along with every process it forked, and whether that kill actually worked is read back from Docker rather than assumed.",
+      "confirmed": false,
+      "source": "inferred from TestNew_TimeoutKillsContainerAndDescendants and TestRunCheck_TimeoutKillsChildProcesses"
+    },
+    {
+      "id": "red-never-publishes",
+      "promise": "A red result publishes nothing: no staging push, no commit status, no branch update. The local report is the whole record.",
+      "confirmed": false,
+      "source": "inferred from TestCLI_RedDoesNotPublish and TestCLI_RedWithPRFlagsOpensNoPullRequest"
+    },
+    {
+      "id": "green-is-stamped-before-the-branch-moves",
+      "promise": "A green result is staged and stamped before the pull request branch moves, so the gate's first look at that branch already finds the status on its exact head commit.",
+      "confirmed": false,
+      "source": "inferred from TestCLI_GreenPublishesStatusBeforeBranch and TestPublishGreenLeavesStatusAndStagingWhenBranchMoveFails"
+    },
+    {
+      "id": "publication-branch-is-never-inferred",
+      "promise": "The branch inspector may move is always named explicitly by the caller, is never read from checkout or tracking state, and may never be the remote default branch.",
+      "confirmed": false,
+      "source": "inferred from TestCLI_RequiresExplicitPublicationBranch and TestPublishGreenRefusesRemoteDefaultBranch"
+    },
+    {
+      "id": "a-rewritten-history-is-never-replaced-unaccounted-for",
+      "promise": "A branch whose history was rewritten locally is only published when the caller names the exact remote commit being replaced, and a remote sitting anywhere else is refused with nothing pushed.",
+      "confirmed": false,
+      "source": "inferred from TestForcePushRefWithLeaseRefusesARemoteThatMoved and TestPublishGreenRefusesAnExpectedTipTheRemoteLeft"
+    },
+    {
+      "id": "a-status-is-recorded-only-on-a-confirmed-201",
+      "promise": "Only GitHub's documented 201 Created counts as a recorded status. A redirect, any other 2xx, or a server failure after the request was written is never reported as success, and an ambiguous one is reported as stamp sent, outcome unconfirmed.",
+      "confirmed": false,
+      "source": "inferred from TestPostCommitStatus_Non201SuccessIsNotSuccess, TestPostCommitStatus_RedirectIsNotSuccess and TestPostCommitStatus_ServerFailureIsUnconfirmed"
+    },
+    {
+      "id": "usage-is-never-a-verdict",
+      "promise": "Anything that is not a verdict attempt at all - help, an unrecognized flag, bad usage - exits 64, so no caller can mistake it for green, red, or a refusal.",
+      "confirmed": false,
+      "source": "inferred from TestCLI_HelpExitsWithUsageCode and TestCLI_UnknownFlagExitsWithUsageCode"
+    },
+    {
+      "id": "the-examiner-never-receives-worker-written-content",
+      "promise": "The examiner container receives only the permitted inputs - request text, feature map, always-true list, changed file names, pre-task test versions - and never the repository, an implementation diff, or any worker-written file content.",
+      "confirmed": false,
+      "source": "inferred from TestPrepareInputs_CopiesOnlyThePermittedInputs and TestNewContainerCommand_OnlyMountsAllowedResources"
+    },
+    {
+      "id": "a-capability-is-never-confirmed-without-evidence",
+      "promise": "No capability is marked confirmed without a successfully delivered, recorded observation, and an untested capability never hides a found bug.",
+      "confirmed": false,
+      "source": "inferred from TestExaminationRecord_RejectsConfirmationWithoutObservation and TestExaminationRecord_PreservesBugAndIncompleteMark"
+    },
+    {
+      "id": "a-reported-finding-points-inside-the-change",
+      "promise": "A reviewer finding names a file and a new-file line number from the supplied diff; a finding naming a file outside that diff is rejected rather than recorded.",
+      "confirmed": false,
+      "source": "inferred from TestParseUnifiedDiff_AnnotatesAddedAndContextLinesWithNewFileLineNumbers and the reviewer's out-of-diff rejection"
+    },
+    {
+      "id": "the-vendor-that-ran-is-never-silent",
+      "promise": "Whichever model vendor was asked - including the unflagged default - is recorded explicitly in the report and in the posted status, so the choice can never be read off as nothing.",
+      "confirmed": false,
+      "source": "inferred from TestExaminer_VendorIsNeverSilentInReportAndStamp and TestDescribe_NamesTheDefaultExplicitly"
+    },
+    {
+      "id": "no-unreviewable-bytes-under-the-agent-source-tree",
+      "promise": "No file under the sealed agent's source tree carries binary content, so nothing that runs inside that container is unreviewable by construction.",
+      "confirmed": false,
+      "source": "inferred from TestAgentSourceTreeHasNoBinaryFiles and TestAllowanceIsRefusedWhenItStopsEarningItsPlace"
+    }
+  ]
+}
