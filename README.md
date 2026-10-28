@@ -489,7 +489,7 @@ inspector --branch my-feature implemented the login flow
 
 Each run writes a small JSON report to `.inspector/runs/`, and copies it to
 `.inspector/latest.json`, so a red result is actionable without re-running: the
-command that ran, its exit code (or the signal that killed it), and its full
+command that ran, its exit code (or the signal that killed it), and its
 output. A run that judged the commit's changed tests also carries a
 `testReview` object - the vendor and model that judged, the status state and
 inspector's own derived verdict, and one entry per changed test naming its
@@ -498,6 +498,30 @@ inspector's own derived verdict, and one entry per changed test naming its
 a human, never authority. On its first run inspector
 writes `.inspector/.gitignore` containing `*`, so reports stay out of git without
 you editing anything; an existing `.inspector/.gitignore` is left alone.
+
+#### What a report keeps, and for how long
+
+Both bounds are fixed constants, documented here rather than configured -
+there is no config key and no flag for either.
+
+- **256 KiB of output per run**, as the first 64 KiB and the last 192 KiB. A
+  check command that prints more than that has the middle dropped, and the
+  report says so in two places: a marker line standing where the gap is,
+  naming how many bytes went, and the fields `outputTruncated`,
+  `outputDroppedBytes` and `outputTotalBytes` beside `output`. Inspector also
+  says it on stderr as the run ends. Nothing is trimmed silently, and the end
+  of the output is kept rather than the beginning, because the reason a check
+  failed is almost always the last thing it printed. The output streamed to
+  your terminal while the check ran is complete and unbounded; only the copy
+  inspector keeps is capped.
+- **The last 20 runs** in `.inspector/runs/`. Each new run deletes the older
+  ones once its own report is written, so the directory has a ceiling of
+  roughly 5 MB instead of growing for as long as the repo is checked.
+  Pruning never removes the run just written - the one whose commit status is
+  about to be posted - and only ever removes report files inspector itself
+  wrote, so anything else you keep in there is left alone. If a report cannot
+  be deleted, inspector says so as a loud warning and keeps the result; the
+  run's own report is unaffected.
 
 Because the report is notes and not authority, a report that can't be saved
 never changes the local check result. Inspector prints a loud warning to stderr
@@ -1403,6 +1427,10 @@ remaining parts of that issue are follow-ups: turning a confirmed check-2
 finding into a proposed line, and judging a change to the list against the
 request. The gate-file sync (above) is built too: a
 change to either gate file on `main` opens or updates one pull request per
-listed consumer, carrying both files and naming the commit. Still to come: the
+listed consumer, carrying both files and naming the commit. Issue #12 is built:
+one run's captured output is bounded to 256 KiB, head and tail with the dropped
+middle named, and `.inspector/runs/` keeps the last 20 runs instead of growing
+forever - see [What a report keeps, and for how long](#what-a-report-keeps-and-for-how-long).
+Still to come: the
 installer - see
 [SPEC.md](SPEC.md) and the repo's issues.

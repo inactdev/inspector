@@ -2,6 +2,8 @@ package inspector
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -56,6 +58,200 @@ func TestWriteReport(t *testing.T) {
 	}
 	if string(ignore) != "*\n" {
 		t.Fatalf("%s/.gitignore = %q, want %q", RunsDirName, string(ignore), "*\n")
+	}
+}
+
+// Issue #12: a report that holds only part of the output has to say so, in
+// the record as well as in the output itself.
+func TestWriteReportRecordsTruncation(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	path, err := WriteReport(dir, Report{
+		Commit:             "abc123def4567890",
+		Repo:               dir,
+		CheckCommand:       "script/check",
+		Outcome:            Red,
+		StartedAt:          now,
+		FinishedAt:         now.Add(time.Second),
+		ExitCode:           1,
+		Output:             "head\n[inspector: 900 bytes ... dropped here ...]\ntail",
+		OutputTruncated:    true,
+		OutputDroppedBytes: 900,
+		OutputTotalBytes:   1000,
+	})
+	if err != nil {
+		t.Fatalf("writing the report: %v", err)
+	}
+
+	for _, file := range []string{path, filepath.Join(dir, RunsDirName, LatestReportName)} {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("reading %s: %v", file, err)
+		}
+		var got Report
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("unmarshaling %s: %v", file, err)
+		}
+		if !got.OutputTruncated || got.OutputDroppedBytes != 900 || got.OutputTotalBytes != 1000 {
+			t.Fatalf("%s does not record the truncation: %+v", file, got)
+		}
+	}
+
+	// An ordinary run says nothing at all, rather than saying zero.
+	untruncated, err := WriteReport(dir, Report{Commit: "abc123def4567890", Repo: dir, FinishedAt: now.Add(2 * time.Second), Output: "all of it"})
+	if err != nil {
+		t.Fatalf("writing the untruncated report: %v", err)
+	}
+	data, err := os.ReadFile(untruncated)
+	if err != nil {
+		t.Fatalf("reading %s: %v", untruncated, err)
+	}
+	if strings.Contains(string(data), "outputTruncated") || strings.Contains(string(data), "outputDroppedBytes") {
+		t.Fatalf("an untruncated run's report talks about truncation:\n%s", data)
+	}
+}
+
+// Issue #12: .inspector/runs/ stops growing without limit.
+func TestWriteReportPrunesOldRuns(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	var written []string
+	for i := 0; i < MaxRunsKept+5; i++ {
+		path, err := WriteReport(dir, Report{
+			Commit:     fmt.Sprintf("%012d0000", i),
+			Repo:       dir,
+			Outcome:    Green,
+			FinishedAt: base.Add(time.Duration(i) * time.Second),
+		})
+		if err != nil {
+			t.Fatalf("writing report %d: %v", i, err)
+		}
+		written = append(written, path)
+	}
+
+	runs, err := os.ReadDir(filepath.Join(dir, RunsDirName, "runs"))
+	if err != nil {
+		t.Fatalf("reading the runs directory: %v", err)
+	}
+	if len(runs) != MaxRunsKept {
+		names := make([]string, 0, len(runs))
+		for _, entry := range runs {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("the runs directory holds %d reports, want %d: %v", len(runs), MaxRunsKept, names)
+	}
+	// The newest are what a human chasing a red result needs, and the
+	// very newest is the run whose status was just posted.
+	for _, path := range written[5:] {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("a kept report is gone: %v", err)
+		}
+	}
+	for _, path := range written[:5] {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("os.Stat(%s) = %v, want the oldest reports pruned", filepath.Base(path), err)
+		}
+	}
+}
+
+// Many runs inside one second are the hard case, because pruning frees a
+// name for writeNewFile to reuse: the twenty-second run of a second gets
+// the unsuffixed name back, which *looks* like the first run of that
+// second. The bound still has to hold and the run just written - the one
+// whose status is about to be posted - must still be there.
+func TestWriteReportPrunesSameSecondRunsWithoutLosingTheNewest(t *testing.T) {
+	dir := t.TempDir()
+	finished := time.Now()
+	runsDir := filepath.Join(dir, RunsDirName, "runs")
+
+	for i := 0; i < MaxRunsKept+5; i++ {
+		path, err := WriteReport(dir, Report{
+			Commit:     "abc123def4567890",
+			Repo:       dir,
+			Outcome:    Green,
+			FinishedAt: finished,
+		})
+		if err != nil {
+			t.Fatalf("writing report %d: %v", i, err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("run %d pruned the report it had just written - the commit status about to be posted would point at nothing: %v", i, err)
+		}
+		runs, err := os.ReadDir(runsDir)
+		if err != nil {
+			t.Fatalf("reading the runs directory: %v", err)
+		}
+		if len(runs) > MaxRunsKept {
+			t.Fatalf("after %d runs in one second the directory holds %d reports, want no more than %d", i+1, len(runs), MaxRunsKept)
+		}
+	}
+}
+
+// A prune that cannot delete has to name itself as that, because the
+// caller's one job with it is to keep the result it already has rather
+// than call the report lost.
+func TestPruneRunsReportsWhatItCouldNotRemove(t *testing.T) {
+	runsDir := t.TempDir()
+	for i := 0; i < MaxRunsKept+2; i++ {
+		name := fmt.Sprintf("%d-abc123def456.json", time.Now().Unix()-int64(i))
+		if err := os.WriteFile(filepath.Join(runsDir, name), []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("seeding %s: %v", name, err)
+		}
+	}
+	if err := os.Chmod(runsDir, 0o555); err != nil {
+		t.Fatalf("making the runs directory read-only: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(runsDir, 0o755) })
+
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, permission bits are not enforced")
+	}
+
+	err := pruneRuns(runsDir, MaxRunsKept, "")
+	if !errors.Is(err, ErrRunsNotPruned) {
+		t.Fatalf("pruneRuns() = %v, want it to wrap ErrRunsNotPruned", err)
+	}
+}
+
+// A gitignored directory is also somewhere a person may keep something of
+// their own. Pruning removes only the reports inspector wrote.
+func TestWriteReportPruningLeavesForeignFilesAlone(t *testing.T) {
+	dir := t.TempDir()
+	runsDir := filepath.Join(dir, RunsDirName, "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatalf("creating the runs directory: %v", err)
+	}
+	foreign := map[string]string{
+		"keep-this.json":     "{}\n",
+		"notes.txt":          "mine\n",
+		"not-a-stamp.json":   "{}\n",
+		"1730000000.json":    "{}\n",
+		"-1730000000.json":   "{}\n",
+		"1730000000-.json":   "{}\n",
+		"1730000000-a.jsonx": "{}\n",
+	}
+	for name, body := range foreign {
+		if err := os.WriteFile(filepath.Join(runsDir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("seeding %s: %v", name, err)
+		}
+	}
+
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < MaxRunsKept+5; i++ {
+		if _, err := WriteReport(dir, Report{
+			Commit:     fmt.Sprintf("%012d0000", i),
+			Repo:       dir,
+			Outcome:    Green,
+			FinishedAt: base.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("writing report %d: %v", i, err)
+		}
+	}
+
+	for name := range foreign {
+		if _, err := os.Stat(filepath.Join(runsDir, name)); err != nil {
+			t.Fatalf("pruning removed %s, which inspector did not write: %v", name, err)
+		}
 	}
 }
 
