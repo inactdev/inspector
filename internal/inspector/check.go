@@ -88,7 +88,11 @@ type CheckResult struct {
 // mid-run, an image that doesn't exist, and the like. A container that
 // could not be stopped at the deadline is not one of them: that stays a
 // TimedOut CheckResult, with docker's own refusal reported on stderr and
-// kept in Output.
+// kept in Output. A timeout that fires before Docker has even created
+// the container waits for it rather than letting the check command start
+// behind the kill (issue #66), so such a run can return later than its
+// own timeout - bounded, never indefinitely - and what stopping it took
+// is reported on stderr and in Output the same way.
 func RunCheck(repoRoot, command, image string, limits container.Limits, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
 	// os/exec copies stdout and stderr on separate goroutines unless the
 	// two writers are the identical value, and tee never is, so the shared
@@ -172,6 +176,18 @@ func RunCheck(repoRoot, command, image string, limits container.Limits, timeout 
 		// docker, not to command, so this cannot become a CheckResult:
 		// doing so would risk reading it as the check's own verdict.
 		return CheckResult{}, fmt.Errorf("starting the container: %w", err)
+	}
+
+	// What stopping this run took, when it took more than killing a
+	// container that was there and running: a deadline that fired while
+	// Docker was still creating the container was still enforced, but
+	// only because the kill path waited for that container to exist
+	// (issue #66), and a run where even waiting produced none had
+	// Docker's own client killed instead. Neither is a failure, and both
+	// are facts about this run that whoever reads its report is entitled
+	// to - so they go in the report as well as live on stderr.
+	if note := run.StopNote(); note != "" {
+		fmt.Fprintf(run.Stderr, "\ninspector: %s\n", note)
 	}
 
 	// A container inspector tried and failed to stop is the one outcome

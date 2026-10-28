@@ -266,8 +266,11 @@ there is no way to ask for unlimited here.
 The check command has 15 minutes to finish before inspector kills the
 container - including anything it started, like a compound command's children
 - and refuses rather than hanging forever, since SPEC.md has Fabrica invoking
-inspector unattended. If this project's checks legitimately need longer, set
-your own:
+inspector unattended. A deadline that falls in the seconds Docker can take to
+create that container in the first place waits for it and then stops it, so a
+run like that can take a little longer than its own timeout and says so in its
+output; what it will not do is kill nothing and let the check command run on.
+If this project's checks legitimately need longer, set your own:
 
 ```json
 {

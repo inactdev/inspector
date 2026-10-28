@@ -92,6 +92,33 @@ exec %q "$@"
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// slowDockerCreate puts a docker shim first on PATH that hands every
+// subcommand straight to the real docker, except that `run` waits the
+// given number of seconds first. That reproduces issue #66's race on any
+// machine: the deadline fires while docker is still creating the
+// container, rather than only on a runner cold enough to be that slow by
+// itself. Call it after requireDocker, so pulling the test image is not
+// what gets delayed.
+func slowDockerCreate(t *testing.T, seconds string) {
+	t.Helper()
+	realDocker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skipf("no docker on PATH, skipping: %v", err)
+	}
+
+	dir := t.TempDir()
+	shim := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "run" ]; then
+	sleep %s
+fi
+exec %q "$@"
+`, seconds, realDocker)
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("writing the docker shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // runCheck calls RunCheck and registers the run's writable workspace
 // (issue #27) for removal when the test ends, since every caller of
 // RunCheck owns that directory - run.go discards it once the report is
@@ -331,11 +358,58 @@ func TestRunCheck_TimeoutKillsChildProcesses(t *testing.T) {
 	}
 	marker := filepath.Join(result.Workspace.Root, "survived")
 
+	if result.KillFailed {
+		t.Fatalf("KillFailed = true - the timeout has to actually stop the check, not report that it could not: %+v", result)
+	}
+
 	// Give a leaked background process the time it would have needed
 	// to write the marker, then confirm it never did.
 	time.Sleep(3200 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("background child survived the timeout kill and wrote %s", marker)
+	}
+}
+
+func TestRunCheck_TimeoutBeforeTheContainerExistsStillStopsTheCheck(t *testing.T) {
+	// Issue #66, reproduced rather than waited for: on a cold machine
+	// `docker run` can take seconds to get as far as creating the
+	// container, and a deadline that fires inside that window used to
+	// leave `docker kill` with nothing to kill - the check command then
+	// started behind the kill and ran to completion past its deadline,
+	// which is what made TestRunCheck_TimeoutKillsChildProcesses flake.
+	// The shim makes that window a second wide every time.
+	requireDocker(t)
+	slowDockerCreate(t, "1")
+	dir := t.TempDir()
+	var stderr bytes.Buffer
+
+	result, err := runCheck(t, dir, "( sleep 3 && echo alive > survived ) & wait", testImage, container.Limits{}, 300*time.Millisecond, io.Discard, &stderr)
+	if err != nil {
+		t.Fatalf("a timeout in the creation window must stay a verdict, not become an infrastructure error: %v", err)
+	}
+	if !result.TimedOut {
+		t.Fatalf("TimedOut = false, want true - result = %+v", result)
+	}
+	if result.KillFailed {
+		t.Fatalf("KillFailed = true, want false - the container was created late, waited for and stopped: %+v", result)
+	}
+	if result.Workspace.Root == "" {
+		t.Fatal("RunCheck returned no workspace, so this test cannot tell whether the check command ran on past its deadline")
+	}
+	// What it took to stop the run belongs in the report and in front of
+	// whoever is watching it, since "stopped" and "stopped only because
+	// inspector waited for Docker to produce a container" are different
+	// facts about the same timeout.
+	if !strings.Contains(result.Output, "waited") {
+		t.Fatalf("Output = %q, want the late-created container reported in the run's own report", truncate(result.Output, 400))
+	}
+	if !strings.Contains(stderr.String(), "waited") {
+		t.Fatalf("stderr = %q, want the late-created container reported live", truncate(stderr.String(), 400))
+	}
+
+	time.Sleep(3200 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(result.Workspace.Root, "survived")); !os.IsNotExist(err) {
+		t.Fatal("the check command ran past its deadline: the container was created after the kill and never stopped")
 	}
 }
 
