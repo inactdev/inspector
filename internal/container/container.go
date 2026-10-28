@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -127,19 +128,41 @@ type Run struct {
 	User string
 }
 
+// containerCreateGrace bounds how long a cancelled run waits for Docker
+// to finish creating the container it was still working on when the
+// deadline fired, on top of whatever is left of the run's own deadline
+// (issue #66). Never indefinite: a creation that failed outright writes
+// no container id and never will. A var rather than a const only so this
+// package's own tests can shorten it; nothing changes it at runtime.
+var containerCreateGrace = 30 * time.Second
+
+// containerCreatePoll is how often the cidfile is looked at while waiting
+// out containerCreateGrace.
+const containerCreatePoll = 50 * time.Millisecond
+
+// dockerCleanupTimeout bounds each `docker kill`/`rm`/`inspect` run the
+// cleanup path makes, so a daemon that stopped answering costs a bounded
+// wait rather than hanging the run that is already being torn down.
+const dockerCleanupTimeout = 5 * time.Second
+
 // Cmd is one containerized run in progress: the *exec.Cmd for the
 // attached `docker run` client process, plus what Started needs to tell
 // a run that never got off the ground apart from one that did, plus
-// whatever KillError has to report about stopping it.
+// whatever KillError and StopNote have to report about stopping it.
 type Cmd struct {
 	*exec.Cmd
 	cidFile string
 	name    string
+	// deadline is the run's own deadline, when it has one, so the kill
+	// path can bound its wait for a container Docker is still creating
+	// by what is left of it plus containerCreateGrace.
+	deadline time.Time
 
 	mu          sync.Mutex
 	cancelled   bool
 	cleanupDone bool
 	killErr     error
+	stopNote    string
 }
 
 // New builds the *exec.Cmd for running r inside a fresh, single-use,
@@ -159,6 +182,11 @@ type Cmd struct {
 // exits on its own, carrying the container's exit status using the same
 // 128+N convention a directly-killed shell command already used, so
 // classifyResult needed no container-specific case.
+//
+// A deadline that fires before there is any container to kill - Docker
+// can take seconds to create one on a cold machine - waits for it rather
+// than letting the check command start behind the kill and run to
+// completion (issue #66). See kill, awaitContainerID and StopNote.
 func New(ctx context.Context, r Run) *Cmd {
 	args := []string{
 		"-v", r.WorkspaceRoot + ":" + WorkspaceDir,
@@ -279,27 +307,218 @@ func NewCommand(ctx context.Context, namePrefix string, args ...string) *Cmd {
 	dockerArgs = append(dockerArgs, args...)
 
 	cmd := exec.CommandContext(ctx, "docker", dockerArgs...)
-	cmd.WaitDelay = 5 * time.Second
+	cmd.WaitDelay = dockerCleanupTimeout
 
 	c := &Cmd{Cmd: cmd, cidFile: cidFile, name: name}
+	if deadline, ok := ctx.Deadline(); ok {
+		c.deadline = deadline
+	}
 	cmd.Cancel = c.kill
 	return c
 }
 
+// kill stops the run ctx just cancelled. It blocks for as long as it
+// takes to get hold of the container, which is safe by construction:
+// os/exec starts its WaitDelay timer only once Cancel returns, so the
+// delay window cannot open while this is still looking for something to
+// kill.
 func (c *Cmd) kill() error {
 	c.mu.Lock()
 	c.cancelled = true
 	c.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	id, waited, created := c.awaitContainerID()
+	if !created {
+		return c.stopWithoutContainer(waited)
+	}
+	if waited > 0 {
+		// Worth saying out loud: the container that was stopped only
+		// existed because the kill path waited for it, and without that
+		// wait its check command would have run on past the deadline.
+		c.note(fmt.Sprintf("the deadline fired before Docker had created the check container; inspector waited %s for it to exist and then stopped it", waited.Round(time.Millisecond)))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 	defer cancel()
-	err := killContainer(ctx, c.name)
+	err := c.stopContainer(ctx, id)
 	if err != nil && !errors.Is(err, os.ErrProcessDone) {
 		c.mu.Lock()
 		c.killErr = err
 		c.mu.Unlock()
 	}
 	return err
+}
+
+// stopContainer stops the container id names, in whichever state Docker
+// has it in.
+func (c *Cmd) stopContainer(ctx context.Context, id string) error {
+	err := killContainer(ctx, id)
+	if !errors.Is(err, errContainerNotRunning) {
+		return err
+	}
+	// Created, but not started yet - `docker kill` has no process to
+	// signal, and the attached `docker run` client is about to start it
+	// (issue #66). Removing it by force is the one stop that works in
+	// either state, so even a container that starts between these two
+	// calls is taken down rather than left to run past the deadline.
+	rmErr := removeContainer(ctx, id)
+	if rmErr == nil || errors.Is(rmErr, os.ErrProcessDone) {
+		c.note("the deadline fired while Docker had the check container created but not yet started; inspector removed it before its check command could run")
+		return rmErr
+	}
+	return fmt.Errorf("%w (docker kill had already reported it as not running)", rmErr)
+}
+
+// stopWithoutContainer is the last resort for a deadline that fired
+// before Docker ever reported a container and where none appeared within
+// awaitContainerID's whole budget: a `docker create` that is hung, or one
+// that failed. The `docker run` client is then the only handle left, and
+// killing it also keeps it from starting a container the daemon may still
+// be finishing - but the create request is already with the daemon, so
+// the kill is followed by a removal of whatever did appear and then by
+// asking docker outright whether anything of this run is still running.
+// Per the ruling on issue #66 that last answer, and only it, decides
+// whether this counts as a kill inspector could not carry out.
+func (c *Cmd) stopWithoutContainer(waited time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
+	defer cancel()
+
+	// A client that has already exited is not a failure here: there is
+	// simply nothing left to detach from.
+	client := "Docker's own client had already exited"
+	if c.Process != nil && c.Process.Kill() == nil {
+		client = "inspector killed Docker's own client"
+	}
+	what := fmt.Sprintf("Docker never reported a check container within %s of the deadline, so %s", waited.Round(time.Millisecond), client)
+
+	// Docker may have finished creating the container in the window
+	// between the last look and that kill, so aim at whatever is there.
+	target := c.stopTarget()
+	rmErr := removeContainer(ctx, target)
+	switch {
+	case rmErr == nil:
+		c.note(what + ", and force-removed the container it turned out to have created after all")
+		return nil
+	case errors.Is(rmErr, os.ErrProcessDone):
+		c.note(what + ", and there was no container to remove - the check command never ran")
+		return nil
+	}
+
+	running, inspectErr := containerRunning(ctx, target)
+	if running {
+		err := fmt.Errorf("%s, and a container of this run is still running after an attempt to force-remove it: %w", what, rmErr)
+		c.mu.Lock()
+		c.killErr = err
+		c.mu.Unlock()
+		return err
+	}
+	detail := rmErr.Error()
+	if inspectErr != nil {
+		detail = fmt.Sprintf("%v, and docker could not say whether one is running either: %v", rmErr, inspectErr)
+	}
+	c.note(fmt.Sprintf("%s, and removing any container of this run failed: %s - no container of this run is confirmed running", what, detail))
+	return nil
+}
+
+// awaitContainerID resolves the container id Docker writes to the
+// cidfile at creation, waiting for it when the deadline fired while
+// `docker run` was still creating the container - the race issue #66
+// found on a cold CI runner, where `docker kill` had nothing to kill and
+// the check command then ran to completion anyway. Reports how long it
+// waited, and whether a container id ever appeared.
+//
+// Bounded by whatever is left of this run's own deadline plus
+// containerCreateGrace, never indefinite, and cut short the moment the
+// `docker run` client itself is gone: a creation that failed outright (a
+// bad image, a daemon that went away) leaves no cidfile and never will.
+func (c *Cmd) awaitContainerID() (id string, waited time.Duration, created bool) {
+	if id := c.containerID(); id != "" {
+		return id, 0, true
+	}
+	budget := containerCreateGrace
+	if !c.deadline.IsZero() {
+		if remaining := time.Until(c.deadline); remaining > 0 {
+			budget += remaining
+		}
+	}
+
+	start := time.Now()
+	for {
+		if c.clientExited() {
+			// One last look: the client may have written the cidfile on
+			// its way out.
+			if id := c.containerID(); id != "" {
+				return id, time.Since(start), true
+			}
+			return "", time.Since(start), false
+		}
+		if elapsed := time.Since(start); elapsed >= budget {
+			return "", elapsed, false
+		}
+		time.Sleep(containerCreatePoll)
+		if id := c.containerID(); id != "" {
+			return id, time.Since(start), true
+		}
+	}
+}
+
+// stopTarget is what a cleanup command is aimed at: the container id when
+// Docker has written one, since a command aimed at the exact container
+// cannot be confused by anything else answering to the name, and this
+// run's own container name otherwise - New gives every run a unique one.
+func (c *Cmd) stopTarget() string {
+	if id := c.containerID(); id != "" {
+		return id
+	}
+	return c.name
+}
+
+// containerID reads the container id Docker wrote at creation, or "" when
+// there is none to read yet. See Started for why the cidfile is the
+// signal for that.
+func (c *Cmd) containerID() string {
+	data, err := os.ReadFile(c.cidFile)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// clientExited reports whether the `docker run` client process is gone.
+// os.Process.Signal is the way to ask: it reports ErrProcessDone once
+// Wait has reaped the process, under the Process's own lock, whereas
+// reading Cmd.ProcessState from here would race with the Wait that
+// writes it on another goroutine. Signal 0 is not delivered to anything.
+func (c *Cmd) clientExited() bool {
+	if c.Process == nil {
+		return true
+	}
+	return errors.Is(c.Process.Signal(syscall.Signal(0)), os.ErrProcessDone)
+}
+
+// note records, for the person reading this run's report, what inspector
+// had to do to stop a container that was not simply there and running
+// when the deadline fired.
+func (c *Cmd) note(note string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopNote != "" {
+		c.stopNote += "; "
+	}
+	c.stopNote += note
+}
+
+// StopNote describes in words what stopping this run actually took, and
+// is empty for the ordinary case - no cancellation, or a container that
+// was there and running when the deadline fired. Unlike KillError it is
+// not a failure: it is the difference between "the check timed out and
+// was stopped" and "the check timed out and inspector had to kill
+// Docker's own client to stop it", which a report must not blur. Read it
+// after Run/Wait returns.
+func (c *Cmd) StopNote() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stopNote
 }
 
 func (c *Cmd) Run() error {
@@ -324,9 +543,12 @@ func (c *Cmd) finalizeCleanup() {
 	c.cleanupDone = true
 	c.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 	defer cancel()
-	err := removeContainer(ctx, c.name)
+	// The last catch for a container the daemon created after the kill
+	// path had already given up looking for one, which is the only way
+	// one can still exist by now.
+	err := removeContainer(ctx, c.stopTarget())
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -339,8 +561,11 @@ func (c *Cmd) finalizeCleanup() {
 
 // KillError reports docker's own refusal to stop the container after
 // ctx's deadline fired, carrying docker's message, and nil when no kill
-// was needed or cleanup was confirmed after the Docker client exited.
-// Read it after Run/Wait returns.
+// was needed or cleanup was confirmed after the Docker client exited. A
+// container that was created late and then stopped, or one Docker never
+// reported at all and that is not running when asked, is not a refusal -
+// those are StopNote's to report (issue #66). Read it after Run/Wait
+// returns.
 func (c *Cmd) KillError() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -358,8 +583,7 @@ func (c *Cmd) KillError() error {
 // container creation, before the command inside it ever runs, so its
 // absence means creation itself never happened.
 func (c *Cmd) Started() bool {
-	data, err := os.ReadFile(c.cidFile)
-	return err == nil && strings.TrimSpace(string(data)) != ""
+	return c.containerID() != ""
 }
 
 // Cleanup removes the cidfile New asked Docker to write. The docker CLI
@@ -386,45 +610,94 @@ func randomHex(n int) string {
 	return hex.EncodeToString(buf)
 }
 
-// killContainer force-stops the named container. Mirrors the contract
-// exec.Cmd.Cancel documents: nil means the container is being stopped,
-// os.ErrProcessDone means there was nothing to do.
+// errContainerNotRunning is docker's refusal to kill a container that
+// exists but has no process to signal - which, for a container inspector
+// created this instant, means Docker has created it and not started it
+// yet. stopContainer removes such a container rather than reporting a
+// kill it could not carry out (issue #66). Wrapped into the returned
+// error rather than replacing it, so a caller that only reports the
+// failure still carries docker's own message.
+var errContainerNotRunning = errors.New("docker reports the container as not running")
+
+// killContainer force-stops the container target names, by id or by name.
+// Mirrors the contract exec.Cmd.Cancel documents: nil means the container
+// is being stopped, os.ErrProcessDone means there was nothing to do.
 //
 // Only one docker failure means that: "No such container", which with
 // --rm is what a container that already exited on its own right as the
 // deadline fired looks like - the same race check.go's old
 // killProcessGroup had to account for, and narrowed just as carefully
-// there (ESRCH and a verified EPERM, not any errno). Every other
-// failure - "is not running", a daemon that stopped answering, a
-// permissions problem - is a real error carrying docker's own message,
-// since os.ErrProcessDone would claim a container that may still be
-// running against the bind-mounted repo had been dealt with.
+// there (ESRCH and a verified EPERM, not any errno). "Is not running" is
+// the one other failure read for what it is, as errContainerNotRunning,
+// and only so that the caller can remove a created-but-unstarted
+// container instead of leaving it to start. Every other failure - a
+// daemon that stopped answering, a permissions problem - is a real error
+// carrying docker's own message, since os.ErrProcessDone would claim a
+// container that may still be running against the bind-mounted repo had
+// been dealt with.
 //
 // The returned error deliberately does not wrap the *exec.ExitError
 // from `docker kill` itself: that is a different process from the one
 // being waited on, and classifyResult reads any *exec.ExitError it can
 // find as the check container's own verdict.
-func killContainer(ctx context.Context, name string) error {
-	return runDockerCleanup(ctx, name, "kill", name)
+func killContainer(ctx context.Context, target string) error {
+	return runDockerCleanup(ctx, "kill", target)
 }
 
-func removeContainer(ctx context.Context, name string) error {
-	return runDockerCleanup(ctx, name, "rm", "--force", name)
+func removeContainer(ctx context.Context, target string) error {
+	return runDockerCleanup(ctx, "rm", "--force", target)
 }
 
-func runDockerCleanup(ctx context.Context, name string, args ...string) error {
+func runDockerCleanup(ctx context.Context, args ...string) error {
 	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	message := strings.TrimSpace(string(out))
-	if ctx.Err() != nil {
-		message = ctx.Err().Error()
-	} else if message == "" {
-		message = err.Error()
-	}
-	if strings.Contains(strings.ToLower(message), "no such container") {
+	message := dockerMessage(ctx, out, err)
+	if isMissingContainer(message) {
 		return os.ErrProcessDone
 	}
-	return fmt.Errorf("docker %s %s: %s", args[0], name, message)
+	wrapped := fmt.Errorf("docker %s %s: %s", args[0], args[len(args)-1], message)
+	if strings.Contains(strings.ToLower(message), "is not running") {
+		return fmt.Errorf("%w: %w", errContainerNotRunning, wrapped)
+	}
+	return wrapped
+}
+
+// containerRunning asks docker outright whether the container target
+// names is running. Reports false with a nil error for a container docker
+// says is not there at all - that is an answer, not a failure to get one -
+// and false with an error only when docker could not be asked, which is
+// the one case a caller must not read as "nothing is running".
+func containerRunning(ctx context.Context, target string) (bool, error) {
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}", target).CombinedOutput()
+	if err != nil {
+		message := dockerMessage(ctx, out, err)
+		if isMissingContainer(message) {
+			return false, nil
+		}
+		return false, fmt.Errorf("docker inspect %s: %s", target, message)
+	}
+	return strings.TrimSpace(string(out)) == "true", nil
+}
+
+// dockerMessage prefers docker's own words, falls back to the Go error
+// when it said nothing, and names a cancelled or timed-out call for what
+// it was rather than reporting whatever partial output it had produced.
+func dockerMessage(ctx context.Context, out []byte, err error) string {
+	if ctx.Err() != nil {
+		return ctx.Err().Error()
+	}
+	if message := strings.TrimSpace(string(out)); message != "" {
+		return message
+	}
+	return err.Error()
+}
+
+// isMissingContainer recognizes docker's two spellings for a container
+// that is not there: `kill` and `rm` say "No such container", `inspect`
+// says "No such object".
+func isMissingContainer(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "no such container") || strings.Contains(lower, "no such object")
 }
