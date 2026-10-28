@@ -560,6 +560,48 @@ func TestNewCommand_TimeoutRemovesAContainerCreatedButNotStarted(t *testing.T) {
 	}
 }
 
+func TestKill_UnremovableUnstartedContainerIsAFailedKill(t *testing.T) {
+	// The third way the created-but-not-started window can end: docker
+	// will neither kill that container (no process in it yet) nor remove
+	// it. Nothing then stands between it and being started by the `docker
+	// run` client it belongs to, so this is the one branch of that window
+	// that has to be reported as a kill inspector could not carry out -
+	// returning nil or os.ErrProcessDone here would tell Wait the
+	// cancellation succeeded while a check command is about to start
+	// against the bind-mounted repo. kill() is called directly rather than
+	// through Run: a refused kill makes os/exec fall back on its own
+	// WaitDelay, and waiting that out proves nothing this does not.
+	fake := newFakeDocker(t)
+	fake.env("KILL_NOT_RUNNING", "1")
+	fake.env("RM_FAILS", "1")
+
+	cmd := NewCommand(context.Background(), "test-", "image")
+	defer cmd.Cleanup()
+	if err := os.WriteFile(cmd.cidFile, []byte(fakeContainerID+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the cidfile: %v", err)
+	}
+
+	err := cmd.kill()
+	if err == nil || errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("kill() = %v, want a real error for a container docker would neither kill nor remove", err)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		t.Fatalf("kill error wraps a cleanup process's own *exec.ExitError (%v) - callers read any ExitError as the check container's verdict", err)
+	}
+	for _, want := range []string{"permission denied", "not running"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("kill error = %q, want it to carry %q - both halves of what docker refused", err, want)
+		}
+	}
+	if recorded := cmd.KillError(); recorded == nil || recorded.Error() != err.Error() {
+		t.Fatalf("KillError() = %v, want the same failure recorded on the Cmd", recorded)
+	}
+	if got, want := fake.calls(), []string{"kill " + fakeContainerID, "rm " + fakeContainerID}; !slices.Equal(got, want) {
+		t.Fatalf("docker calls = %q, want %q - the refused kill is followed by the removal that was tried", got, want)
+	}
+}
+
 func TestNewCommand_TimeoutWithNoContainerKillsTheDockerClient(t *testing.T) {
 	// The last resort, per the ruling on issue #66: when no container id
 	// appears within the whole wait, the `docker run` client is the only

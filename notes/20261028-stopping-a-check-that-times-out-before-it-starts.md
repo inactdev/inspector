@@ -49,6 +49,18 @@ it is the last catch for a container the daemon created after step 4's
 removal, and it clears `KillFailed` when the container is confirmed gone by
 then.
 
+One window is left open, and cannot be closed from here: a container the
+daemon creates after even that last removal has run belongs to a run that
+is already over, so nothing is left watching for it. It is reached only
+when the daemon had the whole budget and reported no container in it, which
+is a daemon already in trouble. Killing the client first is what keeps it
+from mattering: `docker run` creates the container and then asks for it to
+be started, so a client killed before that second step leaves at worst a
+created container that was never started - a leaked container to clean up,
+not a check command running past its deadline, which is what issue #66 is
+about. Steps 1-3, every timeout a healthy daemon produces, do not depend on
+any of this.
+
 The cost is bounded latency: a run whose deadline lands in the creation
 window now returns up to the grace period (plus `WaitDelay`) later than its
 deadline, rather than returning promptly and leaving a check running.

@@ -378,12 +378,20 @@ func TestRunCheck_TimeoutBeforeTheContainerExistsStillStopsTheCheck(t *testing.T
 	// started behind the kill and ran to completion past its deadline,
 	// which is what made TestRunCheck_TimeoutKillsChildProcesses flake.
 	// The shim makes that window a second wide every time.
+	//
+	// The timings are the cheapest that still prove it: a one-second
+	// creation window the 300ms deadline is certain to fall inside, and a
+	// marker written two seconds into the check command, looked for 2.2
+	// seconds after the run returns. Only the second of those margins has
+	// to hold, and it holds however slow the machine is - the wait starts
+	// when the run has already returned, so a cold runner moves both the
+	// marker and the look by the same amount.
 	requireDocker(t)
 	slowDockerCreate(t, "1")
 	dir := t.TempDir()
 	var stderr bytes.Buffer
 
-	result, err := runCheck(t, dir, "( sleep 3 && echo alive > survived ) & wait", testImage, container.Limits{}, 300*time.Millisecond, io.Discard, &stderr)
+	result, err := runCheck(t, dir, "( sleep 2 && echo alive > survived ) & wait", testImage, container.Limits{}, 300*time.Millisecond, io.Discard, &stderr)
 	if err != nil {
 		t.Fatalf("a timeout in the creation window must stay a verdict, not become an infrastructure error: %v", err)
 	}
@@ -400,6 +408,10 @@ func TestRunCheck_TimeoutBeforeTheContainerExistsStillStopsTheCheck(t *testing.T
 	// whoever is watching it, since "stopped" and "stopped only because
 	// inspector waited for Docker to produce a container" are different
 	// facts about the same timeout.
+	// The only other shape this note can take is the last-resort one, and
+	// only if docker took longer than the whole grace period to create a
+	// container at all - in which case the report says that instead, and
+	// says it for a reason worth reading rather than a timing accident.
 	if !strings.Contains(result.Output, "waited") {
 		t.Fatalf("Output = %q, want the late-created container reported in the run's own report", truncate(result.Output, 400))
 	}
@@ -407,7 +419,7 @@ func TestRunCheck_TimeoutBeforeTheContainerExistsStillStopsTheCheck(t *testing.T
 		t.Fatalf("stderr = %q, want the late-created container reported live", truncate(stderr.String(), 400))
 	}
 
-	time.Sleep(3200 * time.Millisecond)
+	time.Sleep(2200 * time.Millisecond)
 	if _, err := os.Stat(filepath.Join(result.Workspace.Root, "survived")); !os.IsNotExist(err) {
 		t.Fatal("the check command ran past its deadline: the container was created after the kill and never stopped")
 	}
