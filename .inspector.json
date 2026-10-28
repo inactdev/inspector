@@ -1,6 +1,5 @@
 {
   "check": "script/check",
-  "image": "cimg/go:1.22",
   "protectedPaths": [
     "script/check",
     "*_test.go"
