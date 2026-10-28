@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -68,7 +69,8 @@ type Result struct {
 	TestPaths []string
 	// Warning is set when the check reached a real verdict (Green or
 	// Red) but something worth loudly flagging happened alongside it -
-	// currently, only that the local report could not be saved. Green
+	// currently, that the local report could not be saved, or that it
+	// was saved but older reports could not be pruned. Green
 	// publication and the exit code, not this local report, carry the
 	// verdict, so a save failure must never downgrade or discard it.
 	Warning string
@@ -272,10 +274,28 @@ func Run(opts Options) (Result, error) {
 		Signal:       checkResult.Signal,
 		TimedOut:     checkResult.TimedOut,
 		Output:       checkResult.Output,
+		// Recorded as a fact of the run, not left for a reader to infer
+		// from the output's size: a report that silently holds part of
+		// the output is worse than a large one (issue #12).
+		OutputTruncated:    checkResult.OutputDroppedBytes > 0,
+		OutputDroppedBytes: checkResult.OutputDroppedBytes,
+		OutputTotalBytes:   checkResult.OutputTotalBytes,
 	}
 
 	result := Result{Outcome: outcome, Commit: commit, TestPaths: cfg.TestPaths}
 	reportPath, writeErr := WriteReport(repoRoot, report)
+	if errors.Is(writeErr, ErrRunsNotPruned) {
+		// This run's own report was written; what failed is the bound on
+		// the directory holding the older ones. That is worth saying
+		// loudly and worth nothing else: the result stands, and
+		// reportPath still names a real file.
+		result.Warning = fmt.Sprintf(
+			"%v\n%s may now hold more than the %d runs it keeps, so it can grow until they are removed by hand.\n"+
+				"this run's own report was saved and is unaffected.",
+			writeErr, filepath.Join(RunsDirName, "runs"), MaxRunsKept,
+		)
+		writeErr = nil
+	}
 
 	switch {
 	case checkResult.TimedOut && checkResult.KillFailed:

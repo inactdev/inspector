@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,7 +19,32 @@ const RunsDirName = ".inspector"
 
 // LatestReportName is a copy of the most recent report, so a red run is
 // actionable without hunting through RunsDirName for the newest file.
+// Deliberately still a second full copy of the same report: it is the file
+// Fabrica copies onto the task record and the one a green status's own
+// description points a reader at, so both writes have readers (issue #12).
 const LatestReportName = "latest.json"
+
+// MaxRunsKept is how many run reports RunsDirName/runs keeps. Older ones
+// are deleted as each new report is written, so a repo checked many times
+// a day stops growing without limit. Ruled 2026-10-28 for issue #12 and
+// fixed on purpose - no config key and no flag - and paired with
+// MaxOutputBytes, which is what makes a count a real bound: 20 runs can
+// no longer mean 20 files of unbounded size.
+//
+// Pruning happens after the new report is written and never removes that
+// report, so the run whose status is about to be posted always keeps its
+// notes - issue #12's one hard constraint on this. Older runs are fair
+// game by the same document that makes the constraint cheap: a report is
+// notes, never authority (SPEC.md section 12), and the status itself
+// lives on the commit at GitHub, where nothing here can reach it.
+const MaxRunsKept = 20
+
+// ErrRunsNotPruned reports that this run's report was written but older
+// ones could not be removed. It is deliberately distinguishable from a
+// failed save: the newest record is worth more than the bound on the
+// directory, so Run turns this into a loud warning on a result that
+// stands, not into "the report could not be saved."
+var ErrRunsNotPruned = errors.New("older run reports could not be removed")
 
 // Report is the local record of one inspector run.
 type Report struct {
@@ -38,7 +66,18 @@ type Report struct {
 	ExitCode   int               `json:"exitCode"`
 	Signal     string            `json:"signal,omitempty"`
 	TimedOut   bool              `json:"timedOut,omitempty"`
-	Output     string            `json:"output"`
+	// Output is what the check command printed, bounded to
+	// MaxOutputBytes: its first OutputHeadBytes and last
+	// OutputTailBytes, with one marker line between them naming the
+	// dropped middle. OutputTruncated says that happened without a
+	// reader having to find that line, OutputDroppedBytes is how much
+	// Output does not hold, and OutputTotalBytes is what the command
+	// printed altogether. All three are absent on the ordinary run that
+	// printed less than the cap.
+	Output             string `json:"output"`
+	OutputTruncated    bool   `json:"outputTruncated,omitempty"`
+	OutputDroppedBytes int64  `json:"outputDroppedBytes,omitempty"`
+	OutputTotalBytes   int64  `json:"outputTotalBytes,omitempty"`
 	// PullRequestURL is set after the fact, once a green run has opened
 	// or found the pull request for its published branch - WriteReport
 	// runs before that step even exists, so RecordPullRequestURL is what
@@ -90,12 +129,16 @@ type TestReviewFile struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// WriteReport persists r under repoRoot/RunsDirName/runs/ and refreshes
-// LatestReportName. It returns the path of the timestamped report file.
+// WriteReport persists r under repoRoot/RunsDirName/runs/, refreshes
+// LatestReportName, and then removes all but the newest MaxRunsKept run
+// reports. It returns the path of the timestamped report file.
 //
-// r.Output is whatever RunCheck captured, unbounded, and is written out in
-// full here twice; RunsDirName also never prunes old runs. Deliberately
-// deferred - see issue #12.
+// r.Output is already bounded to MaxOutputBytes by the time it gets here
+// (see RunCheck), so each of the two files it is written to is bounded
+// too, and the directory holding them has a stated ceiling rather than
+// growing forever (issue #12). A report that was written but whose older
+// siblings could not be removed returns its path together with an error
+// wrapping ErrRunsNotPruned, which is not a failed save.
 func WriteReport(repoRoot string, r Report) (string, error) {
 	runsDir := filepath.Join(repoRoot, RunsDirName, "runs")
 	if err := os.MkdirAll(runsDir, 0o755); err != nil {
@@ -121,7 +164,124 @@ func WriteReport(repoRoot string, r Report) (string, error) {
 		return "", fmt.Errorf("writing %s: %w", latest, err)
 	}
 
+	// Last, and with its own error: this run's own two files are what
+	// matter, and neither of them should be lost over an old one that
+	// would not delete.
+	if err := pruneRuns(runsDir, MaxRunsKept, filepath.Base(path)); err != nil {
+		return path, err
+	}
+
 	return path, nil
+}
+
+// pruneRuns leaves the newest keep run reports in runsDir and removes the
+// rest, never removing the report named by protect - the one just
+// written, whose status is the one about to be posted. That exclusion is
+// structural rather than inferred from the ordering below, because issue
+// #12's one hard constraint is that pruning must not be *able* to remove
+// the run a commit status refers to.
+//
+// It only ever removes files inspector itself wrote - the
+// <unix-seconds>-<short-sha>[-n].json names writeNewFile produces -
+// because a gitignored directory is also somewhere a person may have put
+// something of their own, and deleting that would be inspector editing
+// what it was not asked to.
+func pruneRuns(runsDir string, keep int, protect string) error {
+	entries, err := os.ReadDir(runsDir)
+	if err != nil {
+		return fmt.Errorf("%w: reading %s: %v", ErrRunsNotPruned, runsDir, err)
+	}
+	var reports []runReportFile
+	for _, entry := range entries {
+		if entry.IsDir() || !isRunReportName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			// Gone between the listing and the stat, so there is
+			// nothing left to prune and nothing to complain about.
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("%w: reading %s: %v", ErrRunsNotPruned, filepath.Join(runsDir, entry.Name()), err)
+		}
+		reports = append(reports, runReportFile{name: entry.Name(), written: info.ModTime()})
+	}
+	if len(reports) <= keep {
+		return nil
+	}
+
+	sort.Slice(reports, func(i, j int) bool { return reports[i].newerThan(reports[j]) })
+	var failed []string
+	for _, report := range reports[keep:] {
+		if report.name == protect {
+			continue
+		}
+		// A concurrent run pruning the same directory can get here
+		// first; the file being gone already is the outcome asked for,
+		// not a failure.
+		if err := os.Remove(filepath.Join(runsDir, report.name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			failed = append(failed, err.Error())
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%w: %s", ErrRunsNotPruned, strings.Join(failed, "; "))
+	}
+	return nil
+}
+
+// runReportFile is one report in RunsDirName/runs, with when it was
+// written.
+type runReportFile struct {
+	name    string
+	written time.Time
+}
+
+// newerThan orders reports newest first. Modification time decides it,
+// not the name: pruning frees a name for writeNewFile to reuse, so two
+// runs in one second can end up with the earlier-written one carrying the
+// later-looking suffix. The name is only the tie-break, for a file system
+// whose timestamps are too coarse to separate two runs of the same
+// second - the leading unix seconds first, then writeNewFile's own
+// collision suffixes, which grow: an unsuffixed name came before "-1",
+// and a longer suffix after a shorter one ("-10" after "-2").
+func (r runReportFile) newerThan(other runReportFile) bool {
+	if !r.written.Equal(other.written) {
+		return r.written.After(other.written)
+	}
+	if sa, sb := runReportStamp(r.name), runReportStamp(other.name); sa != sb {
+		return sa > sb
+	}
+	if len(r.name) != len(other.name) {
+		return len(r.name) > len(other.name)
+	}
+	return r.name > other.name
+}
+
+// isRunReportName reports whether name is one writeNewFile could have
+// produced: unix seconds, a dash, and something ending in .json. It
+// deliberately does not match LatestReportName or any other hand-written
+// file.
+func isRunReportName(name string) bool {
+	rest, ok := strings.CutSuffix(name, ".json")
+	if !ok {
+		return false
+	}
+	stamp, rest, ok := strings.Cut(rest, "-")
+	if !ok || stamp == "" || rest == "" {
+		return false
+	}
+	_, err := strconv.ParseInt(stamp, 10, 64)
+	return err == nil
+}
+
+func runReportStamp(name string) int64 {
+	stamp, _, _ := strings.Cut(strings.TrimSuffix(name, ".json"), "-")
+	seconds, err := strconv.ParseInt(stamp, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return seconds
 }
 
 // ImageBuildLogName holds the output of the most recent check-image

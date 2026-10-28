@@ -1,13 +1,13 @@
 package inspector
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -53,8 +53,39 @@ type CheckResult struct {
 	// check it rather than say the check was killed when it may not have
 	// been.
 	KillFailed bool
-	Output     string
+	// Output is what the check command printed, bounded to
+	// MaxOutputBytes plus the one marker line that stands where the
+	// dropped middle was (issue #12). Everything the command printed
+	// still reached the caller's own stdout and stderr live and in full;
+	// this is the copy inspector keeps.
+	Output string
+	// OutputDroppedBytes is how many bytes of output Output does not
+	// hold, and zero whenever it holds all of them. It is what lets a
+	// report say plainly that output was cut rather than leaving a
+	// reader to guess from its size. OutputTotalBytes is how much the
+	// check command printed in total, which is the number that says
+	// whether a project's own suite is as chatty as it meant to be.
+	OutputDroppedBytes int64
+	OutputTotalBytes   int64
 }
+
+// The bound on what one run keeps of its check command's output, ruled
+// 2026-10-28 for issue #12 and fixed on purpose: no config key and no
+// flag, because a project that can raise the cap can bring back the
+// unbounded run this exists to prevent. Head and tail, not the first
+// MaxOutputBytes: the reason a check failed is nearly always the last
+// thing it printed, while the first thing it printed is what says which
+// command and toolchain ran. See
+// notes/20261028-bound-the-captured-output-and-prune-old-runs.md.
+const (
+	// MaxOutputBytes is the total kept per run, in memory and on disk
+	// alike.
+	MaxOutputBytes = 256 << 10
+	// OutputHeadBytes is how much of the start is kept.
+	OutputHeadBytes = 64 << 10
+	// OutputTailBytes is how much of the end is kept.
+	OutputTailBytes = MaxOutputBytes - OutputHeadBytes
+)
 
 // RunCheck runs command inside a fresh container built from image,
 // working from container.WorkspaceDir, where repoRoot's tracked
@@ -72,8 +103,10 @@ type CheckResult struct {
 // default, and is denied network access with no way to ask for one
 // (issue #47): image is built from the project's own committed
 // Dockerfile, so its dependencies are already in there. Output is
-// streamed to stdout/stderr live
-// and also captured for the local report. The two streams are written
+// streamed to stdout/stderr live and in full, and also captured for the
+// local report - that captured copy, and only it, is bounded to
+// MaxOutputBytes, keeping the head and the tail with a marker line
+// naming the dropped middle (issue #12). The two streams are written
 // from different goroutines, but every write - to the capture buffer and
 // to the caller's writers alike - is serialized on one lock, so passing
 // the same writer for both stdout and stderr is safe. The returned error
@@ -94,7 +127,7 @@ func RunCheck(repoRoot, command, image string, limits container.Limits, timeout 
 	// two writers are the identical value, and tee never is, so the shared
 	// capture buffer and the caller's writers all have to be safe for
 	// concurrent writes.
-	capture := &syncWriter{}
+	capture := newSyncWriter(OutputHeadBytes, OutputTailBytes)
 
 	// Resolved before anything starts, so a repo whose git directory
 	// cannot be reached inside the container is refused rather than
@@ -190,7 +223,12 @@ func RunCheck(repoRoot, command, image string, limits container.Limits, timeout 
 			"inspector: it may still be running against this repo - check `docker ps` and stop it by hand\n", killErr)
 	}
 
-	result, resultErr := classifyResult(run.Cmd, err, capture.String())
+	// Read once, after the kill notice above has gone through the same
+	// writer: the capture is bounded, so a later read could report a
+	// different dropped count than the one already written into it.
+	output, dropped, printed := capture.captured()
+
+	result, resultErr := classifyResult(run.Cmd, err, output)
 	if resultErr != nil {
 		if killErr == nil {
 			return CheckResult{}, resultErr
@@ -199,7 +237,19 @@ func RunCheck(repoRoot, command, image string, limits container.Limits, timeout 
 		// itself, which says nothing about the check command. Cancel
 		// runs only once the deadline has fired, so this is a timeout,
 		// and the block below is what states that.
-		result = CheckResult{ExitCode: -1, Output: capture.String()}
+		result = CheckResult{ExitCode: -1, Output: output}
+	}
+	result.OutputDroppedBytes = dropped
+	result.OutputTotalBytes = printed
+
+	// Said live as well as in the report, since the person watching is
+	// the one who still has the full output in front of them and can
+	// keep it if they need it. Written to the caller's own writer rather
+	// than through the tee, which would feed the capture it is
+	// describing and make its own numbers stale.
+	if dropped > 0 && stderr != nil {
+		fmt.Fprintf(stderr, "\ninspector: this check command printed %d bytes; its saved report keeps the first %d and the last %d, and says so.\n",
+			printed, OutputHeadBytes, OutputTailBytes)
 	}
 
 	// The Go documentation for CommandContext recommends judging a
@@ -307,15 +357,104 @@ func classifySignal(ps *os.ProcessState) string {
 	return ""
 }
 
+// syncWriter keeps the first headLimit bytes written to it and the last
+// tailLimit, counting what fell between them, and never holds more than
+// that however much is written - a check command that prints tens of
+// megabytes costs one run headLimit+tailLimit of memory rather than
+// several multiples of its own output (issue #12). The tail is a fixed
+// ring: once full, each further byte displaces the oldest one it holds.
 type syncWriter struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu sync.Mutex
+
+	headLimit int
+	tailLimit int
+
+	head []byte
+	// tail grows to tailLimit and then stops; from that point tailPos is
+	// where the next byte goes and also where the oldest kept byte lives.
+	tail     []byte
+	tailPos  int
+	tailFull bool
+
+	dropped int64
+	printed int64
 }
 
-func (w *syncWriter) String() string {
+func newSyncWriter(headLimit, tailLimit int) *syncWriter {
+	return &syncWriter{
+		headLimit: headLimit,
+		tailLimit: tailLimit,
+		head:      make([]byte, 0, headLimit),
+		tail:      make([]byte, 0, tailLimit),
+	}
+}
+
+// captured reports what was kept, how much was dropped to keep it, and
+// how much was written in total. When anything was dropped, output
+// carries one marker line in the gap saying so, so a report of it can
+// never be read as the whole output.
+func (w *syncWriter) captured() (output string, dropped, printed int64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.buf.String()
+
+	// tailPos means nothing until the ring is full; until then the tail
+	// is simply everything written after the head, in order.
+	tail := string(w.tail)
+	if w.tailFull {
+		tail = string(w.tail[w.tailPos:]) + string(w.tail[:w.tailPos])
+	}
+	if w.dropped == 0 {
+		return string(w.head) + tail, 0, w.printed
+	}
+	// ToValidUTF8 only on a truncated capture, and only because both
+	// cuts can land mid-rune; an untruncated one is handed back exactly
+	// as the command printed it.
+	marker := fmt.Sprintf(
+		"\n[inspector: %d bytes of this check command's output were dropped here. It printed %d bytes in total; this report keeps the first %d and the last %d. The full output was streamed live as the check ran.]\n",
+		w.dropped, w.printed, len(w.head), len(tail),
+	)
+	return strings.ToValidUTF8(string(w.head), "") + marker + strings.ToValidUTF8(tail, ""), w.dropped, w.printed
+}
+
+// keep records p, filling the head first and then the tail ring. The
+// caller holds w.mu.
+func (w *syncWriter) keep(p []byte) {
+	w.printed += int64(len(p))
+
+	if room := w.headLimit - len(w.head); room > 0 {
+		n := min(room, len(p))
+		w.head = append(w.head, p[:n]...)
+		p = p[n:]
+	}
+	if len(p) == 0 {
+		return
+	}
+
+	if !w.tailFull {
+		n := min(w.tailLimit-len(w.tail), len(p))
+		w.tail = append(w.tail, p[:n]...)
+		p = p[n:]
+		if len(w.tail) == w.tailLimit {
+			w.tailFull = true
+			w.tailPos = 0
+		}
+		if len(p) == 0 {
+			return
+		}
+	}
+
+	// The ring is full, so every remaining byte costs an older one.
+	if len(p) >= w.tailLimit {
+		w.dropped += int64(w.tailLimit) + int64(len(p)-w.tailLimit)
+		copy(w.tail, p[len(p)-w.tailLimit:])
+		w.tailPos = 0
+		return
+	}
+	w.dropped += int64(len(p))
+	if n := copy(w.tail[w.tailPos:], p); n < len(p) {
+		copy(w.tail, p[n:])
+	}
+	w.tailPos = (w.tailPos + len(p)) % w.tailLimit
 }
 
 // tee returns a writer that copies to dst and to w, holding w's lock for
@@ -341,6 +480,6 @@ func (t *teeWriter) Write(p []byte) (int, error) {
 	if n != len(p) {
 		return n, io.ErrShortWrite
 	}
-	t.capture.buf.Write(p)
+	t.capture.keep(p)
 	return len(p), nil
 }

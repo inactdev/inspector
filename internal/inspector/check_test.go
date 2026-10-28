@@ -198,7 +198,7 @@ func TestRunCheck_SameWriterForBothStreams(t *testing.T) {
 	}
 }
 
-func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
+func TestRunCheck_StreamsFullOutputAcrossProcessExit(t *testing.T) {
 	// Regression guard for the classic exec.Cmd pitfall: os/exec's Wait
 	// closes the child's stdout/stderr pipes once the process exits, so
 	// code that reads those pipes manually and calls Wait too early
@@ -208,19 +208,209 @@ func TestRunCheck_CapturesFullOutputAcrossProcessExit(t *testing.T) {
 	// cmd.Run) blocks until they drain to EOF before returning. This
 	// writes far more than one pipe buffer right up to process exit, so
 	// a premature Wait would show up as a short read.
+	//
+	// Asserted on the caller's own stream rather than on
+	// result.Output, which issue #12 deliberately bounds: the live
+	// stream is where "nothing was lost" is still the requirement, and
+	// RunCheck's own count of what was printed has to agree with it.
 	requireDocker(t)
 	dir := t.TempDir()
 	const size = 500_000
+	var streamed countingWriter
 
-	result, err := runCheck(t, dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
+	result, err := runCheck(t, dir, fmt.Sprintf("head -c %d /dev/zero | tr '\\0' 'a'", size), testImage, container.Limits{}, testTimeout, &streamed, io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.ExitCode != 0 {
 		t.Fatalf("check command itself failed: ExitCode = %d, output = %q", result.ExitCode, truncate(result.Output, 200))
 	}
-	if len(result.Output) != size {
-		t.Fatalf("captured %d bytes, want %d - output was truncated", len(result.Output), size)
+	if streamed.n != size {
+		t.Fatalf("streamed %d bytes to the caller, want %d - output was truncated on its way out", streamed.n, size)
+	}
+	if result.OutputTotalBytes != size {
+		t.Fatalf("OutputTotalBytes = %d, want %d - the run must report what the command actually printed", result.OutputTotalBytes, size)
+	}
+}
+
+// countingWriter stands in for a terminal: it accepts everything and
+// remembers only how much, so a test can assert on half a megabyte of
+// streamed output without holding it.
+type countingWriter struct{ n int }
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.n += len(p)
+	return len(p), nil
+}
+
+// TestRunCheck_BoundsTheCapturedOutput is issue #12's acceptance bar at
+// this layer: a check command that prints far more than expected leaves
+// what inspector keeps bounded, keeps the end of the output, and says
+// plainly that the middle was dropped.
+func TestRunCheck_BoundsTheCapturedOutput(t *testing.T) {
+	requireDocker(t)
+	dir := t.TempDir()
+	// Comfortably past the cap, and cheap: one line per 64 KiB block, so
+	// the first and last blocks are identifiable in the capture.
+	const blocks = 20
+	command := fmt.Sprintf(
+		"i=1; while [ $i -le %d ]; do echo BLOCK_$i; head -c 65536 /dev/zero | tr '\\0' 'x'; echo; i=$((i+1)); done",
+		blocks,
+	)
+	var stderr bytes.Buffer
+
+	result, err := runCheck(t, dir, command, testImage, container.Limits{}, testTimeout, io.Discard, &stderr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("check command itself failed: ExitCode = %d, output = %q", result.ExitCode, truncate(result.Output, 400))
+	}
+
+	if atLeast := int64(blocks) * 65536; result.OutputTotalBytes < atLeast {
+		t.Fatalf("OutputTotalBytes = %d, want at least %d - the command printed that much", result.OutputTotalBytes, atLeast)
+	}
+	if result.OutputDroppedBytes <= 0 {
+		t.Fatalf("OutputDroppedBytes = %d after %d bytes of output, want the drop recorded", result.OutputDroppedBytes, result.OutputTotalBytes)
+	}
+	if result.OutputDroppedBytes+int64(MaxOutputBytes) != result.OutputTotalBytes {
+		t.Fatalf("dropped %d + kept %d != printed %d - the three have to add up", result.OutputDroppedBytes, MaxOutputBytes, result.OutputTotalBytes)
+	}
+	// The marker line is the only thing above the cap, and it is short.
+	if len(result.Output) > MaxOutputBytes+500 {
+		t.Fatalf("Output is %d bytes, want it bounded by MaxOutputBytes (%d) plus one marker line", len(result.Output), MaxOutputBytes)
+	}
+	if !strings.Contains(result.Output, "BLOCK_1\n") {
+		t.Fatal("the head of the output was not kept")
+	}
+	if !strings.Contains(result.Output, fmt.Sprintf("BLOCK_%d\n", blocks)) {
+		t.Fatalf("the tail of the output was not kept - the reason a check failed is nearly always there:\n%s", truncate(result.Output, 400))
+	}
+	if strings.Contains(result.Output, "BLOCK_10\n") {
+		t.Fatal("the middle of the output was kept, so this test is not exercising the cap")
+	}
+	if !strings.Contains(result.Output, fmt.Sprintf("%d bytes of this check command's output were dropped here", result.OutputDroppedBytes)) {
+		t.Fatalf("the capture does not say how much was dropped, so a reader would take it for the whole output:\n%s", truncate(result.Output, 400))
+	}
+	// Non-silent live, too, for the person who still has the full
+	// output in front of them.
+	if !strings.Contains(stderr.String(), "its saved report keeps the first") {
+		t.Fatalf("the truncation was not reported live on stderr: %q", truncate(stderr.String(), 400))
+	}
+}
+
+// The syncWriter tests below drive the bound directly, with small limits
+// where the arithmetic is checkable by eye - the container tests above
+// prove it is wired up, these prove it is right. Writing through tee is
+// deliberate: that is the only path RunCheck ever feeds it.
+func writeCapture(t *testing.T, w *syncWriter, chunks ...string) {
+	t.Helper()
+	sink := w.tee(io.Discard)
+	for _, chunk := range chunks {
+		if _, err := sink.Write([]byte(chunk)); err != nil {
+			t.Fatalf("writing %q to the capture: %v", truncate(chunk, 40), err)
+		}
+	}
+}
+
+func TestSyncWriter_KeepsEverythingUnderTheCap(t *testing.T) {
+	w := newSyncWriter(8, 16)
+	writeCapture(t, w, "one ", "two ", "three")
+
+	output, dropped, printed := w.captured()
+	if output != "one two three" {
+		t.Fatalf("captured %q, want the output unchanged", output)
+	}
+	if dropped != 0 {
+		t.Fatalf("dropped = %d, want 0", dropped)
+	}
+	if printed != 13 {
+		t.Fatalf("printed = %d, want 13", printed)
+	}
+}
+
+func TestSyncWriter_KeepsEverythingExactlyAtTheCap(t *testing.T) {
+	// The boundary where the tail ring becomes full but has not yet
+	// wrapped: nothing is dropped, so nothing may be reordered or
+	// marked either.
+	w := newSyncWriter(4, 6)
+	writeCapture(t, w, "abcdefghij")
+
+	output, dropped, _ := w.captured()
+	if output != "abcdefghij" {
+		t.Fatalf("captured %q, want the output unchanged at exactly the cap", output)
+	}
+	if dropped != 0 {
+		t.Fatalf("dropped = %d, want 0 at exactly the cap", dropped)
+	}
+}
+
+func TestSyncWriter_KeepsHeadAndTailWithAMarkedGap(t *testing.T) {
+	w := newSyncWriter(4, 6)
+	// One byte per write, so the tail ring wraps many times rather than
+	// being filled by a single convenient copy.
+	for _, b := range []byte("abcdefghijklmnopqrstuvwxyz") {
+		writeCapture(t, w, string(b))
+	}
+
+	output, dropped, printed := w.captured()
+	if printed != 26 {
+		t.Fatalf("printed = %d, want 26", printed)
+	}
+	if dropped != 16 {
+		t.Fatalf("dropped = %d, want 16 (26 printed, 10 kept)", dropped)
+	}
+	if !strings.HasPrefix(output, "abcd") {
+		t.Fatalf("captured %q, want it to start with the first 4 bytes", output)
+	}
+	if !strings.HasSuffix(output, "uvwxyz") {
+		t.Fatalf("captured %q, want it to end with the last 6 bytes", output)
+	}
+	if !strings.Contains(output, "16 bytes of this check command's output were dropped here") {
+		t.Fatalf("captured %q, want a marker naming the dropped bytes", output)
+	}
+	if strings.Contains(output, "jklm") {
+		t.Fatalf("captured %q, want the middle gone", output)
+	}
+}
+
+func TestSyncWriter_OneWriteLargerThanTheWholeCap(t *testing.T) {
+	// A single Write can exceed head and tail together - os/exec hands
+	// over whatever one pipe read returned, not one line.
+	w := newSyncWriter(4, 6)
+	writeCapture(t, w, "abcdefghijklmnopqrstuvwxyz")
+
+	output, dropped, printed := w.captured()
+	if printed != 26 || dropped != 16 {
+		t.Fatalf("printed = %d and dropped = %d, want 26 and 16", printed, dropped)
+	}
+	if !strings.HasPrefix(output, "abcd") || !strings.HasSuffix(output, "uvwxyz") {
+		t.Fatalf("captured %q, want the first 4 and last 6 bytes of one oversized write", output)
+	}
+}
+
+// TestSyncWriter_HoldsNoMoreThanTheCap is the memory half of issue #12:
+// the whole point is that a chatty suite costs one run the cap, not a
+// multiple of what it printed.
+func TestSyncWriter_HoldsNoMoreThanTheCap(t *testing.T) {
+	w := newSyncWriter(OutputHeadBytes, OutputTailBytes)
+	chunk := strings.Repeat("x", 64<<10)
+	for i := 0; i < 128; i++ { // 8 MB through a 256 KiB capture
+		writeCapture(t, w, chunk)
+	}
+
+	if cap(w.head) > OutputHeadBytes || cap(w.tail) > OutputTailBytes {
+		t.Fatalf("the capture grew to %d + %d bytes, want it fixed at %d + %d", cap(w.head), cap(w.tail), OutputHeadBytes, OutputTailBytes)
+	}
+	output, dropped, printed := w.captured()
+	if printed != 8<<20 {
+		t.Fatalf("printed = %d, want %d", printed, 8<<20)
+	}
+	if want := int64(8<<20) - MaxOutputBytes; dropped != want {
+		t.Fatalf("dropped = %d, want %d", dropped, want)
+	}
+	if len(output) > MaxOutputBytes+500 {
+		t.Fatalf("captured %d bytes, want no more than the cap plus one marker line", len(output))
 	}
 }
 
