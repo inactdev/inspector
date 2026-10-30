@@ -125,9 +125,18 @@ exec %q "$@"
 // written, and a test that leaves it behind litters the temp directory
 // once per run. Tests that have to look inside it read
 // result.Workspace.Root, which stays valid until the test returns.
+//
+// It mounts no terms folder, which is the ordinary run: a project whose
+// terms are its own repository's needs nothing extra in the container
+// (issue #69). runCheckWithTerms is for the tests that do.
 func runCheck(t *testing.T, repoRoot, command, image string, limits container.Limits, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
 	t.Helper()
-	result, err := RunCheck(repoRoot, command, image, limits, timeout, stdout, stderr)
+	return runCheckWithTerms(t, repoRoot, command, image, container.Mount{}, limits, timeout, stdout, stderr)
+}
+
+func runCheckWithTerms(t *testing.T, repoRoot, command, image string, terms container.Mount, limits container.Limits, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
+	t.Helper()
+	result, err := RunCheck(repoRoot, command, image, terms, limits, timeout, stdout, stderr)
 	t.Cleanup(result.Workspace.Cleanup)
 	return result, err
 }

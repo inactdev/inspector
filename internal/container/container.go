@@ -25,6 +25,14 @@ import (
 // configurable: the container has nothing else to run from.
 const WorkspaceDir = "/workspace"
 
+// TermsDir is where a project's terms folder - the config, Dockerfile and
+// check script of a repository that commits none of them - is mounted,
+// read-only, when a run was given one (issue #69). Fixed by ruling, for
+// the same reason WorkspaceDir is: the project's own check command names
+// paths under it, so a configurable mount point would be a second way to
+// say the same thing.
+const TermsDir = "/terms"
+
 // DefaultMemory, DefaultCPUs, and DefaultPIDsLimit match Fabrica's own
 // worker box (`--memory 2g --cpus 2 --pids-limit 512`), so a runaway
 // test or fork bomb in a project's check command cannot exhaust the
@@ -92,7 +100,8 @@ type Run struct {
 	// check it is ResolveWorkspace's workspace rather than the repo
 	// itself: the commit under check arrives through SourceMounts,
 	// read-only (issue #27). Nothing on the host is reachable from
-	// inside the container except this and the three mount lists below.
+	// inside the container except this, the three mount lists below,
+	// and TermsMount.
 	WorkspaceRoot string
 	// SourceMounts carry the commit under check into the workspace,
 	// read-only - one mount per tracked top-level entry of the repo.
@@ -112,6 +121,15 @@ type Run struct {
 	// SourceMounts these are declared to git as safe.directory below,
 	// because they are git directories rather than paths inside one.
 	ReadOnlyMounts []Mount
+	// TermsMount carries this run's terms folder in read-only at
+	// TermsDir, for a repository that commits none of its own terms
+	// (issue #69) - so the check command the folder's config names can
+	// be a script living in there. The zero Mount means there is no such
+	// folder: the terms are the repository's own and are already in the
+	// workspace. Unlike ReadOnlyMounts it is not declared to git as a
+	// safe.directory: it is configuration handed to this run, not a git
+	// directory a check command has to read as a repository.
+	TermsMount Mount
 	// Command is run with `sh -c` inside the container, from WorkspaceDir.
 	Command string
 	// Image is the project's own container image, built from the
@@ -209,6 +227,9 @@ func New(ctx context.Context, r Run) *Cmd {
 	}
 	for _, mount := range r.ReadOnlyMounts {
 		args = append(args, "-v", mount.Source+":"+mount.Target+":ro")
+	}
+	if r.TermsMount.Source != "" {
+		args = append(args, "-v", r.TermsMount.Source+":"+r.TermsMount.Target+":ro")
 	}
 	// Everything mounted here is owned by whoever ran inspector, while
 	// the image picks its own user - so on Linux, where bind-mounted

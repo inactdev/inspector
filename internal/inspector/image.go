@@ -49,17 +49,15 @@ var ErrUncommittedProjectImage = errors.New(ProjectDockerfileName + " is not com
 
 // ProjectDockerfile returns the path of repoRoot's committed
 // ProjectDockerfileName, or ErrNoProjectImage / ErrUncommittedProjectImage.
+//
+// Terms.Dockerfile is what callers use: it applies the committed
+// requirement to the repository's own terms and skips it for a -terms
+// folder, which is outside every repository inspector was handed and so
+// has nothing to be committed to (issue #69).
 func ProjectDockerfile(repoRoot string) (string, error) {
-	path := filepath.Join(repoRoot, ProjectDockerfileName)
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", ErrNoProjectImage
-	}
+	path, err := projectDockerfilePath(repoRoot)
 	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", path, err)
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("%s is a directory, not a Dockerfile", path)
+		return "", err
 	}
 
 	tracked, err := runValidationGit(repoRoot, "ls-files", "--full-name", "-z", "--", ProjectDockerfileName)
@@ -78,20 +76,46 @@ func ProjectDockerfile(repoRoot string) (string, error) {
 	return path, nil
 }
 
-// BuildProjectImage resolves the image this repo's check command runs in,
-// building dockerfile - which ProjectDockerfile resolved - with the
-// repository root as the build context and streaming docker's output to
-// log as it happens.
+// projectDockerfilePath finds ProjectDockerfileName in dir and confirms it
+// is a file, with no question of what tracks it - the whole of what can be
+// asked about a Dockerfile that lives outside any repository.
+func projectDockerfilePath(dir string) (string, error) {
+	path := filepath.Join(dir, ProjectDockerfileName)
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", ErrNoProjectImage
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory, not a Dockerfile", path)
+	}
+	return path, nil
+}
+
+// BuildProjectImage resolves the image this project's check command runs
+// in, building dockerfile - which Terms.Dockerfile resolved - with
+// contextDir as the build context and streaming docker's output to log as
+// it happens.
+//
+// contextDir is the directory the Dockerfile lives in: the repository root
+// in the ordinary case, and the -terms folder when the terms came from one
+// (issue #69). The context follows the Dockerfile rather than staying with
+// the repository on purpose - a terms Dockerfile can then COPY its own
+// siblings, and can reach nothing in the repository under check, which is
+// the right way round: baking the judged repository's own content into the
+// image would make the environment depend on the thing being judged.
 //
 // Errors wrap container.ErrProjectImageUnavailable or
 // container.ErrProjectImageBuildFailed. Either is a refusal for the
 // caller: a project whose declared environment inspector could not
 // produce has not been judged, and running the check in anything else
 // would judge a different project.
-func BuildProjectImage(repoRoot, dockerfile string, log io.Writer) (container.ProjectImage, error) {
+func BuildProjectImage(contextDir, dockerfile string, log io.Writer) (container.ProjectImage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ImageBuildTimeout)
 	defer cancel()
-	return container.BuildProjectImage(ctx, dockerfile, repoRoot, log)
+	return container.BuildProjectImage(ctx, dockerfile, contextDir, log)
 }
 
 // DescribeProjectImage is the one line a run prints about the image it is
