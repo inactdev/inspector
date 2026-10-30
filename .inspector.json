@@ -1,10 +1,8 @@
 {
   "check": "script/check",
   "protectedPaths": [
-    "script/check",
-    "*_test.go"
+    "script/check"
   ],
-  "protectedPathsNote": "Temporary test protection until inspector#7 lands; remove it then. Tracked by https://github.com/inactdev/fabrica/issues/96.",
   "testPaths": [
     "*_test.go"
   ]
