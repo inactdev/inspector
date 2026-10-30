@@ -63,6 +63,18 @@ func Run(ctx context.Context, opts RunOptions) (Result, error) {
 		return Result{Kind: Refused, Message: "no model was configured"}, nil
 	}
 	vendor, apiKeyVar, baseURLVar := llm.EnvVarNames(opts.Vendor)
+	if vendor == llm.ClaudeCodeVendor {
+		// The one vendor the examiner cannot have. Its agent runs inside the
+		// sealed runtime, which carries no `claude` command and no login for
+		// one; supplying either would mean mounting a full coding agent and
+		// an OAuth credential into the single component whose whole purpose
+		// is a sealed runtime. Refused here, before any container starts, so
+		// the answer is a sentence rather than a ten-minute examination that
+		// fails obscurely. The host-side judgments - the code reviewer, the
+		// test reviewer, the documentation judgment, the guidebook - do
+		// support it. See notes/20261030-a-vendor-that-runs-the-claude-command.md.
+		return Result{Kind: Refused, Message: fmt.Sprintf("vendor %s cannot examine: the examiner agent runs inside a sealed runtime that carries no %s command and no login for one, so examination needs a vendor whose key can be forwarded by name", vendor, llm.ClaudeCodeCommand)}, nil
+	}
 	if _, ok := os.LookupEnv(apiKeyVar); !ok {
 		return Result{Kind: Refused, Message: fmt.Sprintf("%s is not set", apiKeyVar)}, nil
 	}

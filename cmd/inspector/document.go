@@ -21,7 +21,7 @@ func runDocumenter(args []string, stdout, stderr io.Writer) int {
 	diffPath := fs.String("diff", "", "path to the unified diff of the change to judge (required)")
 	repoPath := fs.String("repo", ".", "path inside the project whose documentation to re-read")
 	requestFile := fs.String("request-file", "", "path to the request or expected-outcome text; the only source of what was meant. Omitted, the result says outright that inspector was told nothing, and any finding needing intent is flagged for the Client instead of guessed")
-	vendor := fs.String("vendor", "", "model vendor (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment")
+	vendor := fs.String("vendor", "", "model vendor (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment. claude-code reads neither and runs the local claude command instead, for a machine whose only model access is a Claude Code subscription")
 	model := fs.String("model", "", "model name for the selected vendor (required)")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, `usage: inspector document [flags]

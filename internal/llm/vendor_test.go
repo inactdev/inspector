@@ -1,6 +1,11 @@
 package llm
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestNormalizeVendor_DefaultsToAnthropic(t *testing.T) {
 	vendor, isDefault := NormalizeVendor("")
@@ -51,6 +56,45 @@ func TestResolve_RefusesByExactMissingVariableName(t *testing.T) {
 	}
 	if _, ok := adapter.(*OpenAIAdapter); !ok {
 		t.Fatalf("adapter = %T, want *OpenAIAdapter", adapter)
+	}
+}
+
+func TestEnvVarNames_ClaudeCodeHasNoSecretOfItsOwn(t *testing.T) {
+	vendor, apiKeyVar, baseURLVar := EnvVarNames("Claude-Code")
+	if vendor != ClaudeCodeVendor || apiKeyVar != "" || baseURLVar != "" {
+		t.Fatalf("EnvVarNames(\"Claude-Code\") = (%q, %q, %q), want %q with no variable names at all", vendor, apiKeyVar, baseURLVar, ClaudeCodeVendor)
+	}
+}
+
+func TestResolve_ClaudeCodeNeedsTheCommandAndNoKey(t *testing.T) {
+	// A PATH holding nothing: the refusal has to name the command, because
+	// "no API key" would send someone looking for a key that does not exist.
+	t.Setenv("PATH", t.TempDir())
+	if _, _, err := Resolve("claude-code", "claude-sonnet-5"); err == nil || !strings.Contains(err.Error(), ClaudeCodeCommand) {
+		t.Fatalf("Resolve() error = %v, want a refusal naming the %s command", err, ClaudeCodeCommand)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ClaudeCodeCommand), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("writing the stand-in command: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	// No <VENDOR>_API_KEY and no <VENDOR>_BASE_URL anywhere, deliberately.
+	adapter, vendor, err := Resolve("claude-code", "claude-sonnet-5")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if vendor != ClaudeCodeVendor {
+		t.Fatalf("vendor = %q, want %q", vendor, ClaudeCodeVendor)
+	}
+	claudeCode, ok := adapter.(*ClaudeCodeAdapter)
+	if !ok {
+		t.Fatalf("adapter = %T, want *ClaudeCodeAdapter", adapter)
+	}
+	// The clarification on issue #70: the vendor's model setting is passed
+	// through rather than left to the subscription's own default.
+	if claudeCode.Model != "claude-sonnet-5" {
+		t.Fatalf("model = %q, want the --model value passed through", claudeCode.Model)
 	}
 }
 

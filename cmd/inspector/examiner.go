@@ -29,7 +29,7 @@ func runExaminer(args []string, stdout, stderr io.Writer) int {
 	commit := fs.String("commit", "", "commit the examiner status belongs to (required)")
 	owner := fs.String("owner", "", "GitHub repository owner (required)")
 	repo := fs.String("repo", "", "GitHub repository name (required)")
-	vendor := fs.String("vendor", "", "model vendor (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment")
+	vendor := fs.String("vendor", "", "model vendor (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment. claude-code is refused here: this agent runs in a sealed runtime that has no claude command")
 	model := fs.String("model", "", "model name for the selected vendor, for deriving and driving scenarios (required)")
 	network := fs.String("network", examiner.DefaultNetwork, "Docker network that reaches the running app")
 	timeout := fs.Duration("timeout", examiner.DefaultTimeout, "maximum examination duration")

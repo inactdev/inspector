@@ -20,7 +20,7 @@ func runReviewer(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	diffPath := fs.String("diff", "", "path to the unified diff of the change to review (required)")
 	testPaths := fs.String("test-paths", "", "comma-separated glob patterns naming which files in the change are tests; each changed test is judged for whether it keeps or weakens the exam it imposed")
-	vendor := fs.String("vendor", "", "model vendor (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment")
+	vendor := fs.String("vendor", "", "model vendor (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment. claude-code reads neither and runs the local claude command instead, for a machine whose only model access is a Claude Code subscription")
 	model := fs.String("model", "", "model name for the selected vendor (required)")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, `usage: inspector review [flags]

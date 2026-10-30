@@ -68,7 +68,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	expectedTip := fs.String("expected-tip", "", "full commit SHA the pull request branch must still point at on the remote; given, the branch update may replace a history it does not contain (a rebase), and any other remote commit is refused without pushing. Omitted, the update stays fast-forward only")
 	prTitle := fs.String("pr-title", "", "pull request title to open after a green result (requires -pr-body-file; both or neither)")
 	prBodyFile := fs.String("pr-body-file", "", "path to a file containing the pull request body (requires -pr-title; both or neither)")
-	vendor := fs.String("vendor", "", "model vendor for judging changed test files (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment")
+	vendor := fs.String("vendor", "", "model vendor for judging changed test files (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment. claude-code reads neither and runs the local claude command instead, for a machine whose only model access is a Claude Code subscription")
 	model := fs.String("model", "", "model name for judging changed test files; required only when this project declares testPaths in .inspector.json")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, `usage: inspector [flags] [claim text...]
