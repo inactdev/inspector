@@ -53,6 +53,18 @@ type Report struct {
 	Claim        string  `json:"claim,omitempty"`
 	CheckCommand string  `json:"checkCommand"`
 	Outcome      Outcome `json:"outcome"`
+	// TermsDir names the folder this run read the project's terms from -
+	// its .inspector.json, its Dockerfile.inspector and the check script
+	// they name - and is absent on the ordinary run that read them from
+	// the repository root, where the commit above already records them
+	// (issue #69). Present, it is the only record of what judged this
+	// commit, since those files are in no commit at all.
+	TermsDir string `json:"termsDir,omitempty"`
+	// NoStamp records that this run was told to publish without posting
+	// any commit status. Absent on every ordinary run: the stamp is the
+	// default, and a run that skipped it on purpose must not read like
+	// one whose stamp was never confirmed.
+	NoStamp bool `json:"noStamp,omitempty"`
 	// Image is the local tag of the container image this check ran in,
 	// built from the project's own ProjectDockerfileName, and ImageBases
 	// names each base that file pulled in with the image ID docker

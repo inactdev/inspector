@@ -65,7 +65,10 @@ than falling back to running the check unsandboxed; see below.
 
 ## Use
 
-In the repo you want inspected, add two files at the root. `.inspector.json`
+In the repo you want inspected, add two files at the root - or, for a
+repository that may not carry them at all, put them in a folder beside it and
+name it with `--terms` (see [Terms from outside the
+repository](#terms-from-outside-the-repository---terms)). `.inspector.json`
 names that project's own check command - inspector never guesses at one:
 
 ```json
@@ -473,6 +476,14 @@ Flags:
   (see [Publishing a rebased branch](#publishing-a-rebased-branch---expected-tip)).
   Omitted, the branch update stays fast-forward only.
 - `--repo <path>` - inspect a repo other than the current directory
+- `--terms <dir>` - optional; read `.inspector.json`, `Dockerfile.inspector`
+  and the check script from that folder instead of the repository root, for a
+  repository that carries none of them (see [Terms from outside the
+  repository](#terms-from-outside-the-repository---terms)). Omitted, nothing
+  changes.
+- `--no-stamp` - optional; publish a green result without posting any commit
+  status (see [Publishing without a stamp](#publishing-without-a-stamp---no-stamp)).
+  Omitted, the status is posted as always.
 - `-pr-title <text>` and `-pr-body-file <path>` - optional; given together,
   open a pull request for `--branch` against the repository's default branch
   once a green result is published, or report the existing one if that
@@ -530,6 +541,94 @@ Because the report is notes and not authority, a report that can't be saved
 never changes the local check result. Inspector prints a loud warning to stderr
 naming where the save failed, then still returns red or proceeds with green
 publication. A report failure alone does not cause a refusal.
+
+#### Terms from outside the repository: `--terms`
+
+Some repositories may not carry anything of inspector's: a company repository
+nobody is allowed to add files to. `--terms <dir>` names a folder beside it
+holding the three files instead:
+
+```
+inspector --branch my-feature --terms /opt/terms/acme-billing
+```
+
+```
+/opt/terms/acme-billing/
+  .inspector.json         {"check": "sh /terms/check.sh"}
+  Dockerfile.inspector    the environment that command runs in
+  check.sh                whatever this project's check actually is
+```
+
+What moves: `.inspector.json`, `Dockerfile.inspector`, and the `docker build`
+context all resolve against that folder. The folder is mounted **read-only at
+`/terms`** inside the check container - a fixed path, like `/workspace`, with
+no config key for it - so the check command names its script there, exactly
+as the example above does.
+
+What does not move:
+
+- **The repository is still at `/workspace`**, still the check command's
+  working directory, still read-only for everything git tracks, and the
+  working tree must still be clean. `--terms` changes where the terms live,
+  not what is judged or how.
+- **The terms folder itself has no clean-tree or committed requirement.** In
+  the ordinary case `.inspector.json` is tracked because an untracked one
+  makes the tree dirty, and `Dockerfile.inspector` is checked against the
+  index outright. Neither question has an answer for a folder outside every
+  repository inspector was handed, so the Dockerfile only has to be there.
+  **That is a real loss, stated plainly: with `--terms`, nobody reviewing the
+  pull request sees the terms the work was judged under.** It is the trade the
+  flag exists to make.
+- **`inspector-gate` is untouched.** It protects in-repo terms by name, read
+  from the base branch, and a repository that has none simply has nothing
+  there for it to protect.
+- **The run report still goes in the judged repository's gitignored
+  `.inspector/`**, as always - and it names the terms folder in `termsDir`,
+  since with `--terms` that is the only record of what judged the commit.
+
+Two folders are refused by name rather than used. A terms folder **inside**
+the repository would be in-repo terms at a path the gate does not protect -
+an unprotected copy of the thing that decides whether work passes. A terms
+folder that **holds** the repository (a parent directory, a home directory)
+would mount that whole ancestor into the check container; what a check command
+can reach has to be declared, not inherited from wherever the repository sits.
+Put the terms in a folder of their own.
+
+The build context follows the Dockerfile, so a terms `Dockerfile.inspector`
+can `COPY` its own siblings and can reach nothing in the repository under
+check. That is the right way round - the image is the environment, and baking
+the judged repository's own content into it would make the environment depend
+on the thing being judged - but it does mean a terms Dockerfile cannot
+`COPY package-lock.json` from the repository the way an in-repo one can.
+
+#### Publishing without a stamp: `--no-stamp`
+
+`--no-stamp` publishes a green result and leaves the commit carrying no
+status:
+
+```
+inspector --branch my-feature --no-stamp
+```
+
+Everything else about publication is unchanged - the staging push, the branch
+update, the pull request - and so is the local report, which records
+`noStamp: true` so a run that skipped its stamp on purpose can never be
+mistaken for one whose stamp was never confirmed. The run also says so on
+stdout.
+
+**No** commit status is posted, not merely the green one: `inspector-tests` is
+suppressed too, since a commit carrying a judgment about its tests and none
+about its check would say something untrue about the run. The test judgment
+itself still runs, and is still printed and recorded - it is a judgment, not a
+stamp, and dropping it would lose a weakened-exam finding in silence.
+`GITHUB_TOKEN` is still required: the remote default branch is still read, in
+order to be refused as a publication target, and the pull request still needs
+it.
+
+The stamp is the default, and for a repository with a gate it has to be: no
+status means `inspector-gate` reads the pull request exactly as it reads one
+that was never inspected. This flag is for the repository that has no gate to
+satisfy.
 
 ### Recording the result
 
@@ -1434,6 +1533,12 @@ listed consumer, carrying both files and naming the commit. Issue #12 is built:
 one run's captured output is bounded to 256 KiB, head and tail with the dropped
 middle named, and `.inspector/runs/` keeps the last 20 runs instead of growing
 forever - see [What a report keeps, and for how long](#what-a-report-keeps-and-for-how-long).
+Issue #69 is built: `--terms <dir>` reads a project's `.inspector.json`,
+`Dockerfile.inspector` and check script from a folder outside the repository
+it judges, mounted read-only at `/terms`, for a repository nothing may be
+added to; and `--no-stamp` publishes a green result - staging, branch, pull
+request - while posting no commit status at all. Without either flag nothing
+changes.
 Still to come: the
 installer - see
 [SPEC.md](SPEC.md) and the repo's issues.

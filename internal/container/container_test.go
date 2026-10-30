@@ -134,6 +134,44 @@ func TestNew_SourceMountsAreReadOnlyAndWritableMountsAreNot(t *testing.T) {
 	}
 }
 
+// TestNew_TermsMountIsReadOnlyAndNotTrustedAsAGitDirectory covers issue
+// #69's mount: the terms folder arrives at the fixed TermsDir, read-only,
+// and - unlike ReadOnlyMounts - is not declared to git as a safe
+// directory, because it is configuration rather than a repository the
+// check command has to read.
+func TestNew_TermsMountIsReadOnlyAndNotTrustedAsAGitDirectory(t *testing.T) {
+	cmd := New(context.Background(), Run{
+		WorkspaceRoot: "/tmp/inspector-workspace-1",
+		TermsMount:    Mount{Source: "/host/terms", Target: TermsDir},
+		Command:       "sh " + TermsDir + "/check.sh",
+		Image:         "alpine",
+		User:          "1000:1000",
+	})
+
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "-v /host/terms:"+TermsDir+":ro") {
+		t.Fatalf("docker args = %q, want the terms folder mounted read-only at %s", args, TermsDir)
+	}
+	// The working directory is still the repository's workspace: -terms
+	// moves where the terms live, not where the check command runs.
+	if !strings.Contains(args, "-w "+WorkspaceDir) {
+		t.Fatalf("docker args = %q, want the check command still run from %s", args, WorkspaceDir)
+	}
+	if !strings.Contains(args, "GIT_CONFIG_COUNT=1") || strings.Contains(args, "GIT_CONFIG_VALUE_1="+TermsDir) {
+		t.Fatalf("docker args = %q, want safe.directory left to the workspace and real git mounts", args)
+	}
+}
+
+// A run with no terms folder mounts nothing extra - the ordinary case,
+// where the terms are the repository's own and already in the workspace.
+func TestNew_NoTermsMountWithoutATermsFolder(t *testing.T) {
+	cmd := New(context.Background(), Run{WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine"})
+
+	if args := strings.Join(cmd.Args, " "); strings.Contains(args, TermsDir) {
+		t.Fatalf("docker args = %q, should not mention %s when no terms folder was given", args, TermsDir)
+	}
+}
+
 // TestNew_NetworkIsAlwaysDenied is the whole of issue #47's last
 // requirement at this layer: there is no field, flag or config key left
 // that produces a Run without --network none. Asserted over every shape
@@ -144,6 +182,7 @@ func TestNew_NetworkIsAlwaysDenied(t *testing.T) {
 		"bare":       {WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine"},
 		"with user":  {WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine", User: "1000:1000"},
 		"with mount": {WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine", SourceMounts: []Mount{{Source: "/host/repo/cmd", Target: WorkspaceDir + "/cmd"}}},
+		"with terms": {WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine", TermsMount: Mount{Source: "/host/terms", Target: TermsDir}},
 		"with limits": {WorkspaceRoot: "/host/repo", Command: "true", Image: "alpine",
 			Limits: Limits{Memory: "4g", CPUs: "1.5", PIDsLimit: 128}},
 	}

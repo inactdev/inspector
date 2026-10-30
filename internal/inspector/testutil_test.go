@@ -20,7 +20,17 @@ const defaultTestDockerfile = "FROM " + testImage + "\n"
 // the caller named none - and returns the repo root.
 func newTestRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
-	dir := t.TempDir()
+	return newTestRepoIn(t, t.TempDir(), files)
+}
+
+// newTestRepoIn is newTestRepo at a path the caller chose, for the tests
+// that care where the repository sits relative to something else - a
+// terms folder that must not hold it, for instance (issue #69).
+func newTestRepoIn(t *testing.T, dir string, files map[string]string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", dir, err)
+	}
 
 	runGitT(t, dir, "init", "-q")
 	runGitT(t, dir, "config", "user.email", "test@example.com")

@@ -23,7 +23,8 @@ const (
 	// Red means the project's check command failed.
 	Red Outcome = "red"
 	// Refused means inspector never reached a verdict on the code - no
-	// check command configured, a retired config key still set, no
+	// check command configured, a retired config key still set, a
+	// -terms folder that cannot be used as this project's terms, no
 	// committed Dockerfile to build the check image from or an image
 	// that would not build, no usable container runtime, a
 	// repo whose git directory cannot be reached inside the container or
@@ -43,10 +44,23 @@ const (
 type Options struct {
 	// RepoPath is any path inside the git repository to inspect.
 	RepoPath string
+	// TermsDir is the folder holding this project's terms -
+	// ConfigFileName, ProjectDockerfileName, and the check script the
+	// first of those names - for a repository that commits none of them
+	// (issue #69). Empty, which is the ordinary case, reads them from
+	// the repository root. See ResolveTerms and Terms.
+	TermsDir string
 	// Claim is free-text context for what's being claimed as finished.
 	// It is recorded in the local report only - inspector does not act
 	// on its content.
 	Claim string
+	// NoStamp records that this run was told to publish a green result
+	// without posting any commit status (issue #69). Run neither
+	// publishes nor stamps anything itself - it carries the flag into
+	// the local report, so a run whose stamp was skipped on purpose and
+	// one whose stamp was never confirmed cannot read the same way
+	// afterwards.
+	NoStamp bool
 
 	Stdout io.Writer
 	Stderr io.Writer
@@ -103,7 +117,26 @@ func Run(opts Options) (Result, error) {
 		return Result{}, err
 	}
 
-	cfg, err := LoadConfig(repoRoot)
+	// After the clean-tree refusal above, which is about the repository
+	// and stays about the repository: a terms folder is configuration
+	// handed to this run, not the thing being judged (issue #69).
+	terms, err := ResolveTerms(repoRoot, opts.TermsDir)
+	if err != nil {
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%v\n\n"+
+					"inspector reads this project's terms - its %s, its %s, and the\n"+
+					"check script they name - from that folder, and refuses rather than falling back\n"+
+					"to the repository's own: a run told to judge a project by one set of terms must\n"+
+					"never judge it by another.",
+				err, ConfigFileName, ProjectDockerfileName,
+			),
+		}, nil
+	}
+
+	cfg, err := terms.Config()
 	if errors.Is(err, ErrNoCheckCommand) {
 		return Result{
 			Outcome: Refused,
@@ -112,11 +145,11 @@ func Run(opts Options) (Result, error) {
 				"no check command configured for this repo.\n\n"+
 					"inspector refuses to run rather than silently doing nothing - a repo that runs\n"+
 					"unprotected must never look identical to one that runs protected.\n\n"+
-					"Configure it by creating %s in the repo root:\n\n"+
+					"Configure it by creating %s in %s:\n\n"+
 					"  {\n    \"check\": \"<your project's own test/lint/build command>\"\n  }\n\n"+
-					"and committing a %s beside it with your project's toolchain and\n"+
+					"and a %s beside it with your project's toolchain and\n"+
 					"dependencies in it - that is the image the check command runs in.\n",
-				ConfigFileName, ProjectDockerfileName,
+				ConfigFileName, terms.Location(), ProjectDockerfileName,
 			),
 		}, nil
 	}
@@ -159,8 +192,8 @@ func Run(opts Options) (Result, error) {
 	// project that commits no image to build from has a gap in what it
 	// declares, and saying so is more use than reporting a missing
 	// Docker to someone who would hit this immediately afterwards.
-	dockerfile, err := ProjectDockerfile(repoRoot)
-	if refusal, refused := refuseProjectImage(repoRoot, commit, container.ProjectImage{}, err); refused {
+	dockerfile, err := terms.Dockerfile()
+	if refusal, refused := refuseProjectImage(repoRoot, commit, terms, container.ProjectImage{}, err); refused {
 		return refusal, nil
 	}
 
@@ -188,15 +221,17 @@ func Run(opts Options) (Result, error) {
 		// through writers of its own that do not.
 		buildLog = io.Discard
 	}
-	image, err := BuildProjectImage(repoRoot, dockerfile, buildLog)
-	if refusal, refused := refuseProjectImage(repoRoot, commit, image, err); refused {
+	// The build context is the directory the Dockerfile lives in, which
+	// is the repository root unless -terms moved the terms out of it.
+	image, err := BuildProjectImage(terms.Dir, dockerfile, buildLog)
+	if refusal, refused := refuseProjectImage(repoRoot, commit, terms, image, err); refused {
 		return refusal, nil
 	}
 	fmt.Fprintln(buildLog, DescribeProjectImage(image))
 
 	timeout := cfg.Timeout()
 	started := time.Now()
-	checkResult, err := RunCheck(repoRoot, cfg.Check, image.Tag, cfg.Limits(), timeout, opts.Stdout, opts.Stderr)
+	checkResult, err := RunCheck(repoRoot, cfg.Check, image.Tag, terms.Mount(), cfg.Limits(), timeout, opts.Stdout, opts.Stderr)
 	if errors.Is(err, container.ErrGitDirUnavailable) {
 		return Result{
 			Outcome: Refused,
@@ -264,16 +299,22 @@ func Run(opts Options) (Result, error) {
 		Repo:         repoRoot,
 		Claim:        opts.Claim,
 		CheckCommand: cfg.Check,
-		Image:        image.Tag,
-		ImageBases:   imageBases(image),
-		Outcome:      outcome,
-		StartedAt:    started,
-		FinishedAt:   finished,
-		DurationMS:   finished.Sub(started).Milliseconds(),
-		ExitCode:     checkResult.ExitCode,
-		Signal:       checkResult.Signal,
-		TimedOut:     checkResult.TimedOut,
-		Output:       checkResult.Output,
+		// Only when they came from outside the repository: a report that
+		// named the repo root as its terms folder on every ordinary run
+		// would say nothing, while this says which terms judged the
+		// commit in the one case where that is not obvious.
+		TermsDir:   termsDirReported(terms),
+		NoStamp:    opts.NoStamp,
+		Image:      image.Tag,
+		ImageBases: imageBases(image),
+		Outcome:    outcome,
+		StartedAt:  started,
+		FinishedAt: finished,
+		DurationMS: finished.Sub(started).Milliseconds(),
+		ExitCode:   checkResult.ExitCode,
+		Signal:     checkResult.Signal,
+		TimedOut:   checkResult.TimedOut,
+		Output:     checkResult.Output,
 		// Recorded as a fact of the run, not left for a reader to infer
 		// from the output's size: a report that silently holds part of
 		// the output is worse than a large one (issue #12).
@@ -351,7 +392,7 @@ func Run(opts Options) (Result, error) {
 // failure. None of these is a red: a project whose declared environment
 // inspector could not build has not been judged, and judging it in some
 // other image would judge a different project (issue #47).
-func refuseProjectImage(repoRoot, commit string, image container.ProjectImage, err error) (Result, bool) {
+func refuseProjectImage(repoRoot, commit string, terms Terms, image container.ProjectImage, err error) (Result, bool) {
 	switch {
 	case err == nil:
 		return Result{}, false
@@ -360,16 +401,16 @@ func refuseProjectImage(repoRoot, commit string, image container.ProjectImage, e
 			Outcome: Refused,
 			Commit:  commit,
 			Message: fmt.Sprintf(
-				"this repo commits no %s, so there is no image to run its check in.\n\n"+
+				"there is no %s in %s, so there is no image to run this project's check in.\n\n"+
 					"inspector builds that file and runs the check command inside the result - it\n"+
 					"never guesses at a toolchain, the same way it never guesses at a check\n"+
-					"command. Add %s at the repo root, carrying this project's\n"+
+					"command. Add %s in %s, carrying this project's\n"+
 					"toolchain and its dependencies:\n\n"+
 					"  FROM <a base image with your toolchain>\n"+
 					"  # install this project's dependencies here, so the check needs no network\n\n"+
 					"The same image is meant to be the box the work is written in, so what the\n"+
 					"check runs against cannot differ from what the work was built against.\n",
-				ProjectDockerfileName, ProjectDockerfileName,
+				ProjectDockerfileName, terms.Location(), ProjectDockerfileName, terms.Location(),
 			),
 		}, true
 	case errors.Is(err, ErrUncommittedProjectImage):
@@ -426,6 +467,16 @@ func buildLogSuffix(repoRoot string, image container.ProjectImage) string {
 		return fmt.Sprintf(" (its log could not be saved: %v)", err)
 	}
 	return fmt.Sprintf(" and kept in %s", path)
+}
+
+// termsDirReported is the terms folder a report names, and nothing for
+// the ordinary run whose terms are the repository's own - those are in
+// the commit the report already names.
+func termsDirReported(terms Terms) string {
+	if !terms.Outside {
+		return ""
+	}
+	return terms.Dir
 }
 
 // imageBases records which base image each FROM resolved to, so the

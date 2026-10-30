@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/inactdev/inspector/internal/container"
 	"github.com/inactdev/inspector/internal/inspector"
 	"github.com/inactdev/inspector/internal/llm"
 )
@@ -61,6 +62,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("inspector", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repoPath := fs.String("repo", ".", "path to the repository to inspect")
+	termsDir := fs.String("terms", "", "directory holding this project's "+inspector.ConfigFileName+", "+inspector.ProjectDockerfileName+" and check script, for a repository that carries none of them; it is mounted read-only at "+container.TermsDir+" in the check container, which still runs from the repository at "+container.WorkspaceDir+". Omitted, all three are read from the repository root as before")
+	noStamp := fs.Bool("no-stamp", false, "publish a green result without posting any commit status: the commit is still staged, the named branch still updated and its pull request still opened, and the local report records that no status was posted. Omitted, the status is posted as always")
 	publicationBranch := fs.String("branch", "", "pull request branch to publish after a green result (required)")
 	expectedTip := fs.String("expected-tip", "", "full commit SHA the pull request branch must still point at on the remote; given, the branch update may replace a history it does not contain (a rebase), and any other remote commit is refused without pushing. Omitted, the update stays fast-forward only")
 	prTitle := fs.String("pr-title", "", "pull request title to open after a green result (requires -pr-body-file; both or neither)")
@@ -89,6 +92,15 @@ branch must still point at on the remote, and the update then carries a lease
 on exactly that commit. A remote sitting on any other commit is refused with
 nothing pushed, because an unexpected commit there is work nobody accounted
 for.
+
+-terms <dir> is for a repository that may not carry inspector's own files at
+all: .inspector.json, Dockerfile.inspector and the check script are read from
+that folder instead of the repository root, and the folder is mounted read-only
+at `+container.TermsDir+` in the check container. The repository is still mounted
+at `+container.WorkspaceDir+`, the check command still runs from there, and that
+repository's working tree must still be clean. -no-stamp publishes a green
+result - staging, branch, pull request - while posting no commit status at
+all; the run's report says so.
 
 When the project declares testPaths in .inspector.json and this commit's
 change touches one of those files, inspector also judges whether any changed
@@ -139,10 +151,16 @@ flags:
 		}
 		prBody = string(content)
 	}
+	stamp := stampCommit
+	if *noStamp {
+		stamp = noStampPolicy
+	}
 	publicationTarget := capturePublicationTarget(*repoPath)
 	opts := inspector.Options{
 		RepoPath: *repoPath,
+		TermsDir: *termsDir,
 		Claim:    strings.Join(fs.Args(), " "),
+		NoStamp:  *noStamp,
 		Stdout:   stdout,
 		Stderr:   stderr,
 	}
@@ -165,7 +183,7 @@ flags:
 
 	switch result.Outcome {
 	case inspector.Green:
-		cleanupWarning, tests, err := publishGreen(publicationTarget, branchTarget, result, judgment)
+		cleanupWarning, tests, err := publishGreen(publicationTarget, branchTarget, result, judgment, stamp)
 		// Before the error is handled: the judgment runs before the first
 		// remote step, so a publication that then failed still has a review
 		// worth keeping in the report.
@@ -178,7 +196,13 @@ flags:
 			fmt.Fprintf(stderr, "\n%s\n%s\n%s\n\n", warningBar, cleanupWarning, warningBar)
 		}
 		fmt.Fprintf(stdout, "\ngreen - %s%s\n", result.Commit, reportSuffix(result.ReportPath))
-		printTestJudgment(stdout, stderr, tests)
+		if stamp == noStampPolicy {
+			// Never silent: the branch moved and the pull request is
+			// there, but nothing on the commit says this run happened,
+			// so a reader of GitHub alone has no inspector result at all.
+			fmt.Fprintf(stdout, "no commit status posted (-no-stamp); the branch and pull request were published as usual\n")
+		}
+		printTestJudgment(stdout, stderr, tests, stamp)
 		if openPullRequest {
 			openGreenPullRequest(publicationTarget, *publicationBranch, *prTitle, prBody, result, stdout, stderr)
 		}
@@ -261,6 +285,23 @@ type publicationBranchTarget struct {
 	ExpectedTip string
 }
 
+// stampPolicy says whether a green publication may leave a commit status
+// on the commit it publishes.
+type stampPolicy bool
+
+const (
+	// stampCommit is the default and everything that came before issue
+	// #69: the green `inspector` status, and the `inspector-tests` status
+	// beside it when one is owed, are posted as part of publication.
+	stampCommit stampPolicy = true
+	// noStampPolicy is -no-stamp: stage the commit, move the named
+	// branch and open its pull request, but post no commit status at
+	// all. Not only the green one - a commit carrying a judgment about
+	// its tests and none about its check would say something untrue
+	// about the run.
+	noStampPolicy stampPolicy = false
+)
+
 // publishGreen performs the publication order that keeps inspector-gate from
 // observing a pull-request branch without an inspector status: stage the
 // checked commit remotely, record its green status, record the changed-test
@@ -271,7 +312,15 @@ type publicationBranchTarget struct {
 // green status but before the branch moves, so the gate's very first look at
 // the pull request already sees both statuses - the same reason the green
 // status itself precedes the branch move.
-func publishGreen(snapshot publicationTargetSnapshot, branchTarget publicationBranchTarget, result inspector.Result, judgment testJudgmentOptions) (cleanupWarning string, tests testJudgment, err error) {
+//
+// Under noStampPolicy (-no-stamp, issue #69) every step still runs except the
+// two status posts: the commit is staged, the branch moves, and the caller
+// opens its pull request. The judgment itself still runs and is still
+// recorded and printed - it is a judgment, not a stamp, and dropping it would
+// silently lose a weakened-exam finding - and the token is still required,
+// since the remote default branch is still read in order to be refused as a
+// publication target.
+func publishGreen(snapshot publicationTargetSnapshot, branchTarget publicationBranchTarget, result inspector.Result, judgment testJudgmentOptions, stamp stampPolicy) (cleanupWarning string, tests testJudgment, err error) {
 	publicationBranch := branchTarget.Branch
 	if err := validatePublicationPlatform(); err != nil {
 		return "", testJudgment{}, publicationRefusal(err)
@@ -350,47 +399,59 @@ func publishGreen(snapshot publicationTargetSnapshot, branchTarget publicationBr
 		return "", tests, incompletePublication(fmt.Errorf("staging push failed; whether temporary staging ref %s was updated is unknown, and no status post or branch move was attempted: %w", stagingRef, err))
 	}
 
-	description := "inspector: green"
-	if result.ReportPath != "" {
-		description = fmt.Sprintf("inspector: green - see %s/%s locally", inspector.RunsDirName, inspector.LatestReportName)
-	}
-	if err := inspector.PostCommitStatus(inspector.PostStatusOptions{
-		Owner:       snapshot.target.Owner,
-		Repo:        snapshot.target.Repo,
-		Commit:      result.Commit,
-		State:       inspector.StatusSuccess,
-		Description: description,
-		Token:       token,
-		APIBaseURL:  githubAPIBaseURL,
-	}); err != nil {
-		return "", tests, incompletePublication(fmt.Errorf("recording the green status did not complete; temporary staging ref %s was created, and branch %q was not attempted: %w", stagingRef, publicationBranch, err))
-	}
-
-	if tests.Posted {
+	if stamp == stampCommit {
+		description := "inspector: green"
+		if result.ReportPath != "" {
+			description = fmt.Sprintf("inspector: green - see %s/%s locally", inspector.RunsDirName, inspector.LatestReportName)
+		}
 		if err := inspector.PostCommitStatus(inspector.PostStatusOptions{
 			Owner:       snapshot.target.Owner,
 			Repo:        snapshot.target.Repo,
 			Commit:      result.Commit,
-			State:       tests.State,
-			Context:     inspector.TestsStatusContext,
-			Description: tests.Description,
+			State:       inspector.StatusSuccess,
+			Description: description,
 			Token:       token,
 			APIBaseURL:  githubAPIBaseURL,
 		}); err != nil {
-			return "", tests, incompletePublication(fmt.Errorf("recording the %q status did not complete; the green status was recorded, temporary staging ref %s was created, and branch %q was not attempted: %w", inspector.TestsStatusContext, stagingRef, publicationBranch, err))
+			return "", tests, incompletePublication(fmt.Errorf("recording the green status did not complete; temporary staging ref %s was created, and branch %q was not attempted: %w", stagingRef, publicationBranch, err))
+		}
+
+		if tests.Posted {
+			if err := inspector.PostCommitStatus(inspector.PostStatusOptions{
+				Owner:       snapshot.target.Owner,
+				Repo:        snapshot.target.Repo,
+				Commit:      result.Commit,
+				State:       tests.State,
+				Context:     inspector.TestsStatusContext,
+				Description: tests.Description,
+				Token:       token,
+				APIBaseURL:  githubAPIBaseURL,
+			}); err != nil {
+				return "", tests, incompletePublication(fmt.Errorf("recording the %q status did not complete; the green status was recorded, temporary staging ref %s was created, and branch %q was not attempted: %w", inspector.TestsStatusContext, stagingRef, publicationBranch, err))
+			}
 		}
 	}
 
 	if err := updatePublicationBranch(snapshot, branchTarget, branchRef, result.Commit); err != nil {
 		if errors.Is(err, inspector.ErrStaleLease) {
-			return "", tests, incompletePublication(fmt.Errorf("branch %q was not moved: the remote had left --expected-tip %s by the time the push ran, so it refused to replace that history. the green status was recorded and temporary staging ref %s may remain: %w", publicationBranch, branchTarget.ExpectedTip, stagingRef, err))
+			return "", tests, incompletePublication(fmt.Errorf("branch %q was not moved: the remote had left --expected-tip %s by the time the push ran, so it refused to replace that history. %s, and temporary staging ref %s may remain: %w", publicationBranch, branchTarget.ExpectedTip, publishedSoFar(stamp), stagingRef, err))
 		}
-		return "", tests, incompletePublication(fmt.Errorf("moving branch %q failed after the green status was recorded; whether the remote branch moved is unknown, and temporary staging ref %s may remain: %w", publicationBranch, stagingRef, err))
+		return "", tests, incompletePublication(fmt.Errorf("moving branch %q failed; %s, and whether the remote branch moved is unknown - temporary staging ref %s may remain: %w", publicationBranch, publishedSoFar(stamp), stagingRef, err))
 	}
 	if err := inspector.DeleteRefFromRemote(snapshot.repoRoot, snapshot.target.PushURL, stagingRef); err != nil {
 		return fmt.Sprintf("inspector published green branch %q, but could not confirm removal of its temporary staging ref: %v", publicationBranch, err), tests, nil
 	}
 	return "", tests, nil
+}
+
+// publishedSoFar says what the publication had done about this commit's
+// status by the time the branch move ran, so a failure after that point
+// never tells someone a status was recorded when -no-stamp meant none was.
+func publishedSoFar(stamp stampPolicy) string {
+	if stamp == noStampPolicy {
+		return "no commit status was posted (-no-stamp)"
+	}
+	return "the green status was recorded"
 }
 
 // updatePublicationBranch is the last remote write of the sequence. Without
@@ -410,11 +471,18 @@ func updatePublicationBranch(snapshot publicationTargetSnapshot, branchTarget pu
 // posted a failing inspector-tests status is still a run the gate will hold
 // back, so it must not be possible to read the "green" line alone and think
 // the pull request is through.
-func printTestJudgment(stdout, stderr io.Writer, tests testJudgment) {
+func printTestJudgment(stdout, stderr io.Writer, tests testJudgment, stamp stampPolicy) {
 	if !tests.Posted {
 		return
 	}
-	fmt.Fprintf(stdout, "%s: %s - %s\n", inspector.TestsStatusContext, tests.State, tests.Summary)
+	// Under -no-stamp the judgment still ran and is still recorded, but
+	// naming the status context without saying nothing was posted would
+	// have someone looking on GitHub for a status that is not there.
+	note := ""
+	if stamp == noStampPolicy {
+		note = " (judged locally; not posted: -no-stamp)"
+	}
+	fmt.Fprintf(stdout, "%s: %s - %s%s\n", inspector.TestsStatusContext, tests.State, tests.Summary, note)
 	printTestReview(stdout, tests.Review)
 	if tests.State != inspector.StatusSuccess {
 		fmt.Fprintf(stderr, "\n%s\n%s\n%s\n\n", warningBar, tests.Warning, warningBar)

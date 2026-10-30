@@ -103,6 +103,7 @@ func TestPublishGreen_DeletedTestEncodingTheFeatureIsRedWithTheReason(t *testing
 		capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"},
 		inspector.Result{Outcome: inspector.Green, Commit: commit, TestPaths: []string{"*_test.go"}},
 		testJudgmentOptions{Vendor: "anthropic", Model: "claude-opus-5", VendorDescription: "anthropic (default, no flag given)"},
+		stampCommit,
 	)
 	if err != nil {
 		t.Fatalf("publishGreen: %v", err)
@@ -173,6 +174,7 @@ func TestPublishGreen_AddedUnrelatedTestClearsTheGateWithoutAnOverride(t *testin
 		capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"},
 		inspector.Result{Outcome: inspector.Green, Commit: commit, TestPaths: []string{"*_test.go"}},
 		testJudgmentOptions{Vendor: "anthropic", Model: "claude-opus-5", VendorDescription: "anthropic (default, no flag given)"},
+		stampCommit,
 	)
 	if err != nil {
 		t.Fatalf("publishGreen: %v", err)
@@ -216,6 +218,7 @@ func TestPublishGreen_NoChangedTestPostsNoTestStatus(t *testing.T) {
 		capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"},
 		inspector.Result{Outcome: inspector.Green, Commit: commit, TestPaths: []string{"*_test.go"}},
 		testJudgmentOptions{Model: "claude-opus-5", VendorDescription: "anthropic (default, no flag given)"},
+		stampCommit,
 	)
 	if err != nil {
 		t.Fatalf("publishGreen: %v", err)
@@ -250,6 +253,7 @@ func TestPublishGreen_NoTestPathsPostsNoTestStatus(t *testing.T) {
 		capturePublicationTarget(dir), publicationBranchTarget{Branch: "feature"},
 		inspector.Result{Outcome: inspector.Green, Commit: commit},
 		testJudgmentOptions{Model: "claude-opus-5"},
+		stampCommit,
 	)
 	if err != nil {
 		t.Fatalf("publishGreen: %v", err)
@@ -429,7 +433,7 @@ func TestPrintTestJudgment_PrintsEveryPerFileReason(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	printTestJudgment(&stdout, &stderr, tests)
+	printTestJudgment(&stdout, &stderr, tests, stampCommit)
 	out := stdout.String()
 	for _, want := range []string{
 		inspector.TestsStatusContext + ": success",

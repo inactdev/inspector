@@ -378,6 +378,172 @@ func TestRun_ReportNamesTheCheckImage(t *testing.T) {
 	}
 }
 
+// newWorkModeRepo is the repository issue #69 exists for: one that
+// carries nothing of inspector's at all - no config, and the default
+// Dockerfile removed again - because nothing may be added to it.
+func newWorkModeRepo(t *testing.T) string {
+	t.Helper()
+	dir := newTestRepo(t, map[string]string{"src/app.txt": "the company's own code\n"})
+	runGitT(t, dir, "rm", "-q", ProjectDockerfileName)
+	runGitT(t, dir, "commit", "-q", "-m", "a repository that carries no terms")
+	return dir
+}
+
+// TestRun_TermsFromAFolderOutsideTheRepo is issue #69's main requirement:
+// a repository that commits none of the three files is still judged, from
+// a folder beside it, and the check command finds that folder read-only at
+// container.TermsDir while the repository is still at WorkspaceDir.
+func TestRun_TermsFromAFolderOutsideTheRepo(t *testing.T) {
+	requireDocker(t)
+	repo := newWorkModeRepo(t)
+	terms := t.TempDir()
+	writeFiles(t, terms, map[string]string{
+		ConfigFileName:        `{"check": "sh ` + container.TermsDir + `/check.sh"}`,
+		ProjectDockerfileName: defaultTestDockerfile,
+		// Proves all four facts at once: the script came from the terms
+		// folder, the repository is still at WorkspaceDir with its own
+		// content, the folder is read-only in there, and the check runs
+		// from the repository.
+		"check.sh": "set -e\n" +
+			"test \"$(pwd)\" = " + container.WorkspaceDir + "\n" +
+			"cat src/app.txt\n" +
+			"if touch " + container.TermsDir + "/written 2>/dev/null; then echo 'terms folder was writable'; exit 1; fi\n" +
+			"echo check-script-from-the-terms-folder-ran\n",
+	})
+	opts, _, _ := runOpts(repo)
+	opts.TermsDir = terms
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Green {
+		t.Fatalf("Outcome = %v, want Green (message: %s)", result.Outcome, result.Message)
+	}
+	report := readFile(t, result.ReportPath)
+	if !strings.Contains(report, "check-script-from-the-terms-folder-ran") {
+		t.Fatalf("report should carry the terms folder's own check script output, got: %s", truncate(report, 800))
+	}
+	if !strings.Contains(report, "the company's own code") {
+		t.Fatalf("the check command should still see the repository at %s, got: %s", container.WorkspaceDir, truncate(report, 800))
+	}
+	resolvedTerms, err := filepath.EvalSymlinks(terms)
+	if err != nil {
+		t.Fatalf("resolving the terms folder: %v", err)
+	}
+	if !strings.Contains(report, resolvedTerms) {
+		t.Fatalf("report should name the terms folder that judged this commit, got: %s", truncate(report, 800))
+	}
+	// Nothing of inspector's reached the repository: that is the whole
+	// point of the flag.
+	if _, err := os.Stat(filepath.Join(repo, ConfigFileName)); !os.IsNotExist(err) {
+		t.Fatalf("stat %s in the repository = %v, want it still absent", ConfigFileName, err)
+	}
+}
+
+// The -terms folder is in no repository, so the one requirement that
+// cannot apply to it - that the Dockerfile be committed - is skipped,
+// while the repository's own clean-tree rule still decides the run.
+func TestRun_TermsFolderNeedsNoCommitAndTheRepoStillMustBeClean(t *testing.T) {
+	repo := newWorkModeRepo(t)
+	terms := t.TempDir()
+	writeFiles(t, terms, map[string]string{
+		ConfigFileName:        `{"check": "true"}`,
+		ProjectDockerfileName: defaultTestDockerfile,
+	})
+	writeFiles(t, repo, map[string]string{"dirty.txt": "uncommitted"})
+	opts, _, _ := runOpts(repo)
+	opts.TermsDir = terms
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused - the repository's working tree still has to be clean", result.Outcome)
+	}
+	if !strings.Contains(result.Message, "dirty.txt") {
+		t.Fatalf("refusal should name the dirty file in the repository, got: %s", result.Message)
+	}
+}
+
+// Both terms the folder has to hold are refused by the name of the folder
+// that does not hold them, not by the repo root that was never asked.
+func TestRun_RefusesATermsFolderMissingItsFiles(t *testing.T) {
+	cases := map[string]struct {
+		files map[string]string
+		want  string
+	}{
+		"no config":     {map[string]string{ProjectDockerfileName: defaultTestDockerfile}, ConfigFileName},
+		"no dockerfile": {map[string]string{ConfigFileName: `{"check": "true"}`}, ProjectDockerfileName},
+	}
+	for name, tc := range cases {
+		repo := newWorkModeRepo(t)
+		terms := t.TempDir()
+		writeFiles(t, terms, tc.files)
+		opts, _, _ := runOpts(repo)
+		opts.TermsDir = terms
+
+		result, err := Run(opts)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", name, err)
+		}
+		if result.Outcome != Refused {
+			t.Fatalf("%s: Outcome = %v, want Refused", name, result.Outcome)
+		}
+		// The resolved path, which is what a refusal names: the mount
+		// source has to be the physical one (macOS's /var -> /private/var).
+		terms, err = filepath.EvalSymlinks(terms)
+		if err != nil {
+			t.Fatalf("%s: resolving the terms folder: %v", name, err)
+		}
+		if !strings.Contains(result.Message, tc.want) || !strings.Contains(result.Message, terms) {
+			t.Fatalf("%s: refusal should name the missing file and the terms folder, got: %s", name, result.Message)
+		}
+	}
+}
+
+func TestRun_RefusesAnUnusableTermsFolder(t *testing.T) {
+	repo := newWorkModeRepo(t)
+	opts, _, _ := runOpts(repo)
+	opts.TermsDir = filepath.Join(t.TempDir(), "not-there")
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused", result.Outcome)
+	}
+	if !strings.Contains(result.Message, "not-there") || !strings.Contains(result.Message, "refuses rather than falling back") {
+		t.Fatalf("refusal should name the folder and say it will not fall back to the repo's own terms, got: %s", result.Message)
+	}
+	if result.ReportPath != "" {
+		t.Fatal("a refusal that never ran a check should not write a report")
+	}
+}
+
+// -no-stamp is a publication decision, so Run itself only records it -
+// but it must record it, or a run that skipped its stamp on purpose reads
+// afterwards like one whose stamp was never confirmed.
+func TestRun_RecordsThatNoStampWasAsked(t *testing.T) {
+	requireDocker(t)
+	dir := newTestRepo(t, map[string]string{ConfigFileName: `{"check": "true"}`})
+	opts, _, _ := runOpts(dir)
+	opts.NoStamp = true
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Green {
+		t.Fatalf("Outcome = %v, want Green (message: %s)", result.Outcome, result.Message)
+	}
+	if data := readFile(t, result.ReportPath); !strings.Contains(data, `"noStamp": true`) {
+		t.Fatalf("report should record that no status was to be posted, got: %s", truncate(data, 600))
+	}
+}
+
 func TestRun_RefusesWithoutContainerRuntime(t *testing.T) {
 	// Never silently fall back to running on the host - a missing
 	// runtime must refuse loudly and name what's missing. Run still

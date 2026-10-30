@@ -94,7 +94,10 @@ const (
 // reports into its own tree without being able to modify the code it
 // is being judged on (issue #27; see container.ResolveWorkspace) - plus,
 // read-only, whatever container.ResolveGitMounts says the repo needs
-// for git to work in there, and nothing else on the host - killing the
+// for git to work in there, plus - read-only at container.TermsDir -
+// termsMount when this run's terms came from a folder outside the repo
+// (issue #69; the zero Mount means they did not, and nothing extra is
+// mounted), and nothing else on the host - killing the
 // container if it has not finished within timeout. The returned
 // CheckResult carries that workspace, which the caller discards once
 // this run's report is written. The container is bounded by
@@ -126,7 +129,7 @@ const (
 // behind the kill (issue #66), so such a run can return later than its
 // own timeout - bounded, never indefinitely - and what stopping it took
 // is reported on stderr and in Output the same way.
-func RunCheck(repoRoot, command, image string, limits container.Limits, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
+func RunCheck(repoRoot, command, image string, termsMount container.Mount, limits container.Limits, timeout time.Duration, stdout, stderr io.Writer) (CheckResult, error) {
 	// os/exec copies stdout and stderr on separate goroutines unless the
 	// two writers are the identical value, and tee never is, so the shared
 	// capture buffer and the caller's writers all have to be safe for
@@ -189,6 +192,7 @@ func RunCheck(repoRoot, command, image string, limits container.Limits, timeout 
 		Limits:         limits,
 		User:           user,
 		ReadOnlyMounts: gitMounts.Mounts,
+		TermsMount:     termsMount,
 	})
 	defer run.Cleanup()
 	run.Stdout = capture.tee(stdout)
