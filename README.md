@@ -716,7 +716,9 @@ status existed.
 
 Judging needs a model, so `inspector run` takes `--vendor` and `--model` for it
 - the same two flags, the same defaults, and the same
-`<VENDOR>_API_KEY`/`<VENDOR>_BASE_URL` environment reads as `inspector review`.
+`<VENDOR>_API_KEY`/`<VENDOR>_BASE_URL` environment reads as `inspector review`,
+including [`--vendor claude-code`](#work-mode---vendor-claude-code) for a
+machine that has a Claude Code subscription and no API key at all.
 The vendor is named in the status description, never left silent.
 
 The status is the signal; the run report is the evidence. GitHub truncates a
@@ -773,6 +775,43 @@ examiner uses (see below), so the reviewer can be told a vendor different from
 whichever one wrote the change. Omit it and inspector uses `anthropic`, exactly
 as `inspector examine` does; the vendor is always named explicitly, never
 silently, in the printed result.
+
+### Work mode: `--vendor claude-code`
+
+On a machine whose only model access is a Claude Code subscription - no API
+key, no OpenRouter account - `--vendor claude-code` reaches the model by
+running the local `claude` command instead of calling an API:
+
+```
+inspector review --diff change.diff --vendor claude-code --model sonnet
+```
+
+No environment variable is involved at all. It is the one vendor that reads
+neither `<VENDOR>_API_KEY` nor `<VENDOR>_BASE_URL`, because the command
+carries its own login; `--model` is passed straight through to it, so the
+model names are that command's (`sonnet`, `opus`, or a full
+`claude-sonnet-5`). `claude` missing from `PATH` is refused by name before any
+judgment starts.
+
+Nothing downstream changes: the findings, the test-change verdict, the
+[`inspector-tests` status](#the-inspector-tests-status) and the run report all
+keep the shape they have under any other vendor. `inspector run`, `inspector
+document` and `inspector guidebook` take it on the same flag.
+
+Each ask runs `claude --print` once with **every built-in tool disabled**
+(`--tools ""`), the host's customizations off (`--safe-mode`: no hooks, no
+`CLAUDE.md`, no skills, no plugins, no MCP servers), no session written to
+disk, and a throwaway empty working directory rather than the project being
+judged. Inspector's own tools - reporting a finding, judging a changed test -
+are answered by Inspector, never by that command: a judgment that could edit
+the judged project would not be a judgment (SPEC.md section 4).
+
+`inspector examine` is the one command that **refuses** this vendor, and says
+so rather than failing part-way: its agent runs inside a sealed runtime that
+carries no `claude` command and no login for one, and putting a full coding
+agent and a subscription credential inside that runtime would cost more than
+the examination is worth. Examination needs a vendor whose key can be
+forwarded by name.
 
 The reviewer reports; it never gates a merge or posts a commit status. Like
 every inspector finding, what to do about one is the Client's call, carried
@@ -1086,7 +1125,11 @@ the environment, never on the command line, under one fixed rule with no
 per-vendor table: uppercase the vendor name and append `_API_KEY`, and for
 every vendor except `anthropic` also `_BASE_URL`. `--vendor openrouter` reads
 `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`; a missing one refuses, naming
-the exact variable. Whichever vendor ran - including the unflagged default -
+the exact variable. The one vendor `inspector examine` refuses is
+[`claude-code`](#work-mode---vendor-claude-code), which runs a command rather
+than calling an API: this agent runs inside a sealed runtime that carries no
+such command and no login for one, so there is nothing a forwarded variable
+name could point at. Whichever vendor ran - including the unflagged default -
 is recorded as `vendor: anthropic (default, no flag given)` or `vendor:
 <name>` in both the printed JSON report and the posted `examiner` status, so
 the choice is never silent.
@@ -1538,7 +1581,12 @@ Issue #69 is built: `--terms <dir>` reads a project's `.inspector.json`,
 it judges, mounted read-only at `/terms`, for a repository nothing may be
 added to; and `--no-stamp` publishes a green result - staging, branch, pull
 request - while posting no commit status at all. Without either flag nothing
-changes.
+changes. Issue #70 is built: `--vendor claude-code` reaches the model by
+running the local `claude` command, so the test reviewer, the code reviewer,
+the documentation judgment and the guidebook all run on a machine whose only
+model access is a Claude Code subscription - no API key and no base URL
+anywhere - while `inspector examine` refuses that vendor by name, its agent
+being sealed away from any such command. `anthropic` remains the default.
 Still to come: the
 installer - see
 [SPEC.md](SPEC.md) and the repo's issues.

@@ -21,7 +21,7 @@ func runGuidebook(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("inspector guidebook", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	repoPath := fs.String("repo", ".", "path inside the project to write a guidebook for")
-	vendor := fs.String("vendor", "", "model vendor (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment")
+	vendor := fs.String("vendor", "", "model vendor (default: anthropic); reads <VENDOR>_API_KEY and, for every vendor except anthropic, <VENDOR>_BASE_URL from the environment. claude-code reads neither and runs the local claude command instead, for a machine whose only model access is a Claude Code subscription")
 	model := fs.String("model", "", "model name for the selected vendor (required unless --facts-only)")
 	factsOnly := fs.Bool("facts-only", false, "print the facts inspector extracts and stop: no model is called, no credential is needed, and nothing is written")
 	fs.Usage = func() {

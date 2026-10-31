@@ -14,6 +14,30 @@ import (
 
 const testRuntimeImageID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+// TestRun_RefusesClaudeCodeBeforeAnythingStarts covers the one vendor the
+// examiner cannot have (issue #70). The refusal has to come before any
+// container does, so the test deliberately runs with no Docker contact and no
+// credential of any kind: reaching a verdict here proves nothing was started.
+func TestRun_RefusesClaudeCodeBeforeAnythingStarts(t *testing.T) {
+	result, err := Run(context.Background(), RunOptions{
+		Inputs: writableExampleInputs(t),
+		AppURL: "http://127.0.0.1:8080",
+		Vendor: "Claude-Code",
+		Model:  "claude-sonnet-5",
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v, want a refusal result", err)
+	}
+	if result.Kind != Refused {
+		t.Fatalf("Run() kind = %q, want %q", result.Kind, Refused)
+	}
+	for _, want := range []string{"claude-code", "claude", "sealed runtime"} {
+		if !strings.Contains(result.Message, want) {
+			t.Fatalf("Run() message = %q, want it to name %q", result.Message, want)
+		}
+	}
+}
+
 func TestNewContainerCommand_OnlyMountsAllowedResources(t *testing.T) {
 	applicationSource := t.TempDir()
 	inputDir := t.TempDir()

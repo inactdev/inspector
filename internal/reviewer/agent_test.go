@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -320,6 +322,46 @@ func TestRunAgent_RefusesOnEmptyDiff(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no files to review") {
 		t.Fatalf("RunAgent() error = %v, want a refusal naming the empty change", err)
 	}
+}
+
+// TestRunAgent_ClaudeCodeVendorJudgesATestChangeWithNoAPIKey is issue #70's
+// own case: the machine has a Claude Code subscription and nothing else - no
+// <VENDOR>_API_KEY, no <VENDOR>_BASE_URL - and the test reviewer still has to
+// reach a verdict. The stand-in `claude` on PATH stands for the real command;
+// what matters is that the whole seam runs with no secret anywhere and the
+// result keeps its usual shape.
+func TestRunAgent_ClaudeCodeVendorJudgesATestChangeWithNoAPIKey(t *testing.T) {
+	judge := claudeCodeEnvelope(`{"blocks":[{"type":"tool_use","tool_name":"judge_test_change","tool_input":{"path":"greet_test.go","judgment":"` + string(ExamIntact) + `","reason":"same claim, asserted differently"}}]}`)
+	finish := claudeCodeEnvelope(`{"blocks":[{"type":"tool_use","tool_name":"finish_review","tool_input":{}}]}`)
+	// The first turn carries no tool result yet; the second one does. That is
+	// how the stand-in tells the two turns apart without keeping state.
+	script := "#!/bin/sh\nprompt=$(cat)\ncase \"$prompt\" in\n" +
+		"  *\"TOOL RESULT\"*) printf '%s' '" + finish + "' ;;\n" +
+		"  *) printf '%s' '" + judge + "' ;;\n" +
+		"esac\n"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing the stand-in claude command: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := RunAgent(context.Background(), AgentOptions{
+		Diff: []byte(agentTestTestDiff), TestPathPatterns: []string{"*_test.go"},
+		Vendor: "claude-code", Model: "test-model",
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if result.TestChangeVerdict != TestChangesIntact {
+		t.Fatalf("verdict = %q, want %q", result.TestChangeVerdict, TestChangesIntact)
+	}
+	if len(result.TestChanges) != 1 || result.TestChanges[0].Judgment != ExamIntact || result.TestChanges[0].Reason == "" {
+		t.Fatalf("test changes = %#v, want greet_test.go judged intact with its reason", result.TestChanges)
+	}
+}
+
+func claudeCodeEnvelope(structured string) string {
+	return `{"type":"result","is_error":false,"structured_output":` + structured + `}`
 }
 
 func TestRunAgent_OpenAICompatibleVendorRecordsAFinding(t *testing.T) {
