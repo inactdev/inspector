@@ -594,6 +594,9 @@ would mount that whole ancestor into the check container; what a check command
 can reach has to be declared, not inherited from wherever the repository sits.
 Put the terms in a folder of their own.
 
+This flag is normally used with the other two it was built beside - see
+[Work mode](#work-mode) for the invocation that puts all three together.
+
 The build context follows the Dockerfile, so a terms `Dockerfile.inspector`
 can `COPY` its own siblings and can reach nothing in the repository under
 check. That is the right way round - the image is the environment, and baking
@@ -628,7 +631,8 @@ it.
 The stamp is the default, and for a repository with a gate it has to be: no
 status means `inspector-gate` reads the pull request exactly as it reads one
 that was never inspected. This flag is for the repository that has no gate to
-satisfy.
+satisfy - normally the same repository `--terms` exists for, so see [Work
+mode](#work-mode) for the invocation that uses both.
 
 ### Recording the result
 
@@ -717,7 +721,7 @@ status existed.
 Judging needs a model, so `inspector run` takes `--vendor` and `--model` for it
 - the same two flags, the same defaults, and the same
 `<VENDOR>_API_KEY`/`<VENDOR>_BASE_URL` environment reads as `inspector review`,
-including [`--vendor claude-code`](#work-mode---vendor-claude-code) for a
+including [`--vendor claude-code`](#the-claude-code-vendor) for a
 machine that has a Claude Code subscription and no API key at all.
 The vendor is named in the status description, never left silent.
 
@@ -750,6 +754,161 @@ entirely and the gate would then have no status to read - blocking lives in the
 status and the gate, exactly as it does for `examiner`. Inspector prints the
 failure loudly on stderr so a green line can never be mistaken for a merge.
 
+## Work mode
+
+Work mode is three of the flags above used together, for the one situation
+each of them was built for: a repository that may not carry anything of
+inspector's, on a machine whose only model access is a Claude Code
+subscription.
+
+- [`--terms <dir>`](#terms-from-outside-the-repository---terms) - the
+  project's terms live in a folder beside the repository, because nothing may
+  be added to the repository itself.
+- [`--no-stamp`](#publishing-without-a-stamp---no-stamp) - the green result
+  publishes with no commit status on the commit, because a repository with no
+  in-repo terms has no `inspector-gate` reading one.
+- [`--vendor claude-code`](#the-claude-code-vendor) - the model is reached by
+  running the local `claude` command, because there is no API key on that
+  machine to read.
+
+Each one works on its own and keeps its own section; this section is only
+about the three together.
+
+### The invocation
+
+It is the ordinary invocation with those three flags added. Everything else is
+what any caller passes - `--repo`, `--branch`, `--expected-tip`, `--pr-title`
+and `--pr-body-file` are the flags Fabrica's own consumer contract
+([`cmd/inspector/testdata/fabrica-consumer-contract.json`](cmd/inspector/testdata/fabrica-consumer-contract.json))
+names, and this repository's tests check that inspector still honors every one
+of them:
+
+```
+GITHUB_TOKEN=... inspector \
+  --repo /src/acme-billing \
+  --terms /opt/terms/acme-billing \
+  --branch task/142-rounding \
+  --no-stamp \
+  --vendor claude-code \
+  --model sonnet \
+  --pr-title 'Fix rounding in the invoice total' \
+  --pr-body-file /tmp/pr-body.md \
+  implemented the rounding fix
+```
+
+The paths and the branch are this example's; the flags are the mode. Nothing
+else about the run changes, and that is the bar all three flags were built to:
+`--branch` is still required and still refused when it names the remote
+default branch, the judged repository's working tree must still be clean, HEAD
+is still what gets checked, the check still runs as the host user in a
+network-denied container built from a `Dockerfile.inspector`, and the staging
+push, the branch update and the pull request still happen in that order.
+
+`GITHUB_TOKEN` is still required, `--no-stamp` or not: the remote default
+branch is still read in order to be refused as a publication target, and
+opening the pull request needs it.
+
+`--vendor claude-code --model sonnet` does exactly one thing for `inspector
+run` - it judges the commit's changed test files, and only when the terms'
+`.inspector.json` declares `testPaths` and this commit changes a file matching
+one (see [The `inspector-tests` status](#the-inspector-tests-status)). A
+project whose terms declare no `testPaths` never reaches a model at all, and
+both flags can be left off. `--model` is passed to the `claude` command as it
+stands, so the model names are that command's own: `sonnet`, `opus`, or a full
+`claude-sonnet-5`. No `claude` on `PATH` is named in that judgment rather than
+failing the run.
+
+### What the terms folder holds
+
+The three files, and the check script the first of them names:
+
+```
+/opt/terms/acme-billing/
+  .inspector.json         {"check": "sh /terms/check.sh"}
+  Dockerfile.inspector    the environment that command runs in
+  check.sh                whatever this project's check actually is
+```
+
+Inspector reads `.inspector.json` and `Dockerfile.inspector` from there
+instead of the repository root, builds that Dockerfile with that folder as the
+build context, and mounts the folder read-only at `/terms` inside the check
+container - which is why the check command names its script under that path.
+The repository is still mounted at `/workspace` and is still the check
+command's working directory. The Dockerfile only has to be present: there is
+no repository outside for it to be committed to, so the committed-image
+requirement that applies to in-repo terms has no question to answer here.
+[Terms from outside the repository](#terms-from-outside-the-repository---terms)
+has the rest, including the two folders that are refused by name.
+
+A terms `.inspector.json` may carry `testPaths` and `protectedPaths` like any
+other, but only the local run reads them in this mode. `inspector-gate` reads
+both from the *repository's* own `.inspector.json` on the base branch, which
+in work mode does not exist, so the gate protects nothing beyond its own
+hardcoded floor. That is the same fact as "a repository with no in-repo terms
+has no gate", from the protection side.
+
+### What the report says when no stamp is posted
+
+The run report is the record in this mode, because there is no commit status
+and no committed terms, and it says both things outright. `.inspector/` still
+lives in the judged repository and still gitignores itself, so nothing is
+added to that repository's commits:
+
+```json
+{
+  "commit": "4f2c1a9e4d3f27a86b40ff51c2d9e7a3418bc6d2",
+  "termsDir": "/opt/terms/acme-billing",
+  "noStamp": true,
+  "checkCommand": "sh /terms/check.sh",
+  "outcome": "green"
+}
+```
+
+`termsDir` is the only record of what judged this commit, since those files
+are in no commit at all, and it is absent on an ordinary run whose terms are
+the repository's own. `noStamp: true` is likewise absent on every ordinary
+run - a run that skipped its stamp on purpose must never read like one whose
+stamp was never confirmed.
+
+Stdout says it too, rather than leaving a reader to notice a missing status:
+
+```
+green - 4f2c1a9e4d3f27a86b40ff51c2d9e7a3418bc6d2 (report: /src/acme-billing/.inspector/runs/1762000000-4f2c1a9e4d3f.json)
+no commit status posted (-no-stamp); the branch and pull request were published as usual
+inspector-tests: success - every changed test keeps its exam intact (billing/round_test.go) (judged locally; not posted: -no-stamp)
+  judged by vendor: claude-code, model: sonnet
+```
+
+The test judgment still runs, is still printed and is still recorded in the
+report's `testReview`; what `--no-stamp` drops is the posting of **both**
+statuses, `inspector` and `inspector-tests` alike. A publication whose branch
+update then fails says `no commit status was posted (-no-stamp)` where it would
+otherwise say the green status was recorded, so no failure message ever claims
+a stamp this run never made.
+
+`--no-stamp` is `inspector run`'s flag alone. `inspector examine` and
+`inspector always` post their own `examiner` and `inspector-always` statuses
+with no way to suppress either, so in work mode run those two only where those
+statuses are wanted.
+
+### The one command that refuses this vendor
+
+`inspector examine` is the single command that refuses `--vendor claude-code`,
+and it says so before any container starts rather than failing part-way: its
+agent runs *inside* the sealed runtime, which carries no `claude` command and
+no login for one, so there is nothing a forwarded variable name could point
+at. Supplying one would mean mounting a full coding agent and a subscription
+credential into the one component whose whole purpose is being sealed. That
+refusal travels the path every other examiner refusal does - the `examiner`
+status goes to `error` ("could not be tested") and the command exits `2`,
+exactly as for a missing `ANTHROPIC_API_KEY`.
+
+So in work mode, check 2 either runs under a vendor whose key can be forwarded
+by name or does not run. Every other model-using command - `inspector review`,
+`inspector document`, `inspector guidebook`, and the changed-test judgment
+inside `inspector run` - runs on the host and takes `claude-code` on the same
+flag.
+
 ## Reviewer
 
 `inspector review` is the independent code reviewer (SPEC.md's "The reviewer").
@@ -776,7 +935,7 @@ whichever one wrote the change. Omit it and inspector uses `anthropic`, exactly
 as `inspector examine` does; the vendor is always named explicitly, never
 silently, in the printed result.
 
-### Work mode: `--vendor claude-code`
+### The `claude-code` vendor
 
 On a machine whose only model access is a Claude Code subscription - no API
 key, no OpenRouter account - `--vendor claude-code` reaches the model by
@@ -796,7 +955,10 @@ judgment starts.
 Nothing downstream changes: the findings, the test-change verdict, the
 [`inspector-tests` status](#the-inspector-tests-status) and the run report all
 keep the shape they have under any other vendor. `inspector run`, `inspector
-document` and `inspector guidebook` take it on the same flag.
+document` and `inspector guidebook` take it on the same flag - and
+[Work mode](#work-mode) is this vendor together with `--terms` and
+`--no-stamp`, which is how a machine with no API key judges a repository
+nothing may be added to.
 
 Each ask runs `claude --print` once with **every built-in tool disabled**
 (`--tools ""`), the host's customizations off (`--safe-mode`: no hooks, no
@@ -1126,7 +1288,7 @@ per-vendor table: uppercase the vendor name and append `_API_KEY`, and for
 every vendor except `anthropic` also `_BASE_URL`. `--vendor openrouter` reads
 `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`; a missing one refuses, naming
 the exact variable. The one vendor `inspector examine` refuses is
-[`claude-code`](#work-mode---vendor-claude-code), which runs a command rather
+[`claude-code`](#the-claude-code-vendor), which runs a command rather
 than calling an API: this agent runs inside a sealed runtime that carries no
 such command and no login for one, so there is nothing a forwarded variable
 name could point at. Whichever vendor ran - including the unflagged default -
@@ -1587,6 +1749,8 @@ the documentation judgment and the guidebook all run on a machine whose only
 model access is a Claude Code subscription - no API key and no base URL
 anywhere - while `inspector examine` refuses that vendor by name, its agent
 being sealed away from any such command. `anthropic` remains the default.
+Issue #78 documents the three flags of #69 and #70 used together, as
+[Work mode](#work-mode) above.
 Still to come: the
 installer - see
 [SPEC.md](SPEC.md) and the repo's issues.
