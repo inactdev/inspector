@@ -17,10 +17,14 @@
 #
 # What this deliberately does NOT cover: the GitHub API orchestration in
 # main() - reading each consumer's current copy, writing the blob, tree,
-# commit and ref, opening or updating the pull request. That can only be
-# exercised by a real Actions run against real repositories; see
-# gate-sync.sh's header, and inspector-gate_test.sh's for the same reasoning
-# applied to that gate.
+# commit and ref, opening or updating the pull request. That is a gap, not a
+# proof of anything; see gate-sync.sh's header. inspector-gate_test.sh used
+# to record the same limitation and no longer does - issue #21 closed it
+# there by stubbing `gh` as a shell function and replaying scenarios through
+# that gate's main(). The same shape would work here, on a bigger surface:
+# this script's main() writes rather than reads, so its fixtures have to
+# cover a sequence of mutations and their idempotence, which is why it has
+# not simply been copied over.
 #
 # Run directly: .github/scripts/gate-sync_test.sh
 set -euo pipefail

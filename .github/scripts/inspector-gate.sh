@@ -44,13 +44,16 @@
 #   - inspector-gate_test.sh, which sources this file and calls the pure
 #     functions below directly, with fixture data, never touching the
 #     network
-# Only the pure functions (status_verdict, state_for_context,
+# The pure functions (status_verdict, state_for_context,
 # matches_any_pattern, each_touched_candidate, protected_match_kind,
 # classify_protected_matches, listing_count_check, gh_api_failure_reason,
-# config_paths_from_response and its two wrappers) are unit tested. The
-# API orchestration in main() can only be exercised inside Actions - see
-# inspector-gate_test.sh's header for why that is an honest limitation
-# rather than a gap.
+# config_paths_from_response and its two wrappers) are unit tested there,
+# and since issue #21 so is main() itself: that file stubs `gh` as a shell
+# function, serves fixture responses, and asserts which endpoints are read,
+# in what order, and what the gate does with each answer. What remains
+# outside any test here is the real `gh`, the real API's response shapes,
+# and the pull_request_target trust boundary - see inspector-gate_test.sh's
+# header for where that line is drawn.
 set -euo pipefail
 
 # ALWAYS_PROTECTED protects the gate's own definition regardless of what a
@@ -371,9 +374,11 @@ test_paths_from_response() {
 # the reason in GH_API_ERROR, then returns gh's own exit status, so each
 # call site keeps its own wording and its own exit-or-continue decision.
 #
-# Part of main()'s orchestration, and untested for the same reason the
-# rest of it is: it only does anything when there is a real `gh` and a real
-# GitHub behind it. See this file's header.
+# Part of main()'s orchestration. inspector-gate_test.sh reaches this by
+# replacing `gh` with a shell function - which works precisely because this
+# is the one place the command is invoked - so what each call site does with
+# a failure is covered; the real `gh` behind it still is not. See this
+# file's header.
 GH_API_OUT=""
 GH_API_ERROR=""
 gh_api_call() {
@@ -395,8 +400,9 @@ gh_api_call() {
 # main does the real GitHub API work: fetch the head commit's status,
 # fetch the pull request's changed-file list, fetch the base branch tip's
 # .inspector.json for project-specific protected paths, then apply the
-# pure functions above. Only exercisable inside Actions - see this file's
-# header.
+# pure functions above. Its sequencing is covered off-network by
+# inspector-gate_test.sh's scenarios (issue #21); only the real API behind
+# it is not - see this file's header.
 main() {
   : "${GH_TOKEN:?}" "${REPO:?}" "${PR_NUMBER:?}" "${HEAD_SHA:?}" "${BASE_REF:?}" "${CHANGED_FILES:?}" "${STATUS_CONTEXT:?}" "${TESTS_STATUS_CONTEXT:?}"
 
@@ -499,9 +505,10 @@ main() {
   # "+" in a ref name; interpolated raw, "release&hotfix" would send
   # ref=release and read a DIFFERENT branch's protected-path list, which is
   # a quiet fail-open in the one read this gate must get right. gh
-  # percent-encodes a -f value, so no ref name can break out of it. Like
-  # the rest of main(), that only runs against the real API - there is no
-  # pure function here to unit test, see this file's header.
+  # percent-encodes a -f value, so no ref name can break out of it. There
+  # is no pure function here to unit test, so the test file asserts the
+  # call itself: it runs main() with BASE_REF="release&hotfix" and checks
+  # that name arrives whole, as a parameter, and never in the request path.
   #
   # --include so the HTTP status line comes back with the body: only a 404
   # means "this project simply has no .inspector.json", and every other way
