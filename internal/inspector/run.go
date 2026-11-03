@@ -221,9 +221,12 @@ func Run(opts Options) (Result, error) {
 		// through writers of its own that do not.
 		buildLog = io.Discard
 	}
-	// The build context is the directory the Dockerfile lives in, which
-	// is the repository root unless -terms moved the terms out of it.
-	image, err := BuildProjectImage(terms.Dir, dockerfile, buildLog)
+	// The main build context is the directory the Dockerfile lives in,
+	// which is the repository root unless -terms moved the terms out of
+	// it; the repository is a second, named context either way, so a
+	// Dockerfile that bakes this project's dependencies in reads its
+	// lockfiles from the same place in both modes.
+	image, err := BuildProjectImage(terms.Dir, repoRoot, dockerfile, buildLog)
 	if refusal, refused := refuseProjectImage(repoRoot, commit, terms, image, err); refused {
 		return refusal, nil
 	}

@@ -96,26 +96,33 @@ func projectDockerfilePath(dir string) (string, error) {
 
 // BuildProjectImage resolves the image this project's check command runs
 // in, building dockerfile - which Terms.Dockerfile resolved - with
-// contextDir as the build context and streaming docker's output to log as
-// it happens.
+// contextDir as the main build context, repoRoot as the second context
+// container.RepoBuildContext names, and streaming docker's output to log
+// as it happens.
 //
 // contextDir is the directory the Dockerfile lives in: the repository root
 // in the ordinary case, and the -terms folder when the terms came from one
-// (issue #69). The context follows the Dockerfile rather than staying with
-// the repository on purpose - a terms Dockerfile can then COPY its own
-// siblings, and can reach nothing in the repository under check, which is
-// the right way round: baking the judged repository's own content into the
-// image would make the environment depend on the thing being judged.
+// (issue #69). The main context follows the Dockerfile rather than staying
+// with the repository, so a terms Dockerfile can COPY its own siblings.
+//
+// repoRoot is the repository under check either way, reachable under one
+// fixed name (issue #81), because the project that bakes its dependencies
+// into the check image - the normal case, since the check container has no
+// network - has to read its own lockfiles to do it. That is the
+// environment depending on the repository's declared dependencies, not on
+// the work being judged: the tree is clean, so what the build reads is the
+// commit's, and a Dockerfile that reads it is rebuilt every run rather
+// than reusing a tag that cannot see it.
 //
 // Errors wrap container.ErrProjectImageUnavailable or
 // container.ErrProjectImageBuildFailed. Either is a refusal for the
 // caller: a project whose declared environment inspector could not
 // produce has not been judged, and running the check in anything else
 // would judge a different project.
-func BuildProjectImage(contextDir, dockerfile string, log io.Writer) (container.ProjectImage, error) {
+func BuildProjectImage(contextDir, repoRoot, dockerfile string, log io.Writer) (container.ProjectImage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ImageBuildTimeout)
 	defer cancel()
-	return container.BuildProjectImage(ctx, dockerfile, contextDir, log)
+	return container.BuildProjectImage(ctx, dockerfile, contextDir, repoRoot, log)
 }
 
 // DescribeProjectImage is the one line a run prints about the image it is

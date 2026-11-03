@@ -20,6 +20,27 @@ import (
 // without anything having to be invalidated by hand.
 const ProjectImageRepository = "inspector-check"
 
+// RepoBuildContext is the name every check image build reaches the
+// repository under check by: `docker build --build-context repo=<repo
+// root>`, so a Dockerfile can say
+//
+//	COPY --from=repo Gemfile Gemfile.lock .ruby-version /deps/
+//
+// and bake the project's dependencies in - the one thing a check command
+// legitimately needed the network for, which it no longer has.
+//
+// The name is fixed with no config key, exactly like WorkspaceDir and
+// TermsDir: Fabrica's `register` writes Dockerfiles against this name, and
+// a configurable one would be a second way to say the same thing. It is
+// passed for every build, whether the terms came from a folder outside the
+// repository or from the repository itself, so one Dockerfile works either
+// way.
+//
+// Docker resolves a named context ahead of a build stage of the same name,
+// so a Dockerfile declaring its own `repo` stage is refused by name rather
+// than having that stage silently replaced - see parseDockerfile.
+const RepoBuildContext = "repo"
+
 // ErrProjectImageUnavailable means the project's check image could not be
 // resolved at all - its Dockerfile could not be read or parsed, or a base
 // image it names could not be resolved to a digest. The check never ran,
@@ -68,8 +89,17 @@ type BaseImage struct {
 
 // BuildProjectImage resolves the image a check command runs in from
 // dockerfilePath - the project's own committed Dockerfile - building it
-// with contextDir as the build context and streaming docker's output to
-// log as it happens.
+// with contextDir as the build context, repoDir as a second context named
+// RepoBuildContext, and streaming docker's output to log as it happens.
+//
+// contextDir is the directory the Dockerfile lives in, which is not always
+// the repository: with terms from a folder outside it, the Dockerfile and
+// its siblings are there instead. repoDir is always the repository under
+// check, so a Dockerfile that has to bake the project's own dependencies
+// in can reach its lockfiles by name regardless of where the terms live
+// (issue #81). It is required, and named in a refusal rather than dropped:
+// a build silently missing the context a Dockerfile copies from would fail
+// for a reason that looks like the project's.
 //
 // It is tagged by the Dockerfile's content together with the image ID
 // every base it names resolves to, so the same inputs reuse the same
@@ -79,20 +109,25 @@ type BaseImage struct {
 // never may.
 //
 // An already-present tag is reused without building, except when the
-// Dockerfile reads the build context (any COPY or ADD that is not
-// --from=<stage>, or any RUN --mount). Those make the image depend on
-// repository content the tag cannot see - the whole point of baking
-// dependencies in is `COPY package-lock.json` - so the build runs every
-// time and docker's own layer cache is what keeps an unchanged rebuild
-// cheap. See notes/20261025-project-image-from-committed-dockerfile.md.
+// Dockerfile reads either context (any COPY or ADD that is not
+// --from=<stage|image>, any COPY/ADD/FROM naming RepoBuildContext, or any
+// RUN --mount). Those make the image depend on repository content the tag
+// cannot see - the whole point of baking dependencies in is
+// `COPY package-lock.json` - so the build runs every time and docker's own
+// layer cache is what keeps an unchanged rebuild cheap. See
+// notes/20261025-project-image-from-committed-dockerfile.md and
+// notes/20261103-the-repo-named-build-context.md.
 //
 // Errors wrap ErrProjectImageUnavailable or, for a build that ran and
 // failed, ErrProjectImageBuildFailed; callers turn either into a refusal.
-func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir string, log io.Writer) (ProjectImage, error) {
+func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir string, log io.Writer) (ProjectImage, error) {
 	if log == nil {
 		// Unlike os/exec, which reads a nil writer as /dev/null, this
 		// function writes to log itself.
 		log = io.Discard
+	}
+	if strings.TrimSpace(repoDir) == "" {
+		return ProjectImage{}, fmt.Errorf("%w: no repository was named for the %q build context, which every check image build carries", ErrProjectImageUnavailable, RepoBuildContext)
 	}
 	content, err := os.ReadFile(dockerfilePath)
 	if err != nil {
@@ -125,15 +160,22 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir string, l
 
 	captured := &strings.Builder{}
 	out := io.MultiWriter(log, captured)
-	// -f names the Dockerfile; the final argument is the build context,
-	// which is the repository root. No --pull: the bases were already
-	// resolved above, and re-resolving them here would let a floating
-	// tag move between that resolution and this build, which is the one
-	// thing the content-derived tag exists to rule out. No --network
-	// either: the build may reach the network to install the project's
-	// dependencies, which is what makes the check container's own
-	// --network none possible at all.
-	cmd := exec.CommandContext(ctx, "docker", "build", "-f", dockerfilePath, "-t", image.Tag, contextDir)
+	// -f names the Dockerfile; the final argument is the main build
+	// context, which is wherever the Dockerfile lives. --build-context
+	// adds the repository under check beside it under its fixed name,
+	// for the Dockerfile that bakes the project's dependencies in; it
+	// needs BuildKit, which is what `docker build` has used by default
+	// since Docker 23, and a builder without it fails this build loudly
+	// in docker's own words rather than producing an image missing those
+	// files. No --pull: the bases were already resolved above, and
+	// re-resolving them here would let a floating tag move between that
+	// resolution and this build, which is the one thing the
+	// content-derived tag exists to rule out. No --network either: the
+	// build may reach the network to install the project's dependencies,
+	// which is what makes the check container's own --network none
+	// possible at all.
+	repoContext := RepoBuildContext + "=" + repoDir
+	cmd := exec.CommandContext(ctx, "docker", "build", "-f", dockerfilePath, "-t", image.Tag, "--build-context", repoContext, contextDir)
 	// The identical writer for both, so os/exec reuses one pipe and one
 	// copying goroutine rather than racing two onto the same writer.
 	cmd.Stdout = out
@@ -145,7 +187,7 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir string, l
 		return image, fmt.Errorf("%w: building %s did not finish: %v", ErrProjectImageBuildFailed, dockerfilePath, ctx.Err())
 	}
 	if runErr != nil {
-		return image, fmt.Errorf("%w: docker build -f %s %s: %v", ErrProjectImageBuildFailed, dockerfilePath, contextDir, runErr)
+		return image, fmt.Errorf("%w: docker build -f %s --build-context %s %s: %v", ErrProjectImageBuildFailed, dockerfilePath, repoContext, contextDir, runErr)
 	}
 	return image, nil
 }
@@ -223,7 +265,7 @@ func imageID(ctx context.Context, ref string) (string, error) {
 
 // dockerfileFacts is what inspector has to know about a Dockerfile it did
 // not write: which images it pulls in from outside itself, and whether its
-// result depends on the build context as well as on the file.
+// result depends on either build context as well as on the file.
 type dockerfileFacts struct {
 	baseRefs          []string
 	readsBuildContext bool
@@ -234,8 +276,8 @@ type dockerfileFacts struct {
 //
 // It is not a general Dockerfile parser and does not need to be: docker
 // itself is what builds the file, and everything here either feeds the
-// content-derived tag or is refused by name. The two refusals matter more
-// than the parsing:
+// content-derived tag or is refused by name. The three refusals matter
+// more than the parsing:
 //
 //   - A `FROM` naming its image through a variable cannot be resolved to a
 //     digest, so the tag would stop changing when that base changed. The
@@ -243,6 +285,10 @@ type dockerfileFacts struct {
 //   - An `# escape=` parser directive changes which character continues a
 //     line, so this function would be reading a different file than docker
 //     does. Refused rather than parsed under the wrong rules.
+//   - A stage named RepoBuildContext collides with the named build context
+//     every build carries, and docker resolves the context first - so the
+//     stage would be silently replaced by the repository under check.
+//     Refused by name, naming the line.
 func parseDockerfile(content string) (dockerfileFacts, error) {
 	var facts dockerfileFacts
 	stages := map[string]bool{}
@@ -275,6 +321,9 @@ func parseDockerfile(content string) (dockerfileFacts, error) {
 				return facts, err
 			}
 			sawFrom = true
+			if namesRepoContext(stage) {
+				return facts, fmt.Errorf("line %q declares a build stage named %q, which every check image build already carries as a build context holding the repository under check - docker resolves that context ahead of a stage of the same name, so this stage would be silently replaced by the repository. Rename the stage", strings.TrimSpace(line), stage)
+			}
 			if stage != "" {
 				stages[strings.ToLower(stage)] = true
 			}
@@ -285,20 +334,40 @@ func parseDockerfile(content string) (dockerfileFacts, error) {
 			if ref == "scratch" || stages[strings.ToLower(ref)] {
 				continue
 			}
+			// Nor does a FROM naming the repository context: docker
+			// resolves that name to the directory this build was handed,
+			// which is no image and has no digest to pull - but it is
+			// repository content, which the tag cannot see.
+			if namesRepoContext(ref) {
+				facts.readsBuildContext = true
+				continue
+			}
 			if strings.Contains(ref, "$") {
 				return facts, fmt.Errorf("FROM %s names its base image through a variable; inspector tags the image it builds by that base's digest and cannot resolve one it has to expand first - name the base literally, ideally pinned by digest", ref)
 			}
 			facts.baseRefs = append(facts.baseRefs, ref)
 		case "COPY", "ADD":
-			// --from=<stage|image> copies from somewhere other than the
+			// --from=<stage|image> copies from somewhere other than a
 			// build context, so it is the file's own content, which the
-			// tag already hashes. Anything else reads the context.
-			if !hasFlag(args, "--from=") {
+			// tag already hashes. --from=<RepoBuildContext> is the
+			// exception: that is the repository under check, which the
+			// tag can no more see than it can see the main context.
+			// Anything else reads the main context.
+			//
+			// Every --from= on the line is looked at, not just the first:
+			// a line carrying two of them is not a file docker builds, but
+			// if some builder takes the last one rather than rejecting the
+			// line, the one naming the repository must still count - a
+			// needless rebuild is cheap, a stale image is the failure this
+			// whole rule exists to prevent.
+			froms := flagValues(args, "--from=")
+			if len(froms) == 0 || namesRepoContextAny(froms) {
 				facts.readsBuildContext = true
 			}
 		case "RUN":
-			// A RUN --mount can bind the build context in (and
-			// type=cache/secret/ssh bring in state of their own).
+			// A RUN --mount can bind either build context in -
+			// --mount=from=<RepoBuildContext> included - and
+			// type=cache/secret/ssh bring in state of their own.
 			// Counted as context-reading without inspecting the mount
 			// further: the consequence of being wrong is a rebuild
 			// docker's layer cache makes cheap, while the consequence of
@@ -338,18 +407,48 @@ func parseFrom(args []string) (ref, stage string, err error) {
 	return ref, stage, nil
 }
 
-func hasFlag(args []string, prefix string) bool {
-	for _, arg := range args {
-		if !strings.HasPrefix(arg, "--") {
-			// Flags only precede an instruction's own arguments; past
-			// the first of those, a matching string is just text.
-			return false
-		}
-		if strings.HasPrefix(arg, prefix) {
+// namesRepoContext reports whether a stage name or a --from= value names
+// the repository build context. Compared case-insensitively because docker
+// folds stage names to lower case and resolves a --from= against the named
+// contexts first, so `--from=REPO` reaches the same directory `--from=repo`
+// does. Being wrong in this direction costs a rebuild docker's layer cache
+// makes cheap; being wrong in the other costs a stale image.
+func namesRepoContext(name string) bool {
+	return strings.EqualFold(name, RepoBuildContext)
+}
+
+// namesRepoContextAny reports whether any of these --from= values names
+// the repository build context.
+func namesRepoContextAny(names []string) bool {
+	for _, name := range names {
+		if namesRepoContext(name) {
 			return true
 		}
 	}
 	return false
+}
+
+// flagValues returns whatever follows prefix in each of an instruction's
+// flags that starts with it - so prefix carries its own "=" when the value
+// is what the caller is after. All of them rather than the first, because
+// a caller deciding whether to rebuild must not be able to miss one.
+func flagValues(args []string, prefix string) []string {
+	var values []string
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--") {
+			// Flags only precede an instruction's own arguments; past
+			// the first of those, a matching string is just text.
+			break
+		}
+		if strings.HasPrefix(arg, prefix) {
+			values = append(values, strings.TrimPrefix(arg, prefix))
+		}
+	}
+	return values
+}
+
+func hasFlag(args []string, prefix string) bool {
+	return len(flagValues(args, prefix)) > 0
 }
 
 // joinContinuations returns the Dockerfile's logical lines, joining a line

@@ -24,14 +24,19 @@ func requireDockerForBuild(t *testing.T) {
 	}
 }
 
-func writeDockerfile(t *testing.T, content string) (dockerfile, contextDir string) {
+// writeDockerfile puts content in a Dockerfile of its own main build
+// context and returns both, plus a separate directory standing in for the
+// repository under check - the second, named context every build carries.
+// Separate on purpose: a test that copies from the repo context proves
+// nothing if the same file is also in the main one.
+func writeDockerfile(t *testing.T, content string) (dockerfile, contextDir, repoDir string) {
 	t.Helper()
 	contextDir = t.TempDir()
 	dockerfile = filepath.Join(contextDir, "Dockerfile.inspector")
 	if err := os.WriteFile(dockerfile, []byte(content), 0o644); err != nil {
 		t.Fatalf("writing the Dockerfile: %v", err)
 	}
-	return dockerfile, contextDir
+	return dockerfile, contextDir, t.TempDir()
 }
 
 func TestParseDockerfile_CollectsOutsideBasesOnly(t *testing.T) {
@@ -76,6 +81,25 @@ func TestParseDockerfile_BuildContextDetection(t *testing.T) {
 		"continued copy": {"FROM alpine\nCOPY \\\n" +
 			"# a comment inside the continuation\n" +
 			"  go.mod go.sum ./\n", true},
+		// The repository under check is a build context too, and the tag
+		// can see it no better than it sees the main one - so a project
+		// baking its dependencies in from the repository has to rebuild
+		// for exactly the same reason (issue #81).
+		"copy from the repo context": {"FROM alpine\nCOPY --from=" + RepoBuildContext + " Gemfile Gemfile.lock /deps/\n", true},
+		"add from the repo context":  {"FROM alpine\nADD --from=" + RepoBuildContext + " src.tar.gz /src\n", true},
+		"run mounting the repo context": {"FROM alpine\nRUN --mount=from=" + RepoBuildContext +
+			",target=/repo cp /repo/Gemfile.lock /deps/\n", true},
+		"from the repo context": {"FROM " + RepoBuildContext + "\n", true},
+		// Docker folds stage names to lower case and resolves --from=
+		// against its named contexts first, so this reaches the same
+		// directory the lower-case spelling does.
+		"copy from the repo context in another case": {"FROM alpine\nCOPY --from=REPO Gemfile /deps/\n", true},
+		// Two --from= flags on one line is not a Dockerfile docker
+		// builds, but whichever of them a builder were to take, the one
+		// naming the repository has to count: a needless rebuild costs a
+		// cached layer, a missed one costs yesterday's dependencies.
+		"copy from a stage and the repo context": {"FROM alpine AS build\nFROM alpine\n" +
+			"COPY --from=build --from=" + RepoBuildContext + " Gemfile /deps/\n", true},
 	}
 	for name, tc := range cases {
 		facts, err := parseDockerfile(tc.dockerfile)
@@ -113,6 +137,28 @@ func TestParseDockerfile_RefusesWhatItCannotResolve(t *testing.T) {
 	}
 }
 
+// A stage named after the repository build context is refused rather than
+// built: docker resolves the context ahead of a stage of the same name, so
+// the project's own stage would be silently replaced by the repository
+// under check - and whatever that stage was meant to contribute would
+// vanish from the image the check then runs in.
+func TestParseDockerfile_RefusesAStageNamedAfterTheRepoContext(t *testing.T) {
+	for name, offending := range map[string]string{
+		"lower case": "FROM alpine AS " + RepoBuildContext,
+		// Refused in any case, because docker folds stage names.
+		"mixed case":                    "FROM alpine AS Repo",
+		"platform flag before the base": "FROM --platform=linux/amd64 alpine AS " + RepoBuildContext,
+	} {
+		_, err := parseDockerfile("FROM alpine AS first\n" + offending + "\nCOPY . /src\n")
+		if err == nil {
+			t.Fatalf("%s: expected a refusal, got none", name)
+		}
+		if !strings.Contains(err.Error(), offending) {
+			t.Fatalf("%s: error = %q, want it to name the offending line %q", name, err, offending)
+		}
+	}
+}
+
 func TestProjectImageTag_DerivedFromDockerfileAndBases(t *testing.T) {
 	dockerfile := []byte("FROM alpine\n")
 	base := BaseImage{Ref: "alpine", ID: "sha256:" + strings.Repeat("a", 64)}
@@ -135,13 +181,13 @@ func TestProjectImageTag_DerivedFromDockerfileAndBases(t *testing.T) {
 
 func TestBuildProjectImage_BuildsThenReusesTheTag(t *testing.T) {
 	requireDockerForBuild(t)
-	dockerfile, contextDir := writeDockerfile(t, "FROM "+buildTestBase+"\nRUN mkdir -p /opt/inspector-build-marker\n")
+	dockerfile, contextDir, repoDir := writeDockerfile(t, "FROM "+buildTestBase+"\nRUN mkdir -p /opt/inspector-build-marker\n")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -160,7 +206,7 @@ func TestBuildProjectImage_BuildsThenReusesTheTag(t *testing.T) {
 
 	// Nothing here reads the build context, so the second call must
 	// reuse the tag rather than build again.
-	again, err := BuildProjectImage(ctx, dockerfile, contextDir, &log)
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
 	if err != nil {
 		t.Fatalf("resolving the project image a second time: %v", err)
 	}
@@ -177,7 +223,7 @@ func TestBuildProjectImage_RebuildsWhenTheDockerfileReadsTheContext(t *testing.T
 	// The tag cannot see the context, so this is the case where skipping
 	// the build would bake in whatever the context held the first time
 	// and never notice it changed.
-	dockerfile, contextDir := writeDockerfile(t, "FROM "+buildTestBase+"\nCOPY dependency.txt /dependency.txt\n")
+	dockerfile, contextDir, repoDir := writeDockerfile(t, "FROM "+buildTestBase+"\nCOPY dependency.txt /dependency.txt\n")
 	if err := os.WriteFile(filepath.Join(contextDir, "dependency.txt"), []byte("first\n"), 0o644); err != nil {
 		t.Fatalf("writing the context file: %v", err)
 	}
@@ -186,7 +232,7 @@ func TestBuildProjectImage_RebuildsWhenTheDockerfileReadsTheContext(t *testing.T
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -197,7 +243,7 @@ func TestBuildProjectImage_RebuildsWhenTheDockerfileReadsTheContext(t *testing.T
 	if err := os.WriteFile(filepath.Join(contextDir, "dependency.txt"), []byte("second\n"), 0o644); err != nil {
 		t.Fatalf("rewriting the context file: %v", err)
 	}
-	again, err := BuildProjectImage(ctx, dockerfile, contextDir, &log)
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
 	if err != nil {
 		t.Fatalf("rebuilding the project image: %v", err)
 	}
@@ -214,15 +260,89 @@ func TestBuildProjectImage_RebuildsWhenTheDockerfileReadsTheContext(t *testing.T
 	}
 }
 
-func TestBuildProjectImage_FailedBuildIsRefusedWithItsLog(t *testing.T) {
+// The repository under check is a second build context under a fixed
+// name, so a Dockerfile that lives somewhere else entirely - a terms
+// folder - can still bake that repository's declared dependencies into
+// the image the check runs in (issue #81). The main context here does not
+// hold the file at all, so only the named context can satisfy the COPY.
+func TestBuildProjectImage_CopiesFromTheRepoContext(t *testing.T) {
 	requireDockerForBuild(t)
-	dockerfile, contextDir := writeDockerfile(t, "FROM "+buildTestBase+"\nRUN echo this-build-fails-on-purpose >&2; exit 3\n")
+	dockerfile, contextDir, repoDir := writeDockerfile(t, "FROM "+buildTestBase+
+		"\nCOPY --from="+RepoBuildContext+" Gemfile.lock /deps/Gemfile.lock\n")
+	lockfile := filepath.Join(repoDir, "Gemfile.lock")
+	if err := os.WriteFile(lockfile, []byte("first\n"), 0o644); err != nil {
+		t.Fatalf("writing the repository's lockfile: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(contextDir, "Gemfile.lock")); !os.IsNotExist(err) {
+		t.Fatalf("the main build context holds a Gemfile.lock too (%v), so this test would pass without the named context", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
+	if err != nil {
+		t.Fatalf("building the project image: %v\n%s", err, log.String())
+	}
+	t.Cleanup(func() {
+		_ = removeImage(image.Tag)
+	})
+	out, err := runImage(ctx, image.Tag, "cat /deps/Gemfile.lock")
+	if err != nil {
+		t.Fatalf("running the built image: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "first") {
+		t.Fatalf("the image holds %q, want the repository's own lockfile content", out)
+	}
+
+	// And the same reason the main context forces a rebuild applies here:
+	// the tag cannot see the repository either, so a changed lockfile must
+	// not keep yesterday's dependencies.
+	if err := os.WriteFile(lockfile, []byte("second\n"), 0o644); err != nil {
+		t.Fatalf("rewriting the repository's lockfile: %v", err)
+	}
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
+	if err != nil {
+		t.Fatalf("rebuilding the project image: %v", err)
+	}
+	if !again.Built {
+		t.Fatal("Built = false after the repository's lockfile changed; the image would hold the old dependencies under the same tag")
+	}
+	out, err = runImage(ctx, again.Tag, "cat /deps/Gemfile.lock")
+	if err != nil {
+		t.Fatalf("running the rebuilt image: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "second") {
+		t.Fatalf("the rebuilt image holds %q, want the repository's current lockfile content", out)
+	}
+}
+
+// Every build carries the repository context, so a caller that names no
+// repository is refused rather than having the flag quietly dropped - a
+// build missing a context the Dockerfile copies from fails for a reason
+// that would read as the project's own.
+func TestBuildProjectImage_MissingRepoContextIsRefused(t *testing.T) {
+	// No docker needed: nothing is run without a repository to name.
+	dockerfile, contextDir, _ := writeDockerfile(t, "FROM "+buildTestBase+"\n")
+	_, err := BuildProjectImage(context.Background(), dockerfile, contextDir, "", &bytes.Buffer{})
+	if !errors.Is(err, ErrProjectImageUnavailable) {
+		t.Fatalf("err = %v, want it to wrap ErrProjectImageUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), RepoBuildContext) {
+		t.Fatalf("err = %q, want it to name the context that was missing", err)
+	}
+}
+
+func TestBuildProjectImage_FailedBuildIsRefusedWithItsLog(t *testing.T) {
+	requireDockerForBuild(t)
+	dockerfile, contextDir, repoDir := writeDockerfile(t, "FROM "+buildTestBase+"\nRUN echo this-build-fails-on-purpose >&2; exit 3\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	var log bytes.Buffer
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
 	if !errors.Is(err, ErrProjectImageBuildFailed) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageBuildFailed", err)
 	}
@@ -238,12 +358,12 @@ func TestBuildProjectImage_UnresolvableBaseIsRefused(t *testing.T) {
 	requireDockerForBuild(t)
 	// Unreachable whether or not this machine has a registry it can
 	// talk to, so the refusal is the same either way.
-	dockerfile, contextDir := writeDockerfile(t, "FROM inspector-test-base-does-not-exist-xyz:0\n")
+	dockerfile, contextDir, repoDir := writeDockerfile(t, "FROM inspector-test-base-does-not-exist-xyz:0\n")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	_, err := BuildProjectImage(ctx, dockerfile, contextDir, &bytes.Buffer{})
+	_, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &bytes.Buffer{})
 	if !errors.Is(err, ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageUnavailable", err)
 	}
@@ -251,7 +371,7 @@ func TestBuildProjectImage_UnresolvableBaseIsRefused(t *testing.T) {
 
 func TestBuildProjectImage_MissingDockerfileIsRefused(t *testing.T) {
 	// No docker needed: the file is read before anything is run.
-	_, err := BuildProjectImage(context.Background(), filepath.Join(t.TempDir(), "Dockerfile.inspector"), t.TempDir(), &bytes.Buffer{})
+	_, err := BuildProjectImage(context.Background(), filepath.Join(t.TempDir(), "Dockerfile.inspector"), t.TempDir(), t.TempDir(), &bytes.Buffer{})
 	if !errors.Is(err, ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageUnavailable", err)
 	}

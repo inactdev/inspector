@@ -90,6 +90,16 @@ One consequence worth knowing: the content-derived image tag is unchanged, so
 two terms folders whose Dockerfiles and resolved bases are identical share one
 image, exactly as two projects with identical Dockerfiles already do.
 
+**Amended by issue #81**, `notes/20261103-the-repo-named-build-context.md`: the
+main context still follows the Dockerfile, but the repository under check now
+comes with it as a second context named `repo`, so a terms Dockerfile can
+`COPY --from=repo` the lockfiles it has to bake in. "Can reach nothing in the
+repository under check" above is no longer true. The reasoning that was wrong
+about it: a project with no network at check time has to bake its dependencies
+in, and the dependencies it must bake in are the repository's own declared
+ones - reading those is the environment following the project's declaration,
+not the environment depending on the work being judged.
+
 ## `-no-stamp` suppresses every status, not only the green one
 
 The flag's words in the issue are "posts no commit status". Taken literally:
