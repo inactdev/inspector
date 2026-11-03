@@ -1,10 +1,23 @@
 {
   "flags": [
     { "name": "repo", "description": "path to the repository to inspect" },
+    {
+      "name": "terms",
+      "description": "absolute path to the folder holding this project's .inspector.json, Dockerfile.inspector and check script, for a repository none of the three may be committed to; omitted when the repository carries them itself"
+    },
+    {
+      "name": "no-stamp",
+      "description": "takes no value; publish a green result as usual but post no commit status at all, for a repository whose CI must not be touched"
+    },
     { "name": "branch", "description": "pull request branch to publish after a green result", "required": true },
-    { "name": "expected-tip", "description": "full commit SHA the pull request branch must still point at on the remote, so a rebased branch can be published" },
+    {
+      "name": "expected-tip",
+      "description": "commit origin's copy of the branch is expected to be at, so a rewritten branch is published with force-with-lease; omitted when the branch was never published or was not rewritten"
+    },
     { "name": "pr-title", "description": "pull request title to open after a green result" },
-    { "name": "pr-body-file", "description": "path to a file containing the pull request body" }
+    { "name": "pr-body-file", "description": "path to a file containing the pull request body" },
+    { "name": "vendor", "description": "the reviewer's vendor, for judging the change's test edits; its key is read from <VENDOR>_API_KEY" },
+    { "name": "model", "description": "the reviewer's model, named by the same vendor" }
   ],
   "exitCodes": {
     "green": 0,
