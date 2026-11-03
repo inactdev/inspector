@@ -108,12 +108,13 @@ and it reuses the one already on the machine. Two consequences worth knowing:
   a floating tag moved between them. `FROM node:20` is resolved to whatever
   `node:20` is here (pulled once if it is missing); `FROM node@sha256:...`
   cannot drift at all.
-- **A Dockerfile that copies anything from the repository is rebuilt every
-  run** - the tag cannot see the build context, and the whole point of
-  `COPY package-lock.json` is that its content changes. Docker's own layer
-  cache is what makes that rebuild cheap. A Dockerfile that only installs a
-  toolchain (no `COPY`, no `ADD`, no `RUN --mount`) skips the build entirely
-  once it has been built once.
+- **A Dockerfile that copies anything from either build context is rebuilt
+  every run** - the tag cannot see a build context, and the whole point of
+  `COPY package-lock.json`, or of `COPY --from=repo Gemfile.lock`, is that
+  its content changes. Docker's own layer cache is what makes that rebuild
+  cheap. A Dockerfile that only installs a toolchain - no `COPY` or `ADD`
+  from a context, no `RUN --mount`, nothing naming `repo` - skips the build
+  entirely once it has been built once.
 
 Two things inspector refuses rather than guesses at: a `FROM` that names its
 image through a variable (`FROM golang:${VERSION}`), because it has to resolve
@@ -121,11 +122,17 @@ that base to a digest to tag what it builds, and a `# escape=` parser
 directive, because it would be reading the file under different rules than
 docker builds it under. Name the base literally.
 
-The build context is the repository root, so a `.dockerignore` is worth having
-for the same reason it always is - and worth knowing about: the working tree is
-clean by the time a check runs, so tracked content is the commit's, but a
-gitignored leftover such as `node_modules` at a path the Dockerfile copies
-would reach the image even though it is not part of the commit.
+The repository is a build context either way - its own root is the main one in
+the ordinary case, and it is `repo` beside a terms folder - so a
+`.dockerignore` is worth having for the same reason it always is, and worth
+knowing about: the working tree is clean by the time a check runs, so tracked
+content is the commit's, but a gitignored leftover such as `node_modules` at a
+path the Dockerfile copies would reach the image even though it is not part of
+the commit. Docker reads a local context's `.dockerignore` from that context's
+own root, which is where the repository's own file already is, so it applies to
+the `repo` context as well; there is no way to point a context at an ignore
+file kept anywhere else, and writing one into a judged project is not something
+Inspector may do.
 
 **The check command cannot modify tracked source.** Every top-level path git
 tracks - and `.git` itself - is mounted read-only; `/workspace` is otherwise a
@@ -223,6 +230,27 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 ```
+
+**Every build also gets the repository under check as a second build context
+called `repo`**, so a Dockerfile can read that repository's own files by name
+no matter where the Dockerfile itself lives:
+
+```dockerfile
+FROM ruby:3.3
+COPY --from=repo Gemfile Gemfile.lock .ruby-version /deps/
+RUN cd /deps && bundle install
+```
+
+That matters for [`--terms`](#terms-from-outside-the-repository---terms),
+where a bare `COPY Gemfile.lock` reads the terms folder rather than the
+repository; `COPY --from=repo` reads the repository in both modes, so one
+Dockerfile works either way. `ADD --from=repo` and
+`RUN --mount=from=repo,target=/repo` reach it too. The name is fixed with no
+config key, exactly like `/workspace` and `/terms`, and a Dockerfile that
+declares a build stage of its own named `repo` is refused by name, naming the
+line - docker resolves the context ahead of a same-named stage, so that stage
+would be silently replaced by the repository. Reading a second context needs
+BuildKit, which is what `docker build` has used by default since Docker 23.
 
 A `.inspector.json` that still carries the old `"network"` opt-in is refused
 by name, with any value, rather than quietly ignored - as every run that used
@@ -597,12 +625,25 @@ Put the terms in a folder of their own.
 This flag is normally used with the other two it was built beside - see
 [Work mode](#work-mode) for the invocation that puts all three together.
 
-The build context follows the Dockerfile, so a terms `Dockerfile.inspector`
-can `COPY` its own siblings and can reach nothing in the repository under
-check. That is the right way round - the image is the environment, and baking
-the judged repository's own content into it would make the environment depend
-on the thing being judged - but it does mean a terms Dockerfile cannot
-`COPY package-lock.json` from the repository the way an in-repo one can.
+The main build context follows the Dockerfile, so a terms
+`Dockerfile.inspector` can `COPY` its own siblings. The repository under check
+comes with it as a second context named `repo`, the same one an in-repo
+Dockerfile gets, so a terms Dockerfile can bake this project's own declared
+dependencies in:
+
+```dockerfile
+FROM ruby:3.3
+COPY --from=repo Gemfile Gemfile.lock .ruby-version /deps/
+RUN cd /deps && bundle install
+```
+
+Without that, a project whose dependencies have to be in the image - the
+normal case, since the check container has no network - could only get them
+there by hand-copying its lockfiles into the terms folder, where they go stale
+the moment the real ones change. [Use](#use) has the rest of what the name
+carries: it is fixed with no config key, a Dockerfile declaring its own `repo`
+stage is refused by name, and a Dockerfile that reads the context is rebuilt
+every run.
 
 #### Publishing without a stamp: `--no-stamp`
 
@@ -831,8 +872,12 @@ The three files, and the check script the first of them names:
 
 Inspector reads `.inspector.json` and `Dockerfile.inspector` from there
 instead of the repository root, builds that Dockerfile with that folder as the
-build context, and mounts the folder read-only at `/terms` inside the check
-container - which is why the check command names its script under that path.
+main build context, and mounts the folder read-only at `/terms` inside the
+check container - which is why the check command names its script under that
+path. The build also gets the repository under check as a second context named
+`repo`, so that Dockerfile can `COPY --from=repo Gemfile.lock /deps/` and bake
+this project's own dependencies in; it is the same context an in-repo
+Dockerfile gets, so one Dockerfile works in either mode.
 The repository is still mounted at `/workspace` and is still the check
 command's working directory. The Dockerfile only has to be present: there is
 no repository outside for it to be committed to, so the committed-image
@@ -1750,7 +1795,12 @@ model access is a Claude Code subscription - no API key and no base URL
 anywhere - while `inspector examine` refuses that vendor by name, its agent
 being sealed away from any such command. `anthropic` remains the default.
 Issue #78 documents the three flags of #69 and #70 used together, as
-[Work mode](#work-mode) above.
+[Work mode](#work-mode) above. Issue #81 is built: every check image build
+carries the repository under check as a second build context named `repo`, so
+a `Dockerfile.inspector` can `COPY --from=repo` the lockfiles it has to bake
+in whether it lives in the repository or in a terms folder beside it - with no
+new flag, a rebuild whenever that context is read, and a refusal by name for a
+Dockerfile that declares a `repo` stage of its own.
 Still to come: the
 installer - see
 [SPEC.md](SPEC.md) and the repo's issues.
