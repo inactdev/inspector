@@ -353,8 +353,15 @@ func parseDockerfile(content string) (dockerfileFacts, error) {
 			// exception: that is the repository under check, which the
 			// tag can no more see than it can see the main context.
 			// Anything else reads the main context.
-			from, declared := flagValue(args, "--from=")
-			if !declared || namesRepoContext(from) {
+			//
+			// Every --from= on the line is looked at, not just the first:
+			// a line carrying two of them is not a file docker builds, but
+			// if some builder takes the last one rather than rejecting the
+			// line, the one naming the repository must still count - a
+			// needless rebuild is cheap, a stale image is the failure this
+			// whole rule exists to prevent.
+			froms := flagValues(args, "--from=")
+			if len(froms) == 0 || namesRepoContextAny(froms) {
 				facts.readsBuildContext = true
 			}
 		case "RUN":
@@ -410,26 +417,38 @@ func namesRepoContext(name string) bool {
 	return strings.EqualFold(name, RepoBuildContext)
 }
 
-// flagValue returns whatever follows prefix in the first of an
-// instruction's flags that starts with it - so prefix carries its own "="
-// when the value is what the caller is after.
-func flagValue(args []string, prefix string) (value string, present bool) {
+// namesRepoContextAny reports whether any of these --from= values names
+// the repository build context.
+func namesRepoContextAny(names []string) bool {
+	for _, name := range names {
+		if namesRepoContext(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// flagValues returns whatever follows prefix in each of an instruction's
+// flags that starts with it - so prefix carries its own "=" when the value
+// is what the caller is after. All of them rather than the first, because
+// a caller deciding whether to rebuild must not be able to miss one.
+func flagValues(args []string, prefix string) []string {
+	var values []string
 	for _, arg := range args {
 		if !strings.HasPrefix(arg, "--") {
 			// Flags only precede an instruction's own arguments; past
 			// the first of those, a matching string is just text.
-			return "", false
+			break
 		}
 		if strings.HasPrefix(arg, prefix) {
-			return strings.TrimPrefix(arg, prefix), true
+			values = append(values, strings.TrimPrefix(arg, prefix))
 		}
 	}
-	return "", false
+	return values
 }
 
 func hasFlag(args []string, prefix string) bool {
-	_, present := flagValue(args, prefix)
-	return present
+	return len(flagValues(args, prefix)) > 0
 }
 
 // joinContinuations returns the Dockerfile's logical lines, joining a line

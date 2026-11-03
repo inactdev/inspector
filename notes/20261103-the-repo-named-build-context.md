@@ -75,6 +75,14 @@ So `COPY --from=repo`, `ADD --from=repo` and `FROM repo` now mark the Dockerfile
 as context-reading. `RUN --mount=from=repo` already did, because any
 `RUN --mount` does.
 
+Every `--from=` on a line is read, not only the first one. A line carrying two
+of them is not a file docker builds, but which one a given builder would take if
+it accepted the line is not something inspector should have to know: if any of
+them names the repository, the Dockerfile counts as context-reading. The
+asymmetry is the whole reason - over-matching costs one rebuild off docker's
+layer cache, under-matching costs a check run against dependencies the
+repository no longer declares.
+
 ## `.dockerignore`, plainly
 
 Docker reads a local context's ignore file from **that context's own root**.

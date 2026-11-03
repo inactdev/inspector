@@ -94,6 +94,12 @@ func TestParseDockerfile_BuildContextDetection(t *testing.T) {
 		// against its named contexts first, so this reaches the same
 		// directory the lower-case spelling does.
 		"copy from the repo context in another case": {"FROM alpine\nCOPY --from=REPO Gemfile /deps/\n", true},
+		// Two --from= flags on one line is not a Dockerfile docker
+		// builds, but whichever of them a builder were to take, the one
+		// naming the repository has to count: a needless rebuild costs a
+		// cached layer, a missed one costs yesterday's dependencies.
+		"copy from a stage and the repo context": {"FROM alpine AS build\nFROM alpine\n" +
+			"COPY --from=build --from=" + RepoBuildContext + " Gemfile /deps/\n", true},
 	}
 	for name, tc := range cases {
 		facts, err := parseDockerfile(tc.dockerfile)
