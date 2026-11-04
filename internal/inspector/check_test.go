@@ -724,6 +724,126 @@ func TestRunCheck_CannotWriteTrackedSource(t *testing.T) {
 	}
 }
 
+// newPlaceholderCheckRepo builds the repository issue #84 was found on:
+// everything in tmp/ and log/ ignored, one tracked placeholder in each
+// of tmp/, tmp/pids/ and log/ anyway, and ordinary source beside them.
+// A Rails app tracks exactly these three files and writes into all
+// three directories at boot.
+func newPlaceholderCheckRepo(t *testing.T) string {
+	t.Helper()
+	dir := newTestRepo(t, map[string]string{
+		".gitignore":  "/tmp/*\n/log/*\n",
+		"src/main.rb": "puts :hello\n",
+	})
+	writeFiles(t, dir, map[string]string{
+		"tmp/.keep":      "",
+		"tmp/pids/.keep": "",
+		"log/.keep":      "",
+	})
+	// -f because the project's own rules ignore them, which is the
+	// whole point: a tracked placeholder in an ignored directory.
+	runGitT(t, dir, "add", "-f", "tmp/.keep", "tmp/pids/.keep", "log/.keep")
+	runGitT(t, dir, "commit", "-q", "-m", "placeholders")
+	return dir
+}
+
+// TestRunCheck_WritesWhereGitWouldIgnoreANewFile is issue #84's
+// acceptance bar, and the negative half of it is the one that matters:
+// the directories open up, every tracked file in them stays as
+// unwritable as before, and so does a directory git would ignore
+// nothing in.
+func TestRunCheck_WritesWhereGitWouldIgnoreANewFile(t *testing.T) {
+	requireDocker(t)
+	dir := newPlaceholderCheckRepo(t)
+
+	result, err := runCheck(t, dir, strings.Join([]string{
+		// Allowed: git ignores every one of these, so none of them
+		// could ever be part of the commit under check.
+		"mkdir -p tmp/cache && echo cached > tmp/cache/x && echo MADE_TMP_CACHE",
+		"printf secret > tmp/local_secret.txt && echo WROTE_TMP_SECRET",
+		"echo 1234 > tmp/pids/server.pid && echo WROTE_PID",
+		"echo started > log/test.log && echo WROTE_LOG",
+		// Forbidden: tracked files, each mounted read-only on its own.
+		"printf changed > tmp/.keep && echo WROTE_TMP_KEEP",
+		"printf changed > tmp/pids/.keep && echo WROTE_PIDS_KEEP",
+		"rm -f log/.keep && echo REMOVED_LOG_KEEP",
+		"printf changed > replacement && mv replacement tmp/.keep && echo REPLACED_TMP_KEEP",
+		// Forbidden: moving a writable directory aside would let the
+		// check rebuild it and pass against files the commit does not
+		// contain, which is why the directory is a mount of its own.
+		"mv tmp tmp.old && echo MOVED_TMP_DIR",
+		// Forbidden, and unchanged by any of this: git would ignore
+		// nothing placed in src/.
+		"printf changed > src/main.rb && echo WROTE_SRC",
+		"printf new > src/added.rb && echo ADDED_TO_SRC",
+		"true",
+	}, "; "), testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, want := range []string{"MADE_TMP_CACHE", "WROTE_TMP_SECRET", "WROTE_PID", "WROTE_LOG"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("the check command could not write where git would ignore a new file (%s):\n%s", want, result.Output)
+		}
+	}
+	for _, forbidden := range []string{
+		"WROTE_TMP_KEEP",
+		"WROTE_PIDS_KEEP",
+		"REMOVED_LOG_KEEP",
+		"REPLACED_TMP_KEEP",
+		"MOVED_TMP_DIR",
+		"WROTE_SRC",
+		"ADDED_TO_SRC",
+	} {
+		if strings.Contains(result.Output, forbidden) {
+			t.Fatalf("the check command changed tracked source (%s):\n%s", forbidden, result.Output)
+		}
+	}
+
+	// The repository itself is untouched by the writes that succeeded:
+	// they land in this run's throwaway writable space, like everything
+	// else a check writes into its own tree.
+	for _, name := range []string{"tmp/local_secret.txt", "tmp/cache/x", "tmp/pids/server.pid", "log/test.log"} {
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(name))); !os.IsNotExist(err) {
+			t.Fatalf("os.Stat(%s) in the repository = %v, want the check command's write kept out of it", name, err)
+		}
+	}
+	for _, name := range []string{"tmp/.keep", "tmp/pids/.keep", "log/.keep"} {
+		if got := readFile(t, filepath.Join(dir, filepath.FromSlash(name))); got != "" {
+			t.Fatalf("%s = %q in the repository, want it untouched", name, got)
+		}
+	}
+	if got := readFile(t, filepath.Join(dir, "src", "main.rb")); got != "puts :hello\n" {
+		t.Fatalf("src/main.rb = %q in the repository, want it untouched", got)
+	}
+}
+
+// TestRunCheck_AGitignoredLeftoverInAWritableDirectoryIsReused is the
+// other half of issue #84's layout: a cached gitignored directory
+// inside a tracked one keeps being mounted from the host, writable, for
+// the same reason a root-level node_modules does.
+func TestRunCheck_AGitignoredLeftoverInAWritableDirectoryIsReused(t *testing.T) {
+	requireDocker(t)
+	dir := newPlaceholderCheckRepo(t)
+	writeFiles(t, dir, map[string]string{"tmp/cache/assets": "from an earlier run\n"})
+
+	result, err := runCheck(t, dir, "cat tmp/cache/assets && printf rebuilt > tmp/cache/assets && echo REBUILT", testImage, container.Limits{}, testTimeout, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(result.Output, "from an earlier run") {
+		t.Fatalf("Output = %q, want the earlier run's cache readable inside the container", result.Output)
+	}
+	if !strings.Contains(result.Output, "REBUILT") {
+		t.Fatalf("Output = %q, want a gitignored path inside a tracked directory to still be writable", result.Output)
+	}
+	if got := readFile(t, filepath.Join(dir, "tmp", "cache", "assets")); got != "rebuilt" {
+		t.Fatalf("tmp/cache/assets = %q, want the check command's write to have reached it", got)
+	}
+}
+
 func TestRunCheck_BuildOutputAndReportsLandInTheWorkspace(t *testing.T) {
 	// The other half of issue #27's bar: an ordinary project whose
 	// check installs dependencies, builds into its own tree and writes

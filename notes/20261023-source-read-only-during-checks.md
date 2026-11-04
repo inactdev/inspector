@@ -16,7 +16,11 @@ can be defeated by putting it back, so the capability is removed instead.
 temporary directory - the run's writable workspace - carrying one bind mount
 per top-level entry of the repo root:
 
-- every top-level entry git tracks, plus `.git`, mounted **read-only**
+- every top-level entry git tracks, plus `.git`, mounted **read-only** - with
+  the one carve-out issue #84 added later: a tracked directory git would
+  ignore a new file in is writable instead, carrying its own tracked files
+  read-only one mount each
+  (`notes/20261104-a-writable-directory-git-would-ignore.md`)
 - every other top-level entry (gitignored build output, installed
   dependencies, `.inspector/`) mounted read-write, exactly as before
 - the workspace root itself writable, so a check that creates `dist/`,
@@ -114,14 +118,22 @@ a commit, which is a different job from immutability.
 - **A symlink at the repo root is carried as a link, or refused by name** -
   see the section above. Anything at the repo root that is neither a directory
   nor a regular file is refused. Entries *inside* a top-level directory are
-  unaffected either way: the mount is recursive.
+  unaffected either way, the mount being recursive - except directly inside a
+  directory git would ignore a new file in (issue #84), which is laid out
+  entry by entry and so applies these same rules there.
 - **New files inside a tracked directory fail too**, not just writes to
   tracked files: a read-only bind mount is read-only for the whole subtree,
   and no mount flag can distinguish "new file in `src/`" from "modified file
   in `src/`". Root-level build output, installed dependencies and written
   reports - the cases the issue names - are unaffected. A project that writes
   into a tracked directory (Python's `__pycache__` beside its sources is the
-  common one) has to send that output elsewhere.
+  common one) has to send that output elsewhere - **unless git would ignore
+  the new file**, which issue #84 has since carved out: such a directory is
+  writable, with each tracked file in it mounted read-only on its own. See
+  `notes/20261104-a-writable-directory-git-would-ignore.md`, which owns that
+  layout, its mount count and its own residuals. `__pycache__` beside tracked
+  sources is still the hard case, since the sources' own directory is not one
+  git ignores a new file in.
 - **`.git` is read-only now for an ordinary clone too**, not only for the
   linked worktree whose shared git directory was already mounted read-only.
   `git status`, `log` and `diff` work; `git commit` fails on a read-only file

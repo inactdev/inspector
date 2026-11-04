@@ -11,8 +11,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/inactdev/inspector/internal/container"
 )
 
 // ResolveRepoRoot returns the absolute top-level directory of the git
@@ -389,22 +392,42 @@ func WorkingTreeStatus(repoRoot string) (string, error) {
 	return out + trackedRuns + mutableIndex, nil
 }
 
+// writeProbeName is the file name inspector asks git about to find out
+// whether a directory would ignore a new file placed in it. No such
+// file exists anywhere: `git check-ignore` answers for a path, not for
+// something on disk, and a path that does not exist is the whole point -
+// the question is what the ignore rules say about a *new* file there.
+//
+// Plain, with no leading dot, deliberately: a repository that ignores
+// `.*` must not end up with a source directory writable because the
+// probe happened to look like a dotfile. And inspector's own name,
+// deliberately: a repository that does track a file called this gets
+// git's "not ignored" answer for it, which is the read-only,
+// pre-issue-#84 layout rather than a wrong one.
+const writeProbeName = "inspector-write-probe"
+
 // TopLevelSourceEntries names the repo root's own top-level entries
 // that hold tracked content - the first path component of every file in
-// the index, deduplicated. That is the list container.ResolveWorkspace
-// mounts read-only, so the check command cannot modify the code it is
-// being judged on (issue #27).
+// the index, deduplicated - each with git's own answer to whether it
+// would ignore a new file placed directly in it, and, for the ones it
+// would, the same for everything tracked inside them. That is what
+// container.ResolveWorkspace lays out, so the check command cannot
+// modify the code it is being judged on (issue #27) while still being
+// able to write where nothing it writes could become part of the commit
+// (issue #84).
 //
 // A directory counts as tracked source when anything under it is
-// tracked: a mount is read-only for its whole subtree, and no mount
-// flag can tell a new file in a tracked directory from a modified one.
+// tracked. One git would not ignore a new file in is mounted read-only
+// as a whole, so this prunes there: no mount flag can tell a new file in
+// such a directory from a modified one, and what is under it needs no
+// mount of its own.
 //
 // A path with no git directory at all returns nothing rather than an
 // error, the same tolerance container.ResolveGitMounts extends to the
 // unit tests of a bare check command. Anything else that stops git from
 // answering is an error: assuming "nothing is tracked" there would mount
 // the whole repo writable, which is the state this exists to end.
-func TopLevelSourceEntries(repoRoot string) ([]string, error) {
+func TopLevelSourceEntries(repoRoot string) ([]container.SourceEntry, error) {
 	if _, err := os.Stat(filepath.Join(repoRoot, ".git")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -418,20 +441,168 @@ func TopLevelSourceEntries(repoRoot string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing tracked files: %w", err)
 	}
-	seen := make(map[string]bool)
-	var names []string
+	tracked := &trackedNode{}
 	for _, path := range splitNullPaths(out) {
-		name := path
-		if slash := strings.IndexByte(path, '/'); slash >= 0 {
-			name = path[:slash]
+		tracked.insert(path)
+	}
+	ignoring, err := directoriesIgnoringNewFiles(repoRoot, tracked)
+	if err != nil {
+		return nil, err
+	}
+	return tracked.sourceEntries("", ignoring), nil
+}
+
+// trackedNode is one node of the tree git's index describes: a
+// directory, with the tracked entries directly inside it as children,
+// or a tracked path with no children of its own - a file, or a
+// submodule, which has none in this repository's index.
+type trackedNode struct {
+	children map[string]*trackedNode
+}
+
+// insert records one tracked path, slash-separated as git reports it.
+func (n *trackedNode) insert(path string) {
+	current := n
+	for path != "" {
+		name, rest, _ := strings.Cut(path, "/")
+		if name == "" {
+			return
 		}
-		if name == "" || seen[name] {
-			continue
+		if current.children == nil {
+			current.children = make(map[string]*trackedNode)
 		}
-		seen[name] = true
+		child := current.children[name]
+		if child == nil {
+			child = &trackedNode{}
+			current.children[name] = child
+		}
+		current, path = child, rest
+	}
+}
+
+// trackedDir is one tracked directory of the repository, named by its
+// own repo-relative path.
+type trackedDir struct {
+	path string
+	node *trackedNode
+}
+
+// directories returns the tracked directories directly inside n, in a
+// fixed order so one repository always produces one layout.
+func (n *trackedNode) directories(prefix string) []trackedDir {
+	names := make([]string, 0, len(n.children))
+	for name := range n.children {
+		if n.children[name].children != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	dirs := make([]trackedDir, 0, len(names))
+	for _, name := range names {
+		dirs = append(dirs, trackedDir{path: childPath(prefix, name), node: n.children[name]})
+	}
+	return dirs
+}
+
+// sourceEntries turns the tracked tree into what
+// container.ResolveWorkspace lays out, carrying nested detail only
+// where it is used: below a directory git would not ignore a new file
+// in there is one read-only mount and nothing to decide.
+func (n *trackedNode) sourceEntries(prefix string, ignoring map[string]bool) []container.SourceEntry {
+	names := make([]string, 0, len(n.children))
+	for name := range n.children {
 		names = append(names, name)
 	}
-	return names, nil
+	sort.Strings(names)
+
+	entries := make([]container.SourceEntry, 0, len(names))
+	for _, name := range names {
+		path := childPath(prefix, name)
+		entry := container.SourceEntry{Name: name, IgnoresNewFiles: ignoring[path]}
+		if entry.IgnoresNewFiles {
+			entry.Entries = n.children[name].sourceEntries(path, ignoring)
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func childPath(prefix, name string) string {
+	if prefix == "" {
+		return name
+	}
+	return prefix + "/" + name
+}
+
+// directoriesIgnoringNewFiles returns, by repo-relative path, every
+// tracked directory git would ignore a new file placed directly in -
+// the ones a check command may write in (issue #84).
+//
+// Asked level by level from the top rather than all at once, because
+// only a directory whose every ancestor answered yes is laid out
+// separately at all: one git would not ignore a new file in is mounted
+// read-only as a whole, which settles everything beneath it.
+func directoriesIgnoringNewFiles(repoRoot string, tracked *trackedNode) (map[string]bool, error) {
+	ignoring := make(map[string]bool)
+	for level := tracked.directories(""); len(level) > 0; {
+		answers, err := ignoresNewFileIn(repoRoot, level)
+		if err != nil {
+			return nil, err
+		}
+		var next []trackedDir
+		for _, dir := range level {
+			if !answers[dir.path] {
+				continue
+			}
+			ignoring[dir.path] = true
+			next = append(next, dir.node.directories(dir.path)...)
+		}
+		level = next
+	}
+	return ignoring, nil
+}
+
+// ignoresNewFileIn asks git, in one call, which of dirs would ignore a
+// new file placed directly in it, keyed by the same paths dirs names.
+//
+// Run with the same system and global configuration disabled as the
+// tracked-file listing beside it, so the mounts a run gets are the
+// repository's own answer rather than whatever excludesFile the person
+// running inspector keeps in their home directory. The index is left
+// consulted, which is what makes a tracked file by the probe's own name
+// answer "not ignored" rather than wrongly.
+//
+// Exit status 1 is git saying it considered every path and ignored none
+// of them - an answer, not a failure. Any other failure is an error and
+// has to be: guessing "not ignored" would mount a directory read-only
+// that the project has to write in, and guessing "ignored" would make a
+// source directory writable.
+func ignoresNewFileIn(repoRoot string, dirs []trackedDir) (map[string]bool, error) {
+	probes := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		probes = append(probes, dir.path+"/"+writeProbeName)
+	}
+	// --stdin so a directory whose name begins with a dash is a path
+	// rather than an option, and -z so one with a newline or a quote in
+	// it survives both directions.
+	args := []string{"check-ignore", "-z", "--stdin"}
+	cmd := newValidationGit(repoRoot, args...)
+	cmd.Stdin = strings.NewReader(strings.Join(probes, "\x00") + "\x00")
+	var out, errBuf bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errBuf.String()))
+		}
+	}
+
+	ignoring := make(map[string]bool, len(dirs))
+	for _, probe := range splitNullPaths(out.String()) {
+		ignoring[strings.TrimSuffix(probe, "/"+writeProbeName)] = true
+	}
+	return ignoring, nil
 }
 
 func validationHeadCommit(repoRoot string) (string, error) {
@@ -781,10 +952,20 @@ func runGit(dir string, args ...string) (string, error) {
 }
 
 func runValidationGit(dir string, args ...string) (string, error) {
+	return gitOutput(newValidationGit(dir, args...), args)
+}
+
+// newValidationGit builds a git command that reads only what the
+// repository itself says - no system or global configuration, no
+// fsmonitor, no hooks - for the questions whose answers decide how a
+// run is set up. Callers that need more than its output (an exit status
+// that is an answer rather than a failure, or input on stdin) build on
+// this rather than copying the flags.
+func newValidationGit(dir string, args ...string) *exec.Cmd {
 	gitArgs := append([]string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.DevNull, "-C", dir}, args...)
 	cmd := exec.Command("git", gitArgs...)
 	cmd.Env = validationGitEnv()
-	return gitOutput(cmd, args)
+	return cmd
 }
 
 func runWorktreeGit(dir string, args ...string) (string, error) {

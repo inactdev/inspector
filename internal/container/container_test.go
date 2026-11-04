@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -131,6 +132,48 @@ func TestNew_SourceMountsAreReadOnlyAndWritableMountsAreNot(t *testing.T) {
 	}
 	if !strings.Contains(args, "GIT_CONFIG_COUNT=1") {
 		t.Fatalf("docker args = %q, want safe.directory declared for the workspace alone - source and writable mounts are paths inside a repository, not git directories", args)
+	}
+}
+
+func TestNew_WorkspaceMountsAreEmittedParentFirst(t *testing.T) {
+	// Docker applies a container's mounts in order of their destination
+	// whatever order the flags arrive in, but nothing here should
+	// depend on that: a nested destination has to land on top of its
+	// mounted parent, and since issue #84 the read-only and writable
+	// lists interleave by depth - a writable directory git would ignore
+	// a new file in holds the read-only mounts of its own tracked
+	// files.
+	cmd := New(context.Background(), Run{
+		WorkspaceRoot: "/tmp/inspector-workspace-1",
+		SourceMounts: []Mount{
+			{Source: "/host/repo/tmp/.keep", Target: WorkspaceDir + "/tmp/.keep"},
+			{Source: "/host/repo/tmp/pids/.keep", Target: WorkspaceDir + "/tmp/pids/.keep"},
+			{Source: "/host/repo/src", Target: WorkspaceDir + "/src"},
+		},
+		WritableMounts: []Mount{
+			{Source: "/tmp/inspector-writable-1/tmp", Target: WorkspaceDir + "/tmp"},
+			{Source: "/tmp/inspector-writable-1/tmp/pids", Target: WorkspaceDir + "/tmp/pids"},
+		},
+		Command: "true",
+		Image:   "alpine",
+	})
+
+	var targets []string
+	for i, arg := range cmd.Args {
+		if arg != "-v" || i+1 >= len(cmd.Args) {
+			continue
+		}
+		fields := strings.Split(cmd.Args[i+1], ":")
+		targets = append(targets, fields[1])
+	}
+	seen := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		for parent := path.Dir(target); strings.HasPrefix(parent, WorkspaceDir); parent = path.Dir(parent) {
+			if !seen[parent] {
+				t.Fatalf("docker args mount %s before its parent %s: targets in flag order = %v", target, parent, targets)
+			}
+		}
+		seen[target] = true
 	}
 }
 
