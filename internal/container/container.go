@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,13 +105,15 @@ type Run struct {
 	// and TermsMount.
 	WorkspaceRoot string
 	// SourceMounts carry the commit under check into the workspace,
-	// read-only - one mount per tracked top-level entry of the repo.
-	// See Workspace and ResolveWorkspace.
+	// read-only - one mount per tracked top-level entry of the repo,
+	// plus one per tracked file inside a directory git would ignore a
+	// new file in. See Workspace and ResolveWorkspace.
 	SourceMounts []Mount
 	// WritableMounts are the host paths the check command may write:
 	// the repo root's own untracked, gitignored leftovers (build
 	// output, installed dependencies), which are not what the commit
-	// under check is made of. See Workspace.
+	// under check is made of, plus the throwaway stand-in for each
+	// tracked directory git would ignore a new file in. See Workspace.
 	WritableMounts []Mount
 	// ReadOnlyMounts are the few host paths that have to be readable
 	// alongside the workspace for the check command to work at all,
@@ -216,14 +219,16 @@ func New(ctx context.Context, r Run) *Cmd {
 	// ResolveGitMounts already relies on, verified live here and in
 	// Fabrica for the file it lays over a mounted git directory. These
 	// are emitted parent-first regardless, so the result does not
-	// depend on that sort. Every source here exists: ResolveWorkspace
-	// read it off disk, which matters because -v would otherwise create
-	// a missing source as an empty directory instead of failing.
-	for _, mount := range r.SourceMounts {
-		args = append(args, "-v", mount.Source+":"+mount.Target+":ro")
-	}
-	for _, mount := range r.WritableMounts {
-		args = append(args, "-v", mount.Source+":"+mount.Target)
+	// depend on that sort - which takes one sort now that the two lists
+	// interleave by depth: a writable directory git would ignore a new
+	// file in carries the read-only mounts of its own tracked files
+	// (issue #84). Sorting by destination is what parent-first means
+	// here, a parent destination always being a prefix of its
+	// children's. Every source here exists: ResolveWorkspace read it
+	// off disk or created it, which matters because -v would otherwise
+	// create a missing source as an empty directory instead of failing.
+	for _, flag := range workspaceMountFlags(r.SourceMounts, r.WritableMounts) {
+		args = append(args, "-v", flag)
 	}
 	for _, mount := range r.ReadOnlyMounts {
 		args = append(args, "-v", mount.Source+":"+mount.Target+":ro")
@@ -316,6 +321,33 @@ func New(ctx context.Context, r Run) *Cmd {
 
 	args = append(args, r.Image, "sh", "-c", r.Command)
 	return NewCommand(ctx, "inspector-check-", args...)
+}
+
+// workspaceMountFlags returns the `-v` values for one workspace's
+// read-only and writable mounts, ordered by destination so every parent
+// is mounted before anything nested inside it.
+func workspaceMountFlags(readOnly, writable []Mount) []string {
+	type flagged struct {
+		target string
+		flag   string
+	}
+	ordered := make([]flagged, 0, len(readOnly)+len(writable))
+	for _, mount := range readOnly {
+		ordered = append(ordered, flagged{mount.Target, mount.Source + ":" + mount.Target + ":ro"})
+	}
+	for _, mount := range writable {
+		ordered = append(ordered, flagged{mount.Target, mount.Source + ":" + mount.Target})
+	}
+	// By destination: the sources are host temporary directories and
+	// repository paths, with no relationship to the nesting that
+	// matters here.
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].target < ordered[j].target })
+
+	flags := make([]string, 0, len(ordered))
+	for _, mount := range ordered {
+		flags = append(flags, mount.flag)
+	}
+	return flags
 }
 
 // NewCommand builds a managed Docker run from the supplied arguments. Context

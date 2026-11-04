@@ -92,7 +92,9 @@ const (
 // top-level paths are mounted read-only over a throwaway writable
 // workspace - so the check command can install, build and write
 // reports into its own tree without being able to modify the code it
-// is being judged on (issue #27; see container.ResolveWorkspace) - plus,
+// is being judged on (issue #27; see container.ResolveWorkspace), while
+// a tracked directory git would ignore a new file in is writable with
+// its own tracked files still read-only one by one (issue #84) - plus,
 // read-only, whatever container.ResolveGitMounts says the repo needs
 // for git to work in there, plus - read-only at container.TermsDir -
 // termsMount when this run's terms came from a folder outside the repo
@@ -167,7 +169,7 @@ func RunCheck(repoRoot, command, image string, termsMount container.Mount, limit
 	// naming it.
 	sourceEntries, err := TopLevelSourceEntries(repoRoot)
 	if err != nil {
-		return CheckResult{}, fmt.Errorf("%w: inspector cannot tell which of this repository's top-level paths hold tracked source, and those are exactly what it mounts read-only: %v", container.ErrWorkspaceUnavailable, err)
+		return CheckResult{}, fmt.Errorf("%w: inspector cannot tell which of this repository's paths hold tracked source, or which of its directories git would ignore a new file in - the two answers that decide what it mounts read-only: %v", container.ErrWorkspaceUnavailable, err)
 	}
 	workspace, err := container.ResolveWorkspace(repoRoot, sourceEntries)
 	if err != nil {

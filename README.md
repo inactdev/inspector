@@ -142,6 +142,19 @@ into its own tree keeps working with nothing configured, while a write to a
 tracked file fails with a read-only file system and the check goes red naming
 it. The writable workspace is discarded once the run's report is written.
 
+**A tracked directory git would ignore a new file in is writable**, and the
+tracked files in it are still read-only, one mount each. A Rails app tracks
+`tmp/.keep`, `tmp/pids/.keep` and `log/.keep` while ignoring everything else in
+those directories, and writes `tmp/local_secret.txt`, caches, pids and log
+files into them at boot - a whole-directory read-only mount failed that suite
+before a test ran. So inspector asks git, per tracked directory, whether it
+would ignore a new file placed directly in it: if not, the directory is mounted
+read-only as a whole as before; if so, the directory is writable with each
+tracked file in it mounted read-only on its own, and the same question is asked
+of each tracked subdirectory. Nothing git ignores can be part of the commit
+under check, so none of those writes can change what is being judged, and they
+land in the run's throwaway space rather than in the repository.
+
 This is enforced where the check runs, not checked afterwards, because
 afterwards is too late: a check can save a tracked file, modify it, pass
 against the modified bytes and restore it before exiting, and nothing looking
@@ -153,10 +166,21 @@ that never passed as written.
 
 What that does and does not cover, plainly:
 
-- **Covered:** no write to a tracked path succeeds, including creating a new
-  file inside a tracked directory - a read-only mount is read-only for its
-  whole subtree, and nothing can tell a new file in `src/` from a modified
-  one. Nothing the check writes reaches the repository.
+- **Covered:** no write to a tracked path succeeds. That includes creating a
+  new file inside a tracked directory git would ignore nothing in - a
+  read-only mount is read-only for its whole subtree, and nothing can tell a
+  new file in `src/` from a modified one - and it includes moving such a
+  directory aside to rebuild it, since every one of these paths is a mount and
+  a mount cannot be renamed from inside the container. Nothing the check
+  writes reaches the repository.
+- **Covered, with one answer from git:** in a tracked directory git *would*
+  ignore a new file in, the new file succeeds and the tracked files beside it
+  still cannot be written, deleted or replaced. The question is asked once per
+  directory, about a probe path that does not exist, so a directory whose
+  rules cover only some names - `*.log` rather than `/log/*` - stays read-only
+  as a whole. The answer comes from the repository's own ignore rules only:
+  system and global git configuration is disabled for it, so one commit gets
+  one layout on every machine.
 - **Not covered:** a check that writes **outside the repository entirely** is
   a different problem, and this is not total containment - the container, its
   resource limits and its denied network are what bound that.
@@ -165,9 +189,13 @@ What that does and does not cover, plainly:
   the repository, so the post-check addition rule below no longer sees them.
 - **Untracked paths that already exist stay writable**, exactly as the whole
   repo was before: gitignored build output, an installed `node_modules` from
-  an earlier run, inspector's own report directory. None of them is what the
-  commit under check is made of, and keeping them writable is what lets a
-  cached install go on being reused.
+  an earlier run, inspector's own report directory, and the same inside a
+  tracked directory git would ignore a new file in, where a cached `tmp/cache`
+  keeps being reused the same way. None of them is what the commit under check
+  is made of, and keeping them writable is what lets a cached install go on
+  being reused. Each is a mount, so its contents can be rewritten but the path
+  itself cannot be unlinked: `rm -rf node_modules` fails on the directory
+  itself while `rm -rf node_modules/*` works.
 - **A symbolic link at the repo root is the one tracked path a check can
   still replace**, and the only exception to the first bullet. A link cannot
   be mounted - Docker would resolve it - and resolving an in-repo one would
@@ -178,8 +206,16 @@ What that does and does not cover, plainly:
   nothing, is refused by name instead of being honored, since honoring it
   would mean mounting a host path the commit does not contain. So is anything
   at the repo root that is neither a directory nor a regular file. Links
-  anywhere below the top level are unaffected - they live inside a read-only
-  mount.
+  below the top level are unaffected unless they sit directly in a tracked
+  directory git would ignore a new file in, which is laid out the same way
+  the repo root is: a link there is carried as a link, and one leading out of
+  the repository refuses the run by name rather than being followed.
+- **One mount per entry, capped.** The ordinary count is the repo root's own
+  top-level entries; a tracked directory git would ignore a new file in adds
+  one for itself and one per entry directly inside it, recursively. A
+  repository needing more than 1024 in total is refused by name, with the path
+  that crossed the line - a fixed limit with no config key, since the
+  alternative is a `docker run` command line long enough to fail on its own.
 
 One other thing is reachable from inside that container, and only when the
 repo needs it: its own git directory. An ordinary clone keeps that inside the
@@ -1800,7 +1836,11 @@ carries the repository under check as a second build context named `repo`, so
 a `Dockerfile.inspector` can `COPY --from=repo` the lockfiles it has to bake
 in whether it lives in the repository or in a terms folder beside it - with no
 new flag, a rebuild whenever that context is read, and a refusal by name for a
-Dockerfile that declares a `repo` stage of its own.
+Dockerfile that declares a `repo` stage of its own. Issue #84 is built: a
+tracked directory git would ignore a new file in is writable, with every
+tracked file in it read-only on its own, so a Rails app that tracks
+`tmp/.keep` and `log/.keep` and writes into those directories at boot runs its
+suite unchanged.
 Still to come: the
 installer - see
 [SPEC.md](SPEC.md) and the repo's issues.

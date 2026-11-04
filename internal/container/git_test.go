@@ -104,7 +104,7 @@ func runGitCheck(t *testing.T, worktree, command string) (string, error) {
 	// this in step with RunCheck is the point: these three git tests are
 	// the ones that have to keep holding under the layout checks
 	// actually run in.
-	workspace, err := ResolveWorkspace(worktree, []string{"file.txt"})
+	workspace, err := ResolveWorkspace(worktree, trackedEntries("file.txt"))
 	if err != nil {
 		t.Fatalf("ResolveWorkspace(%q) = %v, want the workspace a check command runs in", worktree, err)
 	}

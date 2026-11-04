@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/inactdev/inspector/internal/container"
 )
 
 func TestResolveRepoRoot(t *testing.T) {
@@ -59,8 +61,11 @@ func TestTopLevelSourceEntries(t *testing.T) {
 	}
 
 	source := make(map[string]bool, len(got))
-	for _, name := range got {
-		source[name] = true
+	for _, entry := range got {
+		source[entry.Name] = true
+		if entry.IgnoresNewFiles {
+			t.Fatalf("TopLevelSourceEntries says git would ignore a new file in %q; none of this repository's ignore rules covers one", entry.Name)
+		}
 	}
 	// A directory counts as source when anything under it is tracked -
 	// the mount that protects it is read-only for its whole subtree.
@@ -72,6 +77,122 @@ func TestTopLevelSourceEntries(t *testing.T) {
 	for _, unwanted := range []string{"node_modules", "coverage.out", ".git", "internal/pkg", ""} {
 		if source[unwanted] {
 			t.Fatalf("TopLevelSourceEntries = %v, want it not to name %q", got, unwanted)
+		}
+	}
+}
+
+// newPlaceholderRepo builds issue #84's own case: a repository that
+// ignores everything in tmp/ and log/ and tracks one placeholder in
+// each anyway, which is what a Rails app does - and what makes those
+// directories unwritable in full under issue #27's layout alone.
+func newPlaceholderRepo(t *testing.T, gitignore string) string {
+	t.Helper()
+	dir := newTestRepo(t, map[string]string{
+		".gitignore":  gitignore,
+		"src/main.rb": "puts :hello\n",
+	})
+	writeFiles(t, dir, map[string]string{
+		"tmp/.keep":      "",
+		"tmp/pids/.keep": "",
+		"log/.keep":      "",
+	})
+	// -f because the project's own ignore rules cover them: a tracked
+	// placeholder in an ignored directory is exactly the shape here.
+	runGitT(t, dir, "add", "-f", "tmp/.keep", "tmp/pids/.keep", "log/.keep")
+	runGitT(t, dir, "commit", "-q", "-m", "placeholders")
+	return dir
+}
+
+// sourceEntryByName indexes one level of the tree TopLevelSourceEntries
+// returns.
+func sourceEntryByName(entries []container.SourceEntry) map[string]container.SourceEntry {
+	byName := make(map[string]container.SourceEntry, len(entries))
+	for _, entry := range entries {
+		byName[entry.Name] = entry
+	}
+	return byName
+}
+
+func TestTopLevelSourceEntries_NamesTheDirectoriesGitWouldIgnoreANewFileIn(t *testing.T) {
+	dir := newPlaceholderRepo(t, "/tmp/*\n/log/*\n")
+
+	got, err := TopLevelSourceEntries(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	top := sourceEntryByName(got)
+	for _, name := range []string{"tmp", "log"} {
+		if !top[name].IgnoresNewFiles {
+			t.Fatalf("%s = %+v, want git's own answer that it would ignore a new file placed in it", name, top[name])
+		}
+	}
+	// Tracked source is unchanged: one read-only mount for the whole
+	// subtree, and nothing below it to decide.
+	if src := top["src"]; src.IgnoresNewFiles || len(src.Entries) != 0 {
+		t.Fatalf("src = %+v, want a directory mounted read-only as a whole with no nested detail", src)
+	}
+	// What is tracked inside a writable directory has to be named, one
+	// entry at a time, since each needs a read-only mount of its own -
+	// and the same question is asked again of a tracked subdirectory.
+	tmp := sourceEntryByName(top["tmp"].Entries)
+	if _, ok := tmp[".keep"]; !ok {
+		t.Fatalf("tmp = %+v, want the tracked placeholder in it named", top["tmp"])
+	}
+	if !tmp["pids"].IgnoresNewFiles {
+		t.Fatalf("tmp/pids = %+v, want git asked about it too - /tmp/* covers its new files through its parent", tmp["pids"])
+	}
+	if _, ok := sourceEntryByName(tmp["pids"].Entries)[".keep"]; !ok {
+		t.Fatalf("tmp/pids = %+v, want its own tracked placeholder named", tmp["pids"])
+	}
+}
+
+func TestTopLevelSourceEntries_ADirectoryIgnoringOnlySomeNamesStaysReadOnly(t *testing.T) {
+	// The question is asked once per directory, about one probe path,
+	// so a rule covering only some new names answers no and the whole
+	// directory stays read-only - the residual stated in
+	// notes/20261104-a-writable-directory-git-would-ignore.md. A rule
+	// for every dotfile must not make a source directory writable
+	// either, which is why the probe's own name carries no leading dot.
+	dir := newPlaceholderRepo(t, "*.log\n.*\n")
+
+	got, err := TopLevelSourceEntries(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, entry := range got {
+		if entry.IgnoresNewFiles {
+			t.Fatalf("%s = %+v, want it read-only: this project ignores *.log and dotfiles, not a new file by any name", entry.Name, entry)
+		}
+	}
+}
+
+func TestTopLevelSourceEntries_AnIgnoreFileOutsideTheRepositoryDoesNotDecide(t *testing.T) {
+	// The layout a run gets is the repository's own answer. A
+	// core.excludesFile in the home directory of whoever happens to run
+	// inspector would otherwise make the same commit read-only on one
+	// machine and writable on another, which is not a property a
+	// judgment may depend on.
+	dir := newPlaceholderRepo(t, "# nothing of the project's own\n")
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "ignore"), []byte("/tmp/*\n"), 0o644); err != nil {
+		t.Fatalf("writing the global ignore file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[core]\n\texcludesFile = "+filepath.Join(home, "ignore")+"\n"), 0o644); err != nil {
+		t.Fatalf("writing the global git config: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+
+	got, err := TopLevelSourceEntries(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, entry := range got {
+		if entry.IgnoresNewFiles {
+			t.Fatalf("%s = %+v, want the repository's own rules to decide, not a home directory's", entry.Name, entry)
 		}
 	}
 }
