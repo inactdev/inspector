@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +80,10 @@ func TestParseDockerfile_BuildContextDetection(t *testing.T) {
 		"copy from image":     {"FROM alpine\nCOPY --from=busybox:latest /bin/busybox /bin/\n", false},
 		"run with mount":      {"FROM alpine\nRUN --mount=type=bind,target=/src true\n", true},
 		"run mentioning from": {"FROM alpine\nRUN echo --from=nowhere > /dev/null\n", false},
+		// A secret mount is a RUN --mount like any other, which is why
+		// issue #86 needed no new rebuild rule: a Dockerfile installing
+		// private dependencies is rebuilt every run already.
+		"run mounting a secret": {"FROM alpine\nRUN --mount=type=secret,id=BUNDLE_TOKEN cat /run/secrets/BUNDLE_TOKEN\n", true},
 		"continued copy": {"FROM alpine\nCOPY \\\n" +
 			"# a comment inside the continuation\n" +
 			"  go.mod go.sum ./\n", true},
@@ -187,7 +193,7 @@ func TestBuildProjectImage_BuildsThenReusesTheTag(t *testing.T) {
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -206,7 +212,7 @@ func TestBuildProjectImage_BuildsThenReusesTheTag(t *testing.T) {
 
 	// Nothing here reads the build context, so the second call must
 	// reuse the tag rather than build again.
-	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
 	if err != nil {
 		t.Fatalf("resolving the project image a second time: %v", err)
 	}
@@ -232,7 +238,7 @@ func TestBuildProjectImage_RebuildsWhenTheDockerfileReadsTheContext(t *testing.T
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -243,7 +249,7 @@ func TestBuildProjectImage_RebuildsWhenTheDockerfileReadsTheContext(t *testing.T
 	if err := os.WriteFile(filepath.Join(contextDir, "dependency.txt"), []byte("second\n"), 0o644); err != nil {
 		t.Fatalf("rewriting the context file: %v", err)
 	}
-	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
 	if err != nil {
 		t.Fatalf("rebuilding the project image: %v", err)
 	}
@@ -281,7 +287,7 @@ func TestBuildProjectImage_CopiesFromTheRepoContext(t *testing.T) {
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -302,7 +308,7 @@ func TestBuildProjectImage_CopiesFromTheRepoContext(t *testing.T) {
 	if err := os.WriteFile(lockfile, []byte("second\n"), 0o644); err != nil {
 		t.Fatalf("rewriting the repository's lockfile: %v", err)
 	}
-	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
 	if err != nil {
 		t.Fatalf("rebuilding the project image: %v", err)
 	}
@@ -325,7 +331,7 @@ func TestBuildProjectImage_CopiesFromTheRepoContext(t *testing.T) {
 func TestBuildProjectImage_MissingRepoContextIsRefused(t *testing.T) {
 	// No docker needed: nothing is run without a repository to name.
 	dockerfile, contextDir, _ := writeDockerfile(t, "FROM "+buildTestBase+"\n")
-	_, err := BuildProjectImage(context.Background(), dockerfile, contextDir, "", &bytes.Buffer{})
+	_, err := BuildProjectImage(context.Background(), dockerfile, contextDir, "", nil, &bytes.Buffer{})
 	if !errors.Is(err, ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageUnavailable", err)
 	}
@@ -342,7 +348,7 @@ func TestBuildProjectImage_FailedBuildIsRefusedWithItsLog(t *testing.T) {
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
 	if !errors.Is(err, ErrProjectImageBuildFailed) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageBuildFailed", err)
 	}
@@ -363,7 +369,7 @@ func TestBuildProjectImage_UnresolvableBaseIsRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	_, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, &bytes.Buffer{})
+	_, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &bytes.Buffer{})
 	if !errors.Is(err, ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageUnavailable", err)
 	}
@@ -371,9 +377,142 @@ func TestBuildProjectImage_UnresolvableBaseIsRefused(t *testing.T) {
 
 func TestBuildProjectImage_MissingDockerfileIsRefused(t *testing.T) {
 	// No docker needed: the file is read before anything is run.
-	_, err := BuildProjectImage(context.Background(), filepath.Join(t.TempDir(), "Dockerfile.inspector"), t.TempDir(), t.TempDir(), &bytes.Buffer{})
+	_, err := BuildProjectImage(context.Background(), filepath.Join(t.TempDir(), "Dockerfile.inspector"), t.TempDir(), t.TempDir(), nil, &bytes.Buffer{})
 	if !errors.Is(err, ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageUnavailable", err)
+	}
+}
+
+// Issue #86's requirement, both halves at once: the RUN step that mounts
+// a declared build secret sees the real value, and that value survives
+// nowhere - not in the image's history, not in any layer, not in the log
+// inspector keeps.
+//
+// The step writes the value's *length* into the image, which proves it
+// read the whole thing without the proof itself being a copy of the
+// secret. Nothing in the Dockerfile may name the value either, since a
+// RUN command line is recorded in the image's own history.
+func TestBuildProjectImage_SecretReachesTheBuildAndSurvivesNowhere(t *testing.T) {
+	requireDockerForBuild(t)
+	const name = "INSPECTOR_TEST_BUILD_SECRET"
+	t.Setenv(name, fakeSecretValue)
+	// Mounted as a file at the default /run/secrets/<id>, which is the
+	// form that needs no particular Dockerfile frontend version. The tr
+	// drops a trailing newline if the builder ever adds one, so this
+	// measures the value rather than its framing.
+	dockerfile, contextDir, repoDir := writeDockerfile(t, "FROM "+buildTestBase+"\n"+
+		"RUN --mount=type=secret,id="+name+" tr -d '\\n' < /run/secrets/"+name+
+		" | wc -c | tr -d ' \\n' > /secret-length\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	var log bytes.Buffer
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, []string{name}, &log)
+	if err != nil {
+		t.Fatalf("building with a declared build secret: %v\n%s", err, log.String())
+	}
+	t.Cleanup(func() {
+		_ = removeImage(image.Tag)
+	})
+	if strings.Join(image.SecretNames, ",") != name {
+		t.Fatalf("SecretNames = %v, want the one declared name - a run has to be able to say which secrets it handed the build", image.SecretNames)
+	}
+
+	out, err := runImage(ctx, image.Tag, "cat /secret-length")
+	if err != nil {
+		t.Fatalf("reading what the build measured: %v\n%s", err, out)
+	}
+	want := strconv.Itoa(len(fakeSecretValue))
+	if strings.TrimSpace(out) != want {
+		t.Fatalf("the mounting RUN step measured %q, want %q - it did not see the secret's value", strings.TrimSpace(out), want)
+	}
+
+	// Now the leak hunt, over every place the value could have been
+	// recorded. docker history carries every instruction and every
+	// build argument an image was made with - which is exactly why a
+	// secret is not passed as a --build-arg.
+	history, err := exec.CommandContext(ctx, "docker", "history", "--no-trunc", image.Tag).CombinedOutput()
+	if err != nil {
+		t.Fatalf("reading the image's history: %v\n%s", err, history)
+	}
+	if bytes.Contains(history, []byte(fakeSecretValue)) {
+		t.Fatal("the secret's value is in docker history for the check image")
+	}
+	if strings.Contains(image.Log, fakeSecretValue) {
+		t.Fatal("the secret's value is in the build log inspector keeps and can write under .inspector/")
+	}
+	if strings.Contains(log.String(), fakeSecretValue) {
+		t.Fatal("the secret's value is in the build output inspector streams to its caller")
+	}
+
+	// And every layer's files, config and manifest: docker save writes
+	// all of them into one archive, so one scan covers the lot.
+	archive := filepath.Join(t.TempDir(), "image.tar")
+	if out, err := exec.CommandContext(ctx, "docker", "save", "--output", archive, image.Tag).CombinedOutput(); err != nil {
+		t.Fatalf("saving the image to search its layers: %v\n%s", err, out)
+	}
+	if fileHoldsBytes(t, archive, fakeSecretValue) {
+		t.Fatal("the secret's value is in one of the check image's own layers")
+	}
+}
+
+// A secret inspector's environment does not carry refuses the run by that
+// variable's name, with nothing built - not even a docker command run, so
+// this needs no daemon.
+func TestBuildProjectImage_UnsetSecretIsRefusedWithoutBuilding(t *testing.T) {
+	const name = "INSPECTOR_TEST_BUILD_SECRET_ABSENT"
+	t.Setenv(name, "")
+	os.Unsetenv(name)
+	// A Dockerfile that would fail loudly if it were ever built, so a
+	// build that started anyway cannot pass this test quietly.
+	dockerfile, contextDir, repoDir := writeDockerfile(t, "FROM "+buildTestBase+"\nRUN exit 9\n")
+
+	var log bytes.Buffer
+	image, err := BuildProjectImage(context.Background(), dockerfile, contextDir, repoDir, []string{name}, &log)
+	if !errors.Is(err, ErrBuildSecretUnavailable) {
+		t.Fatalf("err = %v, want it to wrap ErrBuildSecretUnavailable", err)
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Fatalf("err = %q, want it to name the variable to set", err)
+	}
+	if image.Built || image.Tag != "" || log.Len() != 0 {
+		t.Fatalf("image = %+v, log = %q: nothing may be built, tagged or logged for a build that was refused", image, log.String())
+	}
+}
+
+// fileHoldsBytes reports whether path contains needle anywhere, reading in
+// chunks with an overlap so a match split across two reads is still found.
+// Chunked rather than read whole, because an image archive is as large as
+// the project's own base image.
+func fileHoldsBytes(t *testing.T, path, needle string) bool {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening %s: %v", path, err)
+	}
+	defer file.Close()
+
+	target := []byte(needle)
+	overlap := len(target) - 1
+	buf := make([]byte, 1<<20+overlap)
+	kept := 0
+	for {
+		n, err := file.Read(buf[kept:])
+		if n > 0 {
+			window := buf[:kept+n]
+			if bytes.Contains(window, target) {
+				return true
+			}
+			kept = min(len(window), overlap)
+			copy(buf, window[len(window)-kept:])
+		}
+		if errors.Is(err, io.EOF) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
 	}
 }
 

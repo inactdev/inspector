@@ -71,6 +71,11 @@ type ProjectImage struct {
 	// itself, with the image ID docker resolved it to - the second half
 	// of what Tag hashes.
 	Bases []BaseImage
+	// SecretNames are the build secrets this build was handed, by name
+	// (see resolveBuildSecrets). Names only, ever: the values live in
+	// inspector's environment, docker reads them from there itself, and
+	// nothing here holds one.
+	SecretNames []string
 	// Built reports whether docker build actually ran, as opposed to an
 	// already-present tag being reused.
 	Built bool
@@ -90,7 +95,9 @@ type BaseImage struct {
 // BuildProjectImage resolves the image a check command runs in from
 // dockerfilePath - the project's own committed Dockerfile - building it
 // with contextDir as the build context, repoDir as a second context named
-// RepoBuildContext, and streaming docker's output to log as it happens.
+// RepoBuildContext, secretNames as named build secrets read from
+// inspector's own environment, and streaming docker's output to log as it
+// happens.
 //
 // contextDir is the directory the Dockerfile lives in, which is not always
 // the repository: with terms from a folder outside it, the Dockerfile and
@@ -118,9 +125,19 @@ type BaseImage struct {
 // notes/20261025-project-image-from-committed-dockerfile.md and
 // notes/20261103-the-repo-named-build-context.md.
 //
-// Errors wrap ErrProjectImageUnavailable or, for a build that ran and
-// failed, ErrProjectImageBuildFailed; callers turn either into a refusal.
-func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir string, log io.Writer) (ProjectImage, error) {
+// secretNames are the project's declared buildSecrets: environment
+// variable names, never values. Each becomes `--secret id=NAME,env=NAME`,
+// so docker reads the value from inspector's own environment and exposes
+// it only to a RUN step that mounts it - never to an image layer, its
+// history, or this build's log. Every one of them is resolved before
+// anything else here runs, so a name inspector's environment does not
+// carry refuses the run with no docker command run at all, rather than
+// starting a build that was always going to fail without it.
+//
+// Errors wrap ErrProjectImageUnavailable - ErrBuildSecretUnavailable for a
+// declared secret that is not there - or, for a build that ran and failed,
+// ErrProjectImageBuildFailed; callers turn any of them into a refusal.
+func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir string, secretNames []string, log io.Writer) (ProjectImage, error) {
 	if log == nil {
 		// Unlike os/exec, which reads a nil writer as /dev/null, this
 		// function writes to log itself.
@@ -128,6 +145,10 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir 
 	}
 	if strings.TrimSpace(repoDir) == "" {
 		return ProjectImage{}, fmt.Errorf("%w: no repository was named for the %q build context, which every check image build carries", ErrProjectImageUnavailable, RepoBuildContext)
+	}
+	secrets, err := resolveBuildSecrets(secretNames)
+	if err != nil {
+		return ProjectImage{}, err
 	}
 	content, err := os.ReadFile(dockerfilePath)
 	if err != nil {
@@ -148,9 +169,10 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir 
 	}
 
 	image := ProjectImage{
-		Tag:        ProjectImageTag(content, bases),
-		Dockerfile: dockerfilePath,
-		Bases:      bases,
+		Tag:         ProjectImageTag(content, bases),
+		Dockerfile:  dockerfilePath,
+		Bases:       bases,
+		SecretNames: secrets,
 	}
 	if !parsed.readsBuildContext {
 		if _, err := imageID(ctx, image.Tag); err == nil {
@@ -160,22 +182,8 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir 
 
 	captured := &strings.Builder{}
 	out := io.MultiWriter(log, captured)
-	// -f names the Dockerfile; the final argument is the main build
-	// context, which is wherever the Dockerfile lives. --build-context
-	// adds the repository under check beside it under its fixed name,
-	// for the Dockerfile that bakes the project's dependencies in; it
-	// needs BuildKit, which is what `docker build` has used by default
-	// since Docker 23, and a builder without it fails this build loudly
-	// in docker's own words rather than producing an image missing those
-	// files. No --pull: the bases were already resolved above, and
-	// re-resolving them here would let a floating tag move between that
-	// resolution and this build, which is the one thing the
-	// content-derived tag exists to rule out. No --network either: the
-	// build may reach the network to install the project's dependencies,
-	// which is what makes the check container's own --network none
-	// possible at all.
 	repoContext := RepoBuildContext + "=" + repoDir
-	cmd := exec.CommandContext(ctx, "docker", "build", "-f", dockerfilePath, "-t", image.Tag, "--build-context", repoContext, contextDir)
+	cmd := exec.CommandContext(ctx, "docker", buildArgs(dockerfilePath, image.Tag, repoContext, contextDir, secrets)...)
 	// The identical writer for both, so os/exec reuses one pipe and one
 	// copying goroutine rather than racing two onto the same writer.
 	cmd.Stdout = out
@@ -190,6 +198,33 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir 
 		return image, fmt.Errorf("%w: docker build -f %s --build-context %s %s: %v", ErrProjectImageBuildFailed, dockerfilePath, repoContext, contextDir, runErr)
 	}
 	return image, nil
+}
+
+// buildArgs is the whole `docker` command line one check image build runs,
+// assembled in one place so what inspector hands the builder is readable
+// and testable without a daemon.
+//
+// -f names the Dockerfile; the final argument is the main build context,
+// which is wherever the Dockerfile lives. --build-context adds the
+// repository under check beside it under its fixed name, for the
+// Dockerfile that bakes the project's dependencies in, and one --secret
+// per declared build secret names an environment variable docker reads
+// itself. Both need BuildKit, which is what `docker build` has used by
+// default since Docker 23, and a builder without it fails this build
+// loudly in docker's own words rather than producing an image missing
+// those files. No --pull: the bases were already resolved by the caller,
+// and re-resolving them here would let a floating tag move between that
+// resolution and this build, which is the one thing the content-derived
+// tag exists to rule out. No --network either: the build may reach the
+// network to install the project's dependencies, which is what makes the
+// check container's own --network none possible at all.
+//
+// No secret value appears here, or anywhere else inspector writes: a
+// secret is passed as the name of a variable, never as a value.
+func buildArgs(dockerfilePath, tag, repoContext, contextDir string, secrets []string) []string {
+	args := []string{"build", "-f", dockerfilePath, "-t", tag, "--build-context", repoContext}
+	args = append(args, buildSecretFlags(secrets)...)
+	return append(args, contextDir)
 }
 
 // ProjectImageTag is the local tag a Dockerfile and its resolved bases

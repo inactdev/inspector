@@ -197,6 +197,16 @@ func Run(opts Options) (Result, error) {
 		return refusal, nil
 	}
 
+	// For the same reason, and before the same runtime check: a build
+	// secret this project declares and this environment does not carry is
+	// a gap in what the run was given, and nothing about saying so needs
+	// Docker. The build resolves them again itself - that is what makes
+	// "never a build without them" the builder's own property rather than
+	// this caller's.
+	if refusal, refused := refuseProjectImage(repoRoot, commit, terms, container.ProjectImage{}, container.ValidateBuildSecrets(cfg.BuildSecrets)); refused {
+		return refusal, nil
+	}
+
 	if err := container.EnsureAvailable(); err != nil {
 		return Result{
 			Outcome: Refused,
@@ -226,7 +236,7 @@ func Run(opts Options) (Result, error) {
 	// it; the repository is a second, named context either way, so a
 	// Dockerfile that bakes this project's dependencies in reads its
 	// lockfiles from the same place in both modes.
-	image, err := BuildProjectImage(terms.Dir, repoRoot, dockerfile, buildLog)
+	image, err := BuildProjectImage(terms.Dir, repoRoot, dockerfile, cfg.BuildSecrets, buildLog)
 	if refusal, refused := refuseProjectImage(repoRoot, commit, terms, image, err); refused {
 		return refusal, nil
 	}
@@ -425,6 +435,24 @@ func refuseProjectImage(repoRoot, commit string, terms Terms, image container.Pr
 					"never added), so the image the check would run in is not part of this commit\n"+
 					"and nobody reviewing this work would ever see it. Commit it.\n",
 				ProjectDockerfileName,
+			),
+		}, true
+	case errors.Is(err, container.ErrBuildSecretUnavailable):
+		// Checked before the general ErrProjectImageUnavailable case it
+		// wraps: nothing was built, and what the person reading this has
+		// to do is set a variable, not fix a Dockerfile.
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%v\n\n"+
+					"%s lists it under \"buildSecrets\", which is how a project says its check\n"+
+					"image build needs a credential its repository must not carry: the value is\n"+
+					"read from inspector's own environment by docker itself and reaches only a RUN\n"+
+					"step that mounts it. Nothing was built and nothing was judged - a build\n"+
+					"started without a secret the project declared fails somewhere deep inside its\n"+
+					"own log, for a reason that reads as this project's.\n",
+				err, ConfigFileName,
 			),
 		}, true
 	case errors.Is(err, container.ErrProjectImageBuildFailed):

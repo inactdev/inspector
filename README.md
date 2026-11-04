@@ -288,6 +288,71 @@ line - docker resolves the context ahead of a same-named stage, so that stage
 would be silently replaced by the repository. Reading a second context needs
 BuildKit, which is what `docker build` has used by default since Docker 23.
 
+**A build that needs a credential names the variable holding it, under
+`buildSecrets`.** Some dependencies are not public - a paid gem source, a
+private package registry - and their credential belongs in neither the
+repository nor the Dockerfile. So `.inspector.json` names the environment
+variables the build needs, and inspector passes each one to
+`docker build --secret id=NAME,env=NAME`:
+
+```json
+{
+  "check": "bundle exec rspec",
+  "buildSecrets": ["BUNDLE_ENTERPRISE__CONTRIBSYS__COM"]
+}
+```
+
+```dockerfile
+FROM ruby:3.3
+COPY --from=repo Gemfile Gemfile.lock /deps/
+RUN --mount=type=secret,id=BUNDLE_ENTERPRISE__CONTRIBSYS__COM \
+    cd /deps && \
+    BUNDLE_ENTERPRISE__CONTRIBSYS__COM="$(cat /run/secrets/BUNDLE_ENTERPRISE__CONTRIBSYS__COM)" \
+    bundle install
+```
+
+Docker reads the value out of inspector's own environment itself and mounts it
+at `/run/secrets/<name>` for the one `RUN` step that asks for it. (A project
+that pins a recent Dockerfile frontend with `# syntax=docker/dockerfile:1` can
+write `--mount=type=secret,id=NAME,env=NAME` instead and have the value placed
+in that step's environment directly, rather than reading the file itself.)
+Unlike a
+`--build-arg`, nothing about it is recorded in the built image, its layers or
+its `docker history` - which is the whole reason it is not a build argument.
+Export the variable where inspector runs; nothing about it is ever written to
+a file.
+
+Three things this does and does not promise:
+
+- **Names only, everywhere.** Inspector never holds a secret's value - it
+  asks the environment whether the variable is there, and passes docker the
+  *name*. So no value can reach a command line, a build log, the log kept
+  under `.inspector/`, a report, a commit status, or any message. The names
+  do appear, in the line a run prints about the image it built, because a
+  build handed a credential has to say so to be reviewable.
+- **A declared secret that is not there refuses the run**, by that variable's
+  name, before anything is built. Empty counts as missing, since that is how
+  an absent CI secret arrives. Docker would not fail on its own here - the
+  mounted file would simply be empty and `bundle install` would report a 401
+  from somewhere inside the build log - so this is refused up front instead.
+  A name may hold only letters, digits and underscores; anything else is
+  refused by name, since the name goes into a comma-separated docker flag.
+- **What the `RUN` step does with the value is the project's own business.**
+  A step that prints the secret puts it in that build's log, and a step that
+  writes it into the image puts it in a layer. Inspector cannot prevent
+  either; mount the secret in the one step that needs it and do not echo it.
+
+The check container itself never sees the variable either way. It is handed to
+the *build*, and the container the check command runs in gets only the handful
+of variables inspector sets for git - so a credential that was needed to
+install dependencies is not sitting in the environment of the project's own
+test suite.
+
+Build secrets need BuildKit, like the `repo` context above, and change nothing
+about when an image is rebuilt: a Dockerfile with `RUN --mount` already counts
+as reading the build context, so it is rebuilt every run with docker's layer
+cache making that cheap.
+
 A `.inspector.json` that still carries the old `"network"` opt-in is refused
 by name, with any value, rather than quietly ignored - as every run that used
 it said would happen. So is one that still names an `"image"`: the check runs
@@ -920,6 +985,14 @@ no repository outside for it to be committed to, so the committed-image
 requirement that applies to in-repo terms has no question to answer here.
 [Terms from outside the repository](#terms-from-outside-the-repository---terms)
 has the rest, including the two folders that are refused by name.
+
+It may also carry `buildSecrets`, and this is the mode that usually needs it:
+a work project whose dependencies come from a paid source keeps that
+credential in an environment variable, and the terms folder names the variable
+so the build can install them. The variable has to be exported where inspector
+runs, and a declared one that is not there refuses the run rather than
+building without it - see
+[`buildSecrets`](#use) above for what is and is not promised about the value.
 
 A terms `.inspector.json` may carry `testPaths` and `protectedPaths` like any
 other, but only the local run reads them in this mode. `inspector-gate` reads
@@ -1840,7 +1913,12 @@ Dockerfile that declares a `repo` stage of its own. Issue #84 is built: a
 tracked directory git would ignore a new file in is writable, with every
 tracked file in it read-only on its own, so a Rails app that tracks
 `tmp/.keep` and `log/.keep` and writes into those directories at boot runs its
-suite unchanged.
+suite unchanged. Issue #86 is built: `buildSecrets` names the environment
+variables a check image build needs and its repository must not carry - a paid
+dependency source's credential - passed to the build as BuildKit secrets, so
+the value reaches only the `RUN` step that mounts it and never an image layer,
+a log or a report, and a declared variable that is not set refuses the run by
+name before anything is built.
 Still to come: the
 installer - see
 [SPEC.md](SPEC.md) and the repo's issues.

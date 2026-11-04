@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -375,6 +376,105 @@ func TestRun_ReportNamesTheCheckImage(t *testing.T) {
 	}
 	if !strings.Contains(data, testImage) {
 		t.Fatalf("report should name the base image the check image was built from, got: %s", data)
+	}
+}
+
+// testBuildSecretValue stands in for the credential issue #86 exists for
+// - a paid gem source's password, which lives in the environment and must
+// never be written anywhere.
+const testBuildSecretValue = "inspector-fake-secret-value-do-not-leak-6b1f"
+
+// A project whose check image build needs a credential its repository
+// must not carry gets it, and the run records the secret by name and the
+// value nowhere (issue #86).
+func TestRun_GreenWithADeclaredBuildSecret(t *testing.T) {
+	requireDocker(t)
+	const name = "INSPECTOR_TEST_RUN_BUILD_SECRET"
+	t.Setenv(name, testBuildSecretValue)
+	length := strconv.Itoa(len(testBuildSecretValue))
+	dir := newTestRepo(t, map[string]string{
+		// Green only if the mounting build step read the whole value, so
+		// this run proves the credential arrived rather than only that
+		// the build did not fail.
+		ConfigFileName: `{"check": "test \"$(cat /secret-length)\" = \"` + length + `\"", "buildSecrets": ["` + name + `"]}`,
+		// The build records the value's length, never the value: a RUN
+		// command line is kept in the image's own history.
+		ProjectDockerfileName: "FROM " + testImage + "\n" +
+			"RUN --mount=type=secret,id=" + name + " tr -d '\\n' < /run/secrets/" + name +
+			" | wc -c | tr -d ' \\n' > /secret-length\n",
+	})
+	opts, _, stderr := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\n%s", err, stderr.String())
+	}
+	if result.Outcome != Green {
+		t.Fatalf("Outcome = %v, want Green (message: %s)\n%s", result.Outcome, result.Message, stderr.String())
+	}
+	// The run says which secrets it handed the build, because a build
+	// whose inputs are invisible is not reviewable - and the name is not
+	// the secret.
+	if !strings.Contains(stderr.String(), name) {
+		t.Fatalf("the run should name the build secret it passed, got: %s", stderr.String())
+	}
+	if strings.Contains(stderr.String(), testBuildSecretValue) {
+		t.Fatal("the secret's value reached inspector's own output")
+	}
+	if strings.Contains(readFile(t, result.ReportPath), testBuildSecretValue) {
+		t.Fatalf("the secret's value reached the report at %s", result.ReportPath)
+	}
+}
+
+// And a declared secret this environment does not carry refuses the run
+// by that variable's name, with nothing built and nothing judged. No
+// docker needed: like a missing Dockerfile, this is a gap in what the run
+// was given, and it is refused before a container runtime is looked for.
+func TestRun_RefusesADeclaredBuildSecretThatIsNotSet(t *testing.T) {
+	const name = "INSPECTOR_TEST_RUN_BUILD_SECRET_ABSENT"
+	t.Setenv(name, "")
+	os.Unsetenv(name)
+	dir := newTestRepo(t, map[string]string{
+		ConfigFileName: `{"check": "true", "buildSecrets": ["` + name + `"]}`,
+	})
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused (message: %s)", result.Outcome, result.Message)
+	}
+	if !strings.Contains(result.Message, name) {
+		t.Fatalf("refusal should name the variable to set, got: %s", result.Message)
+	}
+	if !strings.Contains(result.Message, "buildSecrets") {
+		t.Fatalf("refusal should name the config key the variable was declared under, got: %s", result.Message)
+	}
+	if result.ReportPath != "" {
+		t.Fatal("a refusal that never ran a check should not write a report")
+	}
+}
+
+// A name inspector will not pass to docker is refused by the same route,
+// so a config entry carrying a comma or an equals sign cannot change
+// which flag the build is handed.
+func TestRun_RefusesABuildSecretNameItWillNotPass(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{
+		ConfigFileName: `{"check": "true", "buildSecrets": ["BUNDLE_TOKEN,OTHER=x"]}`,
+	})
+	opts, _, _ := runOpts(dir)
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Outcome != Refused {
+		t.Fatalf("Outcome = %v, want Refused (message: %s)", result.Outcome, result.Message)
+	}
+	if !strings.Contains(result.Message, "BUNDLE_TOKEN,OTHER=x") {
+		t.Fatalf("refusal should name the entry it refused, got: %s", result.Message)
 	}
 }
 

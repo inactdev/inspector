@@ -74,6 +74,16 @@ type Config struct {
 	Memory    string `json:"memory,omitempty"`
 	CPUs      string `json:"cpus,omitempty"`
 	PIDsLimit int    `json:"pidsLimit,omitempty"`
+	// BuildSecrets names the environment variables the check image build
+	// needs and the repository does not carry - a paid gem source's
+	// credential, a private registry token (issue #86). Names only: each
+	// becomes `docker build --secret id=NAME,env=NAME`, so the value is
+	// read from inspector's own environment by docker itself and reaches
+	// only a `RUN --mount=type=secret,id=NAME` step, never an image
+	// layer, a report, or a log. A name listed here that inspector's
+	// environment does not carry refuses the run rather than building
+	// without it; see container.ErrBuildSecretUnavailable.
+	BuildSecrets []string `json:"buildSecrets,omitempty"`
 	// TimeoutSeconds bounds how long Check may run before inspector
 	// kills it and refuses rather than hanging forever. Zero (unset)
 	// uses DefaultTimeout.
