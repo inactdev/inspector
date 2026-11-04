@@ -118,6 +118,41 @@ func TestLoadConfig_PathListsDefaultToNone(t *testing.T) {
 	}
 }
 
+// buildSecrets carries environment variable names, which is all a config
+// may ever hold about a secret - the value stays in the environment the
+// run was given (issue #86).
+func TestLoadConfig_ReadsBuildSecrets(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check", "buildSecrets": ["BUNDLE_ENTERPRISE__CONTRIBSYS__COM", "PRIVATE_REGISTRY_TOKEN"]}`})
+
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"BUNDLE_ENTERPRISE__CONTRIBSYS__COM", "PRIVATE_REGISTRY_TOKEN"}
+	if !equalStrings(cfg.BuildSecrets, want) {
+		t.Fatalf("BuildSecrets = %v, want %v", cfg.BuildSecrets, want)
+	}
+}
+
+// And a config that names none declares none: the build it produces is
+// the one it produced before this key existed, with no --secret at all.
+func TestLoadConfig_BuildSecretsDefaultToNone(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check"}`})
+
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.BuildSecrets) != 0 {
+		t.Fatalf("BuildSecrets = %v, want none", cfg.BuildSecrets)
+	}
+	if err := container.ValidateBuildSecrets(cfg.BuildSecrets); err != nil {
+		t.Fatalf("validating an empty list: %v, want nothing to validate", err)
+	}
+}
+
 func equalStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false

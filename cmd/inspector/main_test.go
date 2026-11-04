@@ -499,6 +499,38 @@ func TestCLI_RefusesWithoutConfig(t *testing.T) {
 	}
 }
 
+// A declared build secret that is not in inspector's environment is a
+// refusal, so it exits with the refusal code and publishes nothing - the
+// same code a missing Dockerfile.inspector or a retired config key gets.
+// Issue #86 asked for 64; 64 is reserved for what is not a verdict attempt
+// at all (--help, an unrecognized flag, bad usage), and the deviation is
+// recorded in that work's pull request. No docker needed: this refusal
+// lands before any container work.
+func TestCLI_RefusesAMissingBuildSecretWithTheRefusalCode(t *testing.T) {
+	const name = "INSPECTOR_TEST_CLI_BUILD_SECRET_ABSENT"
+	t.Setenv(name, "")
+	os.Unsetenv(name)
+	dir := newTestRepo(t, map[string]string{
+		inspector.ConfigFileName: `{"check": "true", "buildSecrets": ["` + name + `"]}`,
+	})
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+
+	code, _, stderr := runCLI(t, dir, "--branch", "feature")
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d - a project whose declared secret is absent was not judged, but it was a verdict attempt", code, exitRefused)
+	}
+	if !strings.Contains(stderr, name) {
+		t.Fatalf("stderr = %q, want it to name the variable to set", stderr)
+	}
+	if stub.Request.State != "" {
+		t.Fatalf("refusal posted status state %q", stub.Request.State)
+	}
+	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatalf("refusal published staging ref %s", got)
+	}
+}
+
 func TestCLI_RequiresExplicitPublicationBranch(t *testing.T) {
 	dir := newTestRepo(t, nil)
 

@@ -114,15 +114,22 @@ func projectDockerfilePath(dir string) (string, error) {
 // commit's, and a Dockerfile that reads it is rebuilt every run rather
 // than reusing a tag that cannot see it.
 //
+// secretNames is the project's own buildSecrets list: the environment
+// variables its build needs and its repository cannot carry, named rather
+// than valued (issue #86). A build whose declared secret is missing from
+// inspector's environment is refused before it starts, because it would
+// otherwise fail deep inside its own log for a reason that reads as the
+// project's.
+//
 // Errors wrap container.ErrProjectImageUnavailable or
 // container.ErrProjectImageBuildFailed. Either is a refusal for the
 // caller: a project whose declared environment inspector could not
 // produce has not been judged, and running the check in anything else
 // would judge a different project.
-func BuildProjectImage(contextDir, repoRoot, dockerfile string, log io.Writer) (container.ProjectImage, error) {
+func BuildProjectImage(contextDir, repoRoot, dockerfile string, secretNames []string, log io.Writer) (container.ProjectImage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ImageBuildTimeout)
 	defer cancel()
-	return container.BuildProjectImage(ctx, dockerfile, contextDir, repoRoot, log)
+	return container.BuildProjectImage(ctx, dockerfile, contextDir, repoRoot, secretNames, log)
 }
 
 // DescribeProjectImage is the one line a run prints about the image it is
@@ -142,5 +149,12 @@ func DescribeProjectImage(image container.ProjectImage) string {
 	if len(bases) > 0 {
 		from = strings.Join(bases, ", ")
 	}
-	return fmt.Sprintf("inspector: %s check image %s from %s (base: %s)", action, image.Tag, ProjectDockerfileName, from)
+	// The declared build secrets are named, never valued: a build handed
+	// a credential has to say so to be reviewable, and the name is not
+	// the secret. There is no value anywhere here to print.
+	secrets := ""
+	if len(image.SecretNames) > 0 {
+		secrets = fmt.Sprintf(" (build secrets, by name: %s)", strings.Join(image.SecretNames, ", "))
+	}
+	return fmt.Sprintf("inspector: %s check image %s from %s (base: %s)%s", action, image.Tag, ProjectDockerfileName, from, secrets)
 }

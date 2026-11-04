@@ -43,7 +43,7 @@ func TestBuildProjectImage_TermsDockerfileReadsTheRepository(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(terms.Dir, repo, dockerfile, &log)
+	image, err := BuildProjectImage(terms.Dir, repo, dockerfile, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -58,7 +58,7 @@ func TestBuildProjectImage_TermsDockerfileReadsTheRepository(t *testing.T) {
 	writeFiles(t, repo, map[string]string{"Gemfile.lock": "second\n"})
 	runGitT(t, repo, "commit", "-q", "-am", "bump a dependency")
 
-	again, err := BuildProjectImage(terms.Dir, repo, dockerfile, &log)
+	again, err := BuildProjectImage(terms.Dir, repo, dockerfile, nil, &log)
 	if err != nil {
 		t.Fatalf("rebuilding the project image: %v\n%s", err, log.String())
 	}
@@ -92,7 +92,7 @@ func TestBuildProjectImage_InRepoDockerfileReadsTheRepositoryByName(t *testing.T
 	}
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(terms.Dir, repo, dockerfile, &log)
+	image, err := BuildProjectImage(terms.Dir, repo, dockerfile, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -121,12 +121,36 @@ func TestBuildProjectImage_RefusesAStageNamedAfterTheRepoContext(t *testing.T) {
 		t.Fatalf("resolving the committed Dockerfile: %v", err)
 	}
 
-	_, err = BuildProjectImage(terms.Dir, repo, dockerfile, &bytes.Buffer{})
+	_, err = BuildProjectImage(terms.Dir, repo, dockerfile, nil, &bytes.Buffer{})
 	if !errors.Is(err, container.ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap container.ErrProjectImageUnavailable, which Run turns into a refusal", err)
 	}
 	if !strings.Contains(err.Error(), "AS "+container.RepoBuildContext) {
 		t.Fatalf("err = %q, want it to name the line that declares the stage", err)
+	}
+}
+
+// The line a run prints about its check image says which build secrets it
+// handed that build, by name. A build handed a credential has to say so to
+// be reviewable, and the name is not the secret - there is no value in
+// container.ProjectImage for this to print even by accident (issue #86).
+func TestDescribeProjectImage_NamesBuildSecrets(t *testing.T) {
+	// No docker: this is the sentence, not the build.
+	image := container.ProjectImage{
+		Tag:         container.ProjectImageRepository + ":abc",
+		Bases:       []container.BaseImage{{Ref: testImage, ID: "sha256:" + strings.Repeat("0", 64)}},
+		SecretNames: []string{"BUNDLE_ENTERPRISE__CONTRIBSYS__COM"},
+		Built:       true,
+	}
+	line := DescribeProjectImage(image)
+	if !strings.Contains(line, "BUNDLE_ENTERPRISE__CONTRIBSYS__COM") {
+		t.Fatalf("describe = %q, want it to name the build secret the build was handed", line)
+	}
+
+	// And a project that declared none says nothing about secrets at all.
+	image.SecretNames = nil
+	if plain := DescribeProjectImage(image); strings.Contains(plain, "secret") {
+		t.Fatalf("describe = %q, want no mention of secrets for a build that was handed none", plain)
 	}
 }
 
