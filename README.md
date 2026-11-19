@@ -99,8 +99,10 @@ name, in both places.
 
 The built image is tagged `inspector-check:<hash>`, derived from the
 Dockerfile's own content together with the image ID each of its `FROM`s
-resolves to. Change either and the next run builds a new image; change neither
-and it reuses the one already on the machine. Two consequences worth knowing:
+resolves to - and, for a project that declares
+[`buildArgs`](#use), the values read for them. Change any of those and the
+next run builds a new image; change none and it reuses the one already on the
+machine. Two consequences worth knowing:
 
 - **Pin your base by digest if you want it frozen.** A base image already on
   the machine is not re-pulled, exactly as `docker build` itself behaves
@@ -117,10 +119,13 @@ and it reuses the one already on the machine. Two consequences worth knowing:
   entirely once it has been built once.
 
 Two things inspector refuses rather than guesses at: a `FROM` that names its
-image through a variable (`FROM golang:${VERSION}`), because it has to resolve
-that base to a digest to tag what it builds, and a `# escape=` parser
-directive, because it would be reading the file under different rules than
-docker builds it under. Name the base literally.
+image through a variable no `buildArgs` entry declares
+(`FROM golang:${VERSION}`), because it has to resolve that base to a digest to
+tag what it builds, and a `# escape=` parser directive, because it would be
+reading the file under different rules than docker builds it under. Name the
+base literally, or declare the variable under
+[`buildArgs`](#use) so its value comes out of the commit and
+into the tag.
 
 The repository is a build context either way - its own root is the main one in
 the ordinary case, and it is `repo` beside a terms folder - so a
@@ -352,6 +357,75 @@ Build secrets need BuildKit, like the `repo` context above, and change nothing
 about when an image is rebuilt: a Dockerfile with `RUN --mount` already counts
 as reading the build context, so it is rebuilt every run with docker's layer
 cache making that cheap.
+
+**A build that needs a version the repository already states reads it with
+`buildArgs`.** A project pins its toolchain in a file of its own -
+`.ruby-version`, `.nvmrc`, `go.mod`'s `go` line, `Gemfile.lock`'s
+`BUNDLED WITH` - and repeating that version in `Dockerfile.inspector` means
+the two can drift, with the check quietly running against a toolchain the
+project no longer declares. So `.inspector.json` says where each value lives
+instead, and inspector reads it out of the commit under check:
+
+```json
+{
+  "check": "bundle exec rspec",
+  "buildArgs": {
+    "RUBY_VERSION": { "file": ".ruby-version" },
+    "BUNDLER_VERSION": { "file": "Gemfile.lock", "pattern": "BUNDLED WITH\\s+(\\S+)" }
+  }
+}
+```
+
+```dockerfile
+ARG RUBY_VERSION
+FROM ruby:${RUBY_VERSION}
+ARG BUNDLER_VERSION
+RUN gem install bundler -v "${BUNDLER_VERSION}"
+```
+
+Each entry names one `file`, relative to the repository root. With no
+`pattern`, the value is that file's first non-empty line, trimmed, which is
+the whole of what a version file holds. With one, it is that regular
+expression's single capture group, matched against the whole file - whole
+rather than line by line because the value is not always on the line that
+identifies it, as `BUNDLED WITH` shows. Patterns are Go's `regexp` (RE2):
+`(?m)` for line anchors, `(?s)` for a dot that matches newlines, no
+backtracking, and exactly one capture group, since there would be no rule for
+which of several was the value. Each one becomes
+`docker build --build-arg NAME=value`.
+
+Four things this does and does not promise:
+
+- **The value comes out of the commit, not off your disk.** A run already
+  refuses a dirty working tree, so for a tracked file the two are the same
+  bytes; reading the commit also means a gitignored file cannot supply a
+  version the commit does not declare, and that a declared path cannot leave
+  the repository (a symbolic link reads as its own link text, never as what it
+  points at).
+- **The values are in the image's tag**, so a bumped version always rebuilds.
+  That is the point: a version-pinning Dockerfile reads no build context, and
+  the images inspector reuses without building are exactly those - so without
+  this, bumping `.ruby-version` would run your check in the image built for
+  the old one. A project that declares no `buildArgs` keeps the tag it already
+  had.
+- **`FROM ruby:${RUBY_VERSION}` resolves to the image it actually names.**
+  Inspector substitutes declared values into every `FROM` before resolving
+  that base to a digest, and records the expanded reference in the run's
+  output and report. `${NAME}` and `$NAME` are the two forms; a variable no
+  `buildArgs` entry declares, and shell-style defaults like
+  `${NAME:-3.3}`, are refused by name rather than guessed at - the alternative
+  is inspector hashing one base image while docker builds from another.
+  Declare the `ARG` before the `FROM`, as docker requires.
+- **A missing file, or a pattern that matches nothing, refuses the run**,
+  naming the argument and the file, with nothing built and nothing judged. So
+  does an empty value, a capture that swallows a line break or a whole file,
+  and a name that is not letters, digits and underscores.
+
+Values appear in the run's output and in its local report under
+`.inspector/`, and docker records them in the built image's own metadata,
+where `docker history` prints them. A version is not a secret, so that is
+fine - but it is the reason this is a different key from `buildSecrets`
+above. Anything that must not be printed is a secret and belongs there.
 
 A `.inspector.json` that still carries the old `"network"` opt-in is refused
 by name, with any value, rather than quietly ignored - as every run that used
@@ -985,6 +1059,11 @@ no repository outside for it to be committed to, so the committed-image
 requirement that applies to in-repo terms has no question to answer here.
 [Terms from outside the repository](#terms-from-outside-the-repository---terms)
 has the rest, including the two folders that are refused by name.
+
+It may also carry `buildArgs`, whose files are read from the **repository
+under check** rather than from the terms folder - the same rule the `repo`
+build context follows, and for the same reason: the version that decides the
+image is the project's own, and the terms folder has no commit to bind one to.
 
 It may also carry `buildSecrets`, and this is the mode that usually needs it:
 a work project whose dependencies come from a paid source keeps that
@@ -1918,7 +1997,13 @@ variables a check image build needs and its repository must not carry - a paid
 dependency source's credential - passed to the build as BuildKit secrets, so
 the value reaches only the `RUN` step that mounts it and never an image layer,
 a log or a report, and a declared variable that is not set refuses the run by
-name before anything is built.
+name before anything is built. `buildArgs` is built beside it: a build
+argument's value is read out of the commit under check - a `.ruby-version`
+line, a `go.mod` or `Gemfile.lock` capture - passed to the build as
+`--build-arg`, substituted into the `FROM` references before their bases are
+resolved, and folded into the check image's tag, so a bumped version always
+rebuilds and a file the commit does not hold refuses the run by the
+argument's and the file's name.
 Still to come: the
 installer - see
 [SPEC.md](SPEC.md) and the repo's issues.

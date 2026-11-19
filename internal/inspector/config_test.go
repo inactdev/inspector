@@ -153,6 +153,50 @@ func TestLoadConfig_BuildSecretsDefaultToNone(t *testing.T) {
 	}
 }
 
+// buildArgs carries places in the repository, never values: a version
+// written into the config would be a second copy of what the repository
+// already states, free to drift from it.
+func TestLoadConfig_ReadsBuildArgs(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{
+	  "check": "make check",
+	  "buildArgs": {
+	    "RUBY_VERSION": {"file": ".ruby-version"},
+	    "BUNDLER_VERSION": {"file": "Gemfile.lock", "pattern": "BUNDLED WITH\\s+(\\S+)"}
+	  }
+	}`})
+
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.BuildArgs) != 2 {
+		t.Fatalf("BuildArgs = %+v, want both declared arguments", cfg.BuildArgs)
+	}
+	if got := cfg.BuildArgs["RUBY_VERSION"]; got.File != ".ruby-version" || got.Pattern != "" {
+		t.Fatalf("RUBY_VERSION = %+v, want the file alone - its value is that file's first non-empty line", got)
+	}
+	if got := cfg.BuildArgs["BUNDLER_VERSION"]; got.File != "Gemfile.lock" || got.Pattern != `BUNDLED WITH\s+(\S+)` {
+		t.Fatalf("BUNDLER_VERSION = %+v, want the file and its pattern as written", got)
+	}
+}
+
+// And a config that names none declares none: the build it produces is the
+// one it produced before this key existed, with no --build-arg at all and
+// the same image tag.
+func TestLoadConfig_BuildArgsDefaultToNone(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{ConfigFileName: `{"check": "make check"}`})
+
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.BuildArgs) != 0 {
+		t.Fatalf("BuildArgs = %+v, want none", cfg.BuildArgs)
+	}
+}
+
 func equalStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false

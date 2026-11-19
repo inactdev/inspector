@@ -84,6 +84,21 @@ type Config struct {
 	// environment does not carry refuses the run rather than building
 	// without it; see container.ErrBuildSecretUnavailable.
 	BuildSecrets []string `json:"buildSecrets,omitempty"`
+	// BuildArgs maps a build argument name to where in the repository
+	// under check its value lives - a version the repository already
+	// states about itself, so the check image is built from the toolchain
+	// the project declares rather than from one repeated in
+	// ProjectDockerfileName and left to drift. Each becomes
+	// `docker build --build-arg NAME=value`, is substituted into every
+	// FROM reference before its base image is resolved, and is hashed into
+	// the check image's tag, so a changed version always rebuilds. Values
+	// are read from the commit under check and may appear in the run's
+	// output and its local report: a version is not a secret, and anything
+	// that is one belongs under BuildSecrets instead. A file the commit
+	// does not hold, or a pattern that matches nothing, refuses the run by
+	// the argument's and the file's name; see ResolveBuildArgs and
+	// container.ErrBuildArgUnavailable.
+	BuildArgs map[string]BuildArgSource `json:"buildArgs,omitempty"`
 	// TimeoutSeconds bounds how long Check may run before inspector
 	// kills it and refuses rather than hanging forever. Zero (unset)
 	// uses DefaultTimeout.
@@ -106,6 +121,26 @@ type Config struct {
 	// ProtectedPaths; absent means inspector judges nothing and posts no
 	// such status, exactly as before this field existed.
 	TestPaths []string `json:"testPaths,omitempty"`
+}
+
+// BuildArgSource says where one build argument's value lives in the
+// repository under check. It is a place in that repository, never a value:
+// a value written here would be a second copy of a version the repository
+// already states, free to drift from it, which is the thing this key
+// exists to prevent.
+type BuildArgSource struct {
+	// File is the path, relative to the repository root and slash
+	// separated as git records it, holding the value. Read out of the
+	// commit being checked.
+	File string `json:"file"`
+	// Pattern is an optional regular expression (Go's regexp, RE2) with
+	// exactly one capture group holding the value, matched against the
+	// whole file - `(?m)^go (\S+)$` for go.mod's go line, or
+	// `BUNDLED WITH\s+(\S+)` for Gemfile.lock's, whose value is on the
+	// line after its marker. Absent, the value is the file's first
+	// non-empty line, trimmed, which is the whole of what .ruby-version,
+	// .nvmrc and their kin hold.
+	Pattern string `json:"pattern,omitempty"`
 }
 
 // Timeout returns the configured timeout, or DefaultTimeout if unset.

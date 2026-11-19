@@ -72,12 +72,21 @@ type Report struct {
 	// the only record of which environment judged this commit.
 	Image      string            `json:"image,omitempty"`
 	ImageBases map[string]string `json:"imageBases,omitempty"`
-	StartedAt  time.Time         `json:"startedAt"`
-	FinishedAt time.Time         `json:"finishedAt"`
-	DurationMS int64             `json:"durationMs"`
-	ExitCode   int               `json:"exitCode"`
-	Signal     string            `json:"signal,omitempty"`
-	TimedOut   bool              `json:"timedOut,omitempty"`
+	// ImageBuildArgs names each build argument that build was handed with
+	// the value read for it out of this commit - the third thing the tag
+	// is derived from, and the only way to read back which version of a
+	// toolchain the image was built for. Values, unlike the project's
+	// declared build secrets, which inspector never holds at all: a
+	// version is not a secret, and this file is where "which environment
+	// judged this commit" is recorded. Absent on a project that declares
+	// no buildArgs.
+	ImageBuildArgs map[string]string `json:"imageBuildArgs,omitempty"`
+	StartedAt      time.Time         `json:"startedAt"`
+	FinishedAt     time.Time         `json:"finishedAt"`
+	DurationMS     int64             `json:"durationMs"`
+	ExitCode       int               `json:"exitCode"`
+	Signal         string            `json:"signal,omitempty"`
+	TimedOut       bool              `json:"timedOut,omitempty"`
 	// Output is what the check command printed, bounded to
 	// MaxOutputBytes: its first OutputHeadBytes and last
 	// OutputTailBytes, with one marker line between them naming the

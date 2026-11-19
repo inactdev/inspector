@@ -25,7 +25,7 @@ func TestResolveBuildSecrets_NoneIsExactlyAsBefore(t *testing.T) {
 		if len(resolved) != 0 {
 			t.Fatalf("resolved = %v, want nothing", resolved)
 		}
-		args := buildArgs("/repo/Dockerfile.inspector", "inspector-check:abc", RepoBuildContext+"=/repo", "/repo", resolved)
+		args := buildCommandArgs("/repo/Dockerfile.inspector", "inspector-check:abc", RepoBuildContext+"=/repo", "/repo", resolved, nil)
 		want := []string{"build", "-f", "/repo/Dockerfile.inspector", "-t", "inspector-check:abc", "--build-context", RepoBuildContext + "=/repo", "/repo"}
 		if strings.Join(args, " ") != strings.Join(want, " ") {
 			t.Fatalf("docker args = %v, want the unchanged %v", args, want)
@@ -41,7 +41,7 @@ func TestResolveBuildSecrets_PassesNamesAndNeverValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving two declared secrets: %v", err)
 	}
-	args := buildArgs("/repo/Dockerfile.inspector", "inspector-check:abc", RepoBuildContext+"=/repo", "/repo", resolved)
+	args := buildCommandArgs("/repo/Dockerfile.inspector", "inspector-check:abc", RepoBuildContext+"=/repo", "/repo", resolved, nil)
 	line := strings.Join(args, " ")
 	for _, name := range resolved {
 		if !strings.Contains(line, "--secret id="+name+",env="+name) {

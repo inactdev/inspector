@@ -43,7 +43,7 @@ func TestBuildProjectImage_TermsDockerfileReadsTheRepository(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(terms.Dir, repo, dockerfile, nil, &log)
+	image, err := BuildProjectImage(terms.Dir, repo, dockerfile, nil, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -58,7 +58,7 @@ func TestBuildProjectImage_TermsDockerfileReadsTheRepository(t *testing.T) {
 	writeFiles(t, repo, map[string]string{"Gemfile.lock": "second\n"})
 	runGitT(t, repo, "commit", "-q", "-am", "bump a dependency")
 
-	again, err := BuildProjectImage(terms.Dir, repo, dockerfile, nil, &log)
+	again, err := BuildProjectImage(terms.Dir, repo, dockerfile, nil, nil, &log)
 	if err != nil {
 		t.Fatalf("rebuilding the project image: %v\n%s", err, log.String())
 	}
@@ -92,7 +92,7 @@ func TestBuildProjectImage_InRepoDockerfileReadsTheRepositoryByName(t *testing.T
 	}
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(terms.Dir, repo, dockerfile, nil, &log)
+	image, err := BuildProjectImage(terms.Dir, repo, dockerfile, nil, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -121,7 +121,7 @@ func TestBuildProjectImage_RefusesAStageNamedAfterTheRepoContext(t *testing.T) {
 		t.Fatalf("resolving the committed Dockerfile: %v", err)
 	}
 
-	_, err = BuildProjectImage(terms.Dir, repo, dockerfile, nil, &bytes.Buffer{})
+	_, err = BuildProjectImage(terms.Dir, repo, dockerfile, nil, nil, &bytes.Buffer{})
 	if !errors.Is(err, container.ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap container.ErrProjectImageUnavailable, which Run turns into a refusal", err)
 	}
@@ -151,6 +151,31 @@ func TestDescribeProjectImage_NamesBuildSecrets(t *testing.T) {
 	image.SecretNames = nil
 	if plain := DescribeProjectImage(image); strings.Contains(plain, "secret") {
 		t.Fatalf("describe = %q, want no mention of secrets for a build that was handed none", plain)
+	}
+}
+
+// And it says which build arguments that build was handed, values and all:
+// a version read out of the commit is the other half of which environment
+// judged it, and the tag those values are hashed into cannot be read back.
+// The opposite rule to the build secrets above, which is the whole reason
+// the two are separate keys.
+func TestDescribeProjectImage_NamesBuildArgsWithTheirValues(t *testing.T) {
+	// No docker: this is the sentence, not the build.
+	image := container.ProjectImage{
+		Tag:       container.ProjectImageRepository + ":abc",
+		Bases:     []container.BaseImage{{Ref: "ruby:3.4.13", ID: "sha256:" + strings.Repeat("0", 64)}},
+		BuildArgs: []container.BuildArg{{Name: "RUBY_VERSION", Value: "3.4.13"}},
+		Built:     true,
+	}
+	line := DescribeProjectImage(image)
+	if !strings.Contains(line, "RUBY_VERSION=3.4.13") {
+		t.Fatalf("describe = %q, want it to name the build argument and the value read for it", line)
+	}
+
+	// And a project that declared none says nothing about them at all.
+	image.BuildArgs = nil
+	if plain := DescribeProjectImage(image); strings.Contains(plain, "build arg") {
+		t.Fatalf("describe = %q, want no mention of build arguments for a build that was handed none", plain)
 	}
 }
 

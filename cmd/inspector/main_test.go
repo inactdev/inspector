@@ -531,6 +531,33 @@ func TestCLI_RefusesAMissingBuildSecretWithTheRefusalCode(t *testing.T) {
 	}
 }
 
+// A declared build argument whose file is not in the commit under check is
+// the same shape of refusal: the project said its check image is built
+// from a version this commit states, and this commit states none. Exit 2,
+// nothing published, and the message names the argument and the file. No
+// docker needed either - this lands before any container work.
+func TestCLI_RefusesABuildArgTheCommitCannotSupply(t *testing.T) {
+	dir := newTestRepo(t, map[string]string{
+		inspector.ConfigFileName: `{"check": "true", "buildArgs": {"RUBY_VERSION": {"file": ".ruby-version"}}}`,
+	})
+	commit := strings.TrimSpace(runGitT(t, dir, "rev-parse", "HEAD"))
+	stub := stubGitHubStatusAPI(t, dir, http.StatusCreated, "", nil)
+
+	code, _, stderr := runCLI(t, dir, "--branch", "feature")
+	if code != exitRefused {
+		t.Fatalf("exit code = %d, want %d - a project whose declared version is not in its commit was not judged, but it was a verdict attempt", code, exitRefused)
+	}
+	if !strings.Contains(stderr, "RUBY_VERSION") || !strings.Contains(stderr, ".ruby-version") {
+		t.Fatalf("stderr = %q, want it to name the build argument and the file it reads", stderr)
+	}
+	if stub.Request.State != "" {
+		t.Fatalf("refusal posted status state %q", stub.Request.State)
+	}
+	if got, exists := remoteRef(t, stub.Remote, inspector.StagingRefForCommit(commit)); exists {
+		t.Fatalf("refusal published staging ref %s", got)
+	}
+}
+
 func TestCLI_RequiresExplicitPublicationBranch(t *testing.T) {
 	dir := newTestRepo(t, nil)
 
