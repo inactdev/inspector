@@ -49,7 +49,7 @@ RUN go build ./...
 FROM scratch AS empty
 FROM build
 FROM alpine:3.20
-`)
+`, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestParseDockerfile_BuildContextDetection(t *testing.T) {
 			"COPY --from=build --from=" + RepoBuildContext + " Gemfile /deps/\n", true},
 	}
 	for name, tc := range cases {
-		facts, err := parseDockerfile(tc.dockerfile)
+		facts, err := parseDockerfile(tc.dockerfile, nil)
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", name, err)
 		}
@@ -133,7 +133,7 @@ func TestParseDockerfile_RefusesWhatItCannotResolve(t *testing.T) {
 		"no FROM":          {"RUN true\n", "no FROM"},
 	}
 	for name, tc := range cases {
-		_, err := parseDockerfile(tc.dockerfile)
+		_, err := parseDockerfile(tc.dockerfile, nil)
 		if err == nil {
 			t.Fatalf("%s: expected a refusal, got none", name)
 		}
@@ -155,7 +155,7 @@ func TestParseDockerfile_RefusesAStageNamedAfterTheRepoContext(t *testing.T) {
 		"mixed case":                    "FROM alpine AS Repo",
 		"platform flag before the base": "FROM --platform=linux/amd64 alpine AS " + RepoBuildContext,
 	} {
-		_, err := parseDockerfile("FROM alpine AS first\n" + offending + "\nCOPY . /src\n")
+		_, err := parseDockerfile("FROM alpine AS first\n"+offending+"\nCOPY . /src\n", nil)
 		if err == nil {
 			t.Fatalf("%s: expected a refusal, got none", name)
 		}
@@ -170,17 +170,17 @@ func TestProjectImageTag_DerivedFromDockerfileAndBases(t *testing.T) {
 	base := BaseImage{Ref: "alpine", ID: "sha256:" + strings.Repeat("a", 64)}
 	moved := BaseImage{Ref: "alpine", ID: "sha256:" + strings.Repeat("b", 64)}
 
-	tag := ProjectImageTag(dockerfile, []BaseImage{base})
+	tag := ProjectImageTag(dockerfile, []BaseImage{base}, nil)
 	if !strings.HasPrefix(tag, ProjectImageRepository+":") {
 		t.Fatalf("tag = %q, want it under the %s repository", tag, ProjectImageRepository)
 	}
-	if tag != ProjectImageTag(dockerfile, []BaseImage{base}) {
+	if tag != ProjectImageTag(dockerfile, []BaseImage{base}, nil) {
 		t.Fatal("the same Dockerfile and base produced two different tags; the cached image could never be reused")
 	}
-	if tag == ProjectImageTag([]byte("FROM alpine\nRUN true\n"), []BaseImage{base}) {
+	if tag == ProjectImageTag([]byte("FROM alpine\nRUN true\n"), []BaseImage{base}, nil) {
 		t.Fatal("a changed Dockerfile produced the same tag; a stale image would be reused")
 	}
-	if tag == ProjectImageTag(dockerfile, []BaseImage{moved}) {
+	if tag == ProjectImageTag(dockerfile, []BaseImage{moved}, nil) {
 		t.Fatal("a moved base image produced the same tag; a stale image would be reused")
 	}
 }
@@ -193,7 +193,7 @@ func TestBuildProjectImage_BuildsThenReusesTheTag(t *testing.T) {
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -212,7 +212,7 @@ func TestBuildProjectImage_BuildsThenReusesTheTag(t *testing.T) {
 
 	// Nothing here reads the build context, so the second call must
 	// reuse the tag rather than build again.
-	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, nil, &log)
 	if err != nil {
 		t.Fatalf("resolving the project image a second time: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestBuildProjectImage_RebuildsWhenTheDockerfileReadsTheContext(t *testing.T
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -249,7 +249,7 @@ func TestBuildProjectImage_RebuildsWhenTheDockerfileReadsTheContext(t *testing.T
 	if err := os.WriteFile(filepath.Join(contextDir, "dependency.txt"), []byte("second\n"), 0o644); err != nil {
 		t.Fatalf("rewriting the context file: %v", err)
 	}
-	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, nil, &log)
 	if err != nil {
 		t.Fatalf("rebuilding the project image: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestBuildProjectImage_CopiesFromTheRepoContext(t *testing.T) {
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, nil, &log)
 	if err != nil {
 		t.Fatalf("building the project image: %v\n%s", err, log.String())
 	}
@@ -308,7 +308,7 @@ func TestBuildProjectImage_CopiesFromTheRepoContext(t *testing.T) {
 	if err := os.WriteFile(lockfile, []byte("second\n"), 0o644); err != nil {
 		t.Fatalf("rewriting the repository's lockfile: %v", err)
 	}
-	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, nil, &log)
 	if err != nil {
 		t.Fatalf("rebuilding the project image: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestBuildProjectImage_CopiesFromTheRepoContext(t *testing.T) {
 func TestBuildProjectImage_MissingRepoContextIsRefused(t *testing.T) {
 	// No docker needed: nothing is run without a repository to name.
 	dockerfile, contextDir, _ := writeDockerfile(t, "FROM "+buildTestBase+"\n")
-	_, err := BuildProjectImage(context.Background(), dockerfile, contextDir, "", nil, &bytes.Buffer{})
+	_, err := BuildProjectImage(context.Background(), dockerfile, contextDir, "", nil, nil, &bytes.Buffer{})
 	if !errors.Is(err, ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageUnavailable", err)
 	}
@@ -348,7 +348,7 @@ func TestBuildProjectImage_FailedBuildIsRefusedWithItsLog(t *testing.T) {
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, nil, &log)
 	if !errors.Is(err, ErrProjectImageBuildFailed) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageBuildFailed", err)
 	}
@@ -369,7 +369,7 @@ func TestBuildProjectImage_UnresolvableBaseIsRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	_, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, &bytes.Buffer{})
+	_, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, nil, &bytes.Buffer{})
 	if !errors.Is(err, ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageUnavailable", err)
 	}
@@ -377,7 +377,7 @@ func TestBuildProjectImage_UnresolvableBaseIsRefused(t *testing.T) {
 
 func TestBuildProjectImage_MissingDockerfileIsRefused(t *testing.T) {
 	// No docker needed: the file is read before anything is run.
-	_, err := BuildProjectImage(context.Background(), filepath.Join(t.TempDir(), "Dockerfile.inspector"), t.TempDir(), t.TempDir(), nil, &bytes.Buffer{})
+	_, err := BuildProjectImage(context.Background(), filepath.Join(t.TempDir(), "Dockerfile.inspector"), t.TempDir(), t.TempDir(), nil, nil, &bytes.Buffer{})
 	if !errors.Is(err, ErrProjectImageUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrProjectImageUnavailable", err)
 	}
@@ -408,7 +408,7 @@ func TestBuildProjectImage_SecretReachesTheBuildAndSurvivesNowhere(t *testing.T)
 	defer cancel()
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, []string{name}, &log)
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, []string{name}, nil, &log)
 	if err != nil {
 		t.Fatalf("building with a declared build secret: %v\n%s", err, log.String())
 	}
@@ -457,6 +457,96 @@ func TestBuildProjectImage_SecretReachesTheBuildAndSurvivesNowhere(t *testing.T)
 	}
 }
 
+// A declared build argument reaches the build, and a changed value is a
+// different image under a different tag - the two halves of why this key
+// exists. The ARG is used in the FROM reference as well as in a RUN step,
+// which is the shape a version-pinning Dockerfile has.
+func TestBuildProjectImage_BuildArgReachesTheBuildAndTheTag(t *testing.T) {
+	requireDockerForBuild(t)
+	dockerfile, contextDir, repoDir := writeDockerfile(t, "ARG BASE_TAG\nFROM "+buildTestBase+":${BASE_TAG}\n"+
+		"ARG TOOL_VERSION\nRUN printf %s \"$TOOL_VERSION\" > /tool-version\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	args := []BuildArg{{Name: "BASE_TAG", Value: "latest"}, {Name: "TOOL_VERSION", Value: "1.2.3"}}
+	var log bytes.Buffer
+	image, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, args, &log)
+	if err != nil {
+		t.Fatalf("building with declared build arguments: %v\n%s", err, log.String())
+	}
+	t.Cleanup(func() {
+		_ = removeImage(image.Tag)
+	})
+	// The base was resolved as the reference the line actually names, not
+	// as the unexpanded text - which is no image and has no digest.
+	if len(image.Bases) != 1 || image.Bases[0].Ref != buildTestBase+":latest" {
+		t.Fatalf("Bases = %+v, want the one expanded reference %s:latest", image.Bases, buildTestBase)
+	}
+	out, err := runImage(ctx, image.Tag, "cat /tool-version")
+	if err != nil {
+		t.Fatalf("reading what the build was handed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(out) != "1.2.3" {
+		t.Fatalf("the build step saw %q, want the declared 1.2.3", strings.TrimSpace(out))
+	}
+
+	// Same Dockerfile, one bumped version: a different tag, and a build
+	// rather than a reuse. Without the values in the tag this Dockerfile -
+	// which reads no build context at all - would reuse the image above.
+	bumped := []BuildArg{{Name: "BASE_TAG", Value: "latest"}, {Name: "TOOL_VERSION", Value: "1.2.4"}}
+	again, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, bumped, &log)
+	if err != nil {
+		t.Fatalf("rebuilding with a bumped version: %v\n%s", err, log.String())
+	}
+	t.Cleanup(func() {
+		_ = removeImage(again.Tag)
+	})
+	if again.Tag == image.Tag {
+		t.Fatal("a bumped build argument produced the same tag; the check would run in the image built for the old version")
+	}
+	if !again.Built {
+		t.Fatal("Built = false after a bumped build argument; the old image was reused")
+	}
+	out, err = runImage(ctx, again.Tag, "cat /tool-version")
+	if err != nil {
+		t.Fatalf("reading what the second build was handed: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(out) != "1.2.4" {
+		t.Fatalf("the rebuilt image holds %q, want the bumped 1.2.4", strings.TrimSpace(out))
+	}
+
+	// And the unchanged pair reuses the first tag without building again,
+	// so this does not rebuild every run the way a context-reading
+	// Dockerfile has to.
+	reused, err := BuildProjectImage(ctx, dockerfile, contextDir, repoDir, nil, args, &log)
+	if err != nil {
+		t.Fatalf("resolving the image a third time: %v\n%s", err, log.String())
+	}
+	if reused.Tag != image.Tag || reused.Built {
+		t.Fatalf("reused = %+v, want the first tag with nothing built - the inputs did not change", reused)
+	}
+}
+
+// A build argument inspector will not pass refuses the run with nothing
+// built, whatever the caller handed it: the rule belongs to the function
+// that builds, not to its callers' discipline.
+func TestBuildProjectImage_UnusableBuildArgIsRefusedWithoutBuilding(t *testing.T) {
+	// A Dockerfile that would fail loudly if it were ever built, so a
+	// build that started anyway cannot pass this test quietly.
+	dockerfile, contextDir, repoDir := writeDockerfile(t, "FROM "+buildTestBase+"\nRUN exit 9\n")
+
+	var log bytes.Buffer
+	image, err := BuildProjectImage(context.Background(), dockerfile, contextDir, repoDir, nil,
+		[]BuildArg{{Name: "GO VERSION", Value: "1.22"}}, &log)
+	if !errors.Is(err, ErrBuildArgUnavailable) {
+		t.Fatalf("err = %v, want it to wrap ErrBuildArgUnavailable", err)
+	}
+	if image.Built || image.Tag != "" || log.Len() != 0 {
+		t.Fatalf("image = %+v, log = %q: nothing may be built, tagged or logged for a build that was refused", image, log.String())
+	}
+}
+
 // A secret inspector's environment does not carry refuses the run by that
 // variable's name, with nothing built - not even a docker command run, so
 // this needs no daemon.
@@ -469,7 +559,7 @@ func TestBuildProjectImage_UnsetSecretIsRefusedWithoutBuilding(t *testing.T) {
 	dockerfile, contextDir, repoDir := writeDockerfile(t, "FROM "+buildTestBase+"\nRUN exit 9\n")
 
 	var log bytes.Buffer
-	image, err := BuildProjectImage(context.Background(), dockerfile, contextDir, repoDir, []string{name}, &log)
+	image, err := BuildProjectImage(context.Background(), dockerfile, contextDir, repoDir, []string{name}, nil, &log)
 	if !errors.Is(err, ErrBuildSecretUnavailable) {
 		t.Fatalf("err = %v, want it to wrap ErrBuildSecretUnavailable", err)
 	}

@@ -121,15 +121,22 @@ func projectDockerfilePath(dir string) (string, error) {
 // otherwise fail deep inside its own log for a reason that reads as the
 // project's.
 //
+// buildArgs is the project's own buildArgs, already read out of the commit
+// under check by ResolveBuildArgs: the versions the repository states about
+// itself, which the build needs as `--build-arg` values, which expand the
+// FROM references the bases are resolved from, and which are hashed into
+// the tag so a changed version cannot reuse the image built from the old
+// one.
+//
 // Errors wrap container.ErrProjectImageUnavailable or
 // container.ErrProjectImageBuildFailed. Either is a refusal for the
 // caller: a project whose declared environment inspector could not
 // produce has not been judged, and running the check in anything else
 // would judge a different project.
-func BuildProjectImage(contextDir, repoRoot, dockerfile string, secretNames []string, log io.Writer) (container.ProjectImage, error) {
+func BuildProjectImage(contextDir, repoRoot, dockerfile string, secretNames []string, buildArgs []container.BuildArg, log io.Writer) (container.ProjectImage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), ImageBuildTimeout)
 	defer cancel()
-	return container.BuildProjectImage(ctx, dockerfile, contextDir, repoRoot, secretNames, log)
+	return container.BuildProjectImage(ctx, dockerfile, contextDir, repoRoot, secretNames, buildArgs, log)
 }
 
 // DescribeProjectImage is the one line a run prints about the image it is
@@ -149,6 +156,19 @@ func DescribeProjectImage(image container.ProjectImage) string {
 	if len(bases) > 0 {
 		from = strings.Join(bases, ", ")
 	}
+	// The build arguments are named and valued, because a version read
+	// out of the commit is the other half of which environment judged it -
+	// and because the tag it is hashed into cannot be read back. A value
+	// that must not be printed is a secret, which is the next line and a
+	// different config key.
+	args := ""
+	if len(image.BuildArgs) > 0 {
+		pairs := make([]string, 0, len(image.BuildArgs))
+		for _, arg := range image.BuildArgs {
+			pairs = append(pairs, fmt.Sprintf("%s=%s", arg.Name, arg.Value))
+		}
+		args = fmt.Sprintf(" (build args, from the commit: %s)", strings.Join(pairs, ", "))
+	}
 	// The declared build secrets are named, never valued: a build handed
 	// a credential has to say so to be reviewable, and the name is not
 	// the secret. There is no value anywhere here to print.
@@ -156,5 +176,5 @@ func DescribeProjectImage(image container.ProjectImage) string {
 	if len(image.SecretNames) > 0 {
 		secrets = fmt.Sprintf(" (build secrets, by name: %s)", strings.Join(image.SecretNames, ", "))
 	}
-	return fmt.Sprintf("inspector: %s check image %s from %s (base: %s)%s", action, image.Tag, ProjectDockerfileName, from, secrets)
+	return fmt.Sprintf("inspector: %s check image %s from %s (base: %s)%s%s", action, image.Tag, ProjectDockerfileName, from, args, secrets)
 }
