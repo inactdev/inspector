@@ -207,6 +207,16 @@ func Run(opts Options) (Result, error) {
 		return refusal, nil
 	}
 
+	// And for the same reason again: a build argument's value is read out
+	// of this commit, so a declared file the commit does not hold, or a
+	// pattern that matches nothing in it, is a gap between what the
+	// project says about itself and what it carries - nothing about saying
+	// so needs Docker either.
+	buildArgs, err := ResolveBuildArgs(repoRoot, commit, cfg.BuildArgs)
+	if refusal, refused := refuseProjectImage(repoRoot, commit, terms, container.ProjectImage{}, err); refused {
+		return refusal, nil
+	}
+
 	if err := container.EnsureAvailable(); err != nil {
 		return Result{
 			Outcome: Refused,
@@ -236,7 +246,7 @@ func Run(opts Options) (Result, error) {
 	// it; the repository is a second, named context either way, so a
 	// Dockerfile that bakes this project's dependencies in reads its
 	// lockfiles from the same place in both modes.
-	image, err := BuildProjectImage(terms.Dir, repoRoot, dockerfile, cfg.BuildSecrets, buildLog)
+	image, err := BuildProjectImage(terms.Dir, repoRoot, dockerfile, cfg.BuildSecrets, buildArgs, buildLog)
 	if refusal, refused := refuseProjectImage(repoRoot, commit, terms, image, err); refused {
 		return refusal, nil
 	}
@@ -316,18 +326,19 @@ func Run(opts Options) (Result, error) {
 		// named the repo root as its terms folder on every ordinary run
 		// would say nothing, while this says which terms judged the
 		// commit in the one case where that is not obvious.
-		TermsDir:   termsDirReported(terms),
-		NoStamp:    opts.NoStamp,
-		Image:      image.Tag,
-		ImageBases: imageBases(image),
-		Outcome:    outcome,
-		StartedAt:  started,
-		FinishedAt: finished,
-		DurationMS: finished.Sub(started).Milliseconds(),
-		ExitCode:   checkResult.ExitCode,
-		Signal:     checkResult.Signal,
-		TimedOut:   checkResult.TimedOut,
-		Output:     checkResult.Output,
+		TermsDir:       termsDirReported(terms),
+		NoStamp:        opts.NoStamp,
+		Image:          image.Tag,
+		ImageBases:     imageBases(image),
+		ImageBuildArgs: imageBuildArgs(image),
+		Outcome:        outcome,
+		StartedAt:      started,
+		FinishedAt:     finished,
+		DurationMS:     finished.Sub(started).Milliseconds(),
+		ExitCode:       checkResult.ExitCode,
+		Signal:         checkResult.Signal,
+		TimedOut:       checkResult.TimedOut,
+		Output:         checkResult.Output,
 		// Recorded as a fact of the run, not left for a reader to infer
 		// from the output's size: a report that silently holds part of
 		// the output is worse than a large one (issue #12).
@@ -437,6 +448,24 @@ func refuseProjectImage(repoRoot, commit string, terms Terms, image container.Pr
 				ProjectDockerfileName,
 			),
 		}, true
+	case errors.Is(err, container.ErrBuildArgUnavailable):
+		// Before the general ErrProjectImageUnavailable case it wraps, for
+		// the same reason as the build secrets below it: nothing was
+		// built, and what the person reading this has to look at is one
+		// file in their own repository, which the message names.
+		return Result{
+			Outcome: Refused,
+			Commit:  commit,
+			Message: fmt.Sprintf(
+				"%v\n\n"+
+					"%s lists it under \"buildArgs\", which is how a project says its check image\n"+
+					"build takes a version the repository itself states - a .ruby-version, a go.mod\n"+
+					"go line - rather than one repeated in %s and free to drift\n"+
+					"from it. The value is read out of the commit under check, so it has to be in\n"+
+					"that commit: nothing was built and nothing was judged.\n",
+				err, ConfigFileName, ProjectDockerfileName,
+			),
+		}, true
 	case errors.Is(err, container.ErrBuildSecretUnavailable):
 		// Checked before the general ErrProjectImageUnavailable case it
 		// wraps: nothing was built, and what the person reading this has
@@ -522,4 +551,21 @@ func imageBases(image container.ProjectImage) map[string]string {
 		bases[base.Ref] = base.ID
 	}
 	return bases
+}
+
+// imageBuildArgs records the build arguments this build was handed, values
+// and all: they are versions the commit states about itself, the third
+// thing the tag is derived from, and the only way to read back which
+// toolchain the image was built for. A value that must not be written here
+// is a secret, which is a different config key and never reaches inspector
+// at all.
+func imageBuildArgs(image container.ProjectImage) map[string]string {
+	if len(image.BuildArgs) == 0 {
+		return nil
+	}
+	args := make(map[string]string, len(image.BuildArgs))
+	for _, arg := range image.BuildArgs {
+		args[arg.Name] = arg.Value
+	}
+	return args
 }

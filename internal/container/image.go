@@ -76,6 +76,13 @@ type ProjectImage struct {
 	// inspector's environment, docker reads them from there itself, and
 	// nothing here holds one.
 	SecretNames []string
+	// BuildArgs are the build arguments this build was handed, name and
+	// value both, sorted by name - the third thing Tag hashes. Values
+	// unlike SecretNames: these were read out of the repository under
+	// check, docker records them in the image's own metadata, and a run
+	// has to be able to say which version of a toolchain judged the
+	// commit.
+	BuildArgs []BuildArg
 	// Built reports whether docker build actually ran, as opposed to an
 	// already-present tag being reused.
 	Built bool
@@ -134,10 +141,21 @@ type BaseImage struct {
 // carry refuses the run with no docker command run at all, rather than
 // starting a build that was always going to fail without it.
 //
+// buildArgs are the project's declared buildArgs, already read out of the
+// commit under check by the caller (inspector.ResolveBuildArgs) and sorted
+// by name. Each becomes `--build-arg NAME=value`, each is substituted into
+// every FROM reference before that base is resolved - so
+// `FROM ruby:${RUBY_VERSION}` is tagged against the digest of the image it
+// actually names - and all of them are hashed into the tag, which is what
+// makes a changed version rebuild rather than reuse. Their names and values
+// are validated here again, so no unvalidated one can reach a docker flag
+// whatever a caller did.
+//
 // Errors wrap ErrProjectImageUnavailable - ErrBuildSecretUnavailable for a
-// declared secret that is not there - or, for a build that ran and failed,
+// declared secret that is not there, ErrBuildArgUnavailable for a build
+// argument inspector will not pass - or, for a build that ran and failed,
 // ErrProjectImageBuildFailed; callers turn any of them into a refusal.
-func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir string, secretNames []string, log io.Writer) (ProjectImage, error) {
+func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir string, secretNames []string, buildArgs []BuildArg, log io.Writer) (ProjectImage, error) {
 	if log == nil {
 		// Unlike os/exec, which reads a nil writer as /dev/null, this
 		// function writes to log itself.
@@ -150,11 +168,14 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir 
 	if err != nil {
 		return ProjectImage{}, err
 	}
+	if err := ValidateBuildArgs(buildArgs); err != nil {
+		return ProjectImage{}, err
+	}
 	content, err := os.ReadFile(dockerfilePath)
 	if err != nil {
 		return ProjectImage{}, fmt.Errorf("%w: reading %s: %v", ErrProjectImageUnavailable, dockerfilePath, err)
 	}
-	parsed, err := parseDockerfile(string(content))
+	parsed, err := parseDockerfile(string(content), buildArgs)
 	if err != nil {
 		return ProjectImage{}, fmt.Errorf("%w: %s: %v", ErrProjectImageUnavailable, dockerfilePath, err)
 	}
@@ -169,10 +190,11 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir 
 	}
 
 	image := ProjectImage{
-		Tag:         ProjectImageTag(content, bases),
+		Tag:         ProjectImageTag(content, bases, buildArgs),
 		Dockerfile:  dockerfilePath,
 		Bases:       bases,
 		SecretNames: secrets,
+		BuildArgs:   buildArgs,
 	}
 	if !parsed.readsBuildContext {
 		if _, err := imageID(ctx, image.Tag); err == nil {
@@ -183,7 +205,7 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir 
 	captured := &strings.Builder{}
 	out := io.MultiWriter(log, captured)
 	repoContext := RepoBuildContext + "=" + repoDir
-	cmd := exec.CommandContext(ctx, "docker", buildArgs(dockerfilePath, image.Tag, repoContext, contextDir, secrets)...)
+	cmd := exec.CommandContext(ctx, "docker", buildCommandArgs(dockerfilePath, image.Tag, repoContext, contextDir, secrets, buildArgs)...)
 	// The identical writer for both, so os/exec reuses one pipe and one
 	// copying goroutine rather than racing two onto the same writer.
 	cmd.Stdout = out
@@ -200,37 +222,55 @@ func BuildProjectImage(ctx context.Context, dockerfilePath, contextDir, repoDir 
 	return image, nil
 }
 
-// buildArgs is the whole `docker` command line one check image build runs,
-// assembled in one place so what inspector hands the builder is readable
-// and testable without a daemon.
+// buildCommandArgs is the whole `docker` command line one check image
+// build runs, assembled in one place so what inspector hands the builder
+// is readable and testable without a daemon. Named for the command rather
+// than for `--build-arg`, which is the separate thing buildArgFlags
+// assembles.
 //
 // -f names the Dockerfile; the final argument is the main build context,
 // which is wherever the Dockerfile lives. --build-context adds the
 // repository under check beside it under its fixed name, for the
-// Dockerfile that bakes the project's dependencies in, and one --secret
-// per declared build secret names an environment variable docker reads
-// itself. Both need BuildKit, which is what `docker build` has used by
-// default since Docker 23, and a builder without it fails this build
-// loudly in docker's own words rather than producing an image missing
-// those files. No --pull: the bases were already resolved by the caller,
-// and re-resolving them here would let a floating tag move between that
-// resolution and this build, which is the one thing the content-derived
-// tag exists to rule out. No --network either: the build may reach the
-// network to install the project's dependencies, which is what makes the
-// check container's own --network none possible at all.
+// Dockerfile that bakes the project's dependencies in; one --secret per
+// declared build secret names an environment variable docker reads itself;
+// and one --build-arg per declared build argument carries a value read out
+// of the commit under check. The first two need BuildKit, which is what
+// `docker build` has used by default since Docker 23, and a builder
+// without it fails this build loudly in docker's own words rather than
+// producing an image missing those files. No --pull: the bases were
+// already resolved by the caller, and re-resolving them here would let a
+// floating tag move between that resolution and this build, which is the
+// one thing the content-derived tag exists to rule out. No --network
+// either: the build may reach the network to install the project's
+// dependencies, which is what makes the check container's own
+// --network none possible at all.
 //
 // No secret value appears here, or anywhere else inspector writes: a
-// secret is passed as the name of a variable, never as a value.
-func buildArgs(dockerfilePath, tag, repoContext, contextDir string, secrets []string) []string {
-	args := []string{"build", "-f", dockerfilePath, "-t", tag, "--build-context", repoContext}
-	args = append(args, buildSecretFlags(secrets)...)
-	return append(args, contextDir)
+// secret is passed as the name of a variable, never as a value. A build
+// argument's value does appear, here and in the built image's own
+// metadata, which is docker's behavior and the reason the two are separate
+// config keys.
+func buildCommandArgs(dockerfilePath, tag, repoContext, contextDir string, secrets []string, args []BuildArg) []string {
+	command := []string{"build", "-f", dockerfilePath, "-t", tag, "--build-context", repoContext}
+	command = append(command, buildSecretFlags(secrets)...)
+	command = append(command, buildArgFlags(args)...)
+	return append(command, contextDir)
 }
 
-// ProjectImageTag is the local tag a Dockerfile and its resolved bases
-// produce. Exported so a caller can state the tag it is about to run, and
-// so the derivation is testable without docker.
-func ProjectImageTag(dockerfile []byte, bases []BaseImage) string {
+// ProjectImageTag is the local tag a Dockerfile, its resolved bases and
+// the build arguments it is handed produce. Exported so a caller can state
+// the tag it is about to run, and so the derivation is testable without
+// docker.
+//
+// The build arguments are in it because they are the one input that
+// changes the image while changing neither the Dockerfile nor the digest
+// of any base it names: `FROM ruby:${RUBY_VERSION}` with a new
+// .ruby-version is a different image built from the same file. They are
+// hashed as sorted NAME=value pairs - no value in the tag itself, which is
+// printed in reports and console lines - and an empty list contributes
+// nothing at all, so every project that declares none keeps exactly the
+// tag it had before this existed.
+func ProjectImageTag(dockerfile []byte, bases []BaseImage, args []BuildArg) string {
 	h := sha256.New()
 	// Length-prefixed, so no arrangement of Dockerfile bytes and base
 	// references can hash the same as a different one.
@@ -238,6 +278,11 @@ func ProjectImageTag(dockerfile []byte, bases []BaseImage) string {
 	h.Write(dockerfile)
 	for _, base := range bases {
 		fmt.Fprintf(h, "\nbase %s=%s", base.Ref, base.ID)
+	}
+	// Neither a validated name nor a validated value can contain a
+	// newline, so one pair per line stays unambiguous.
+	for _, arg := range args {
+		fmt.Fprintf(h, "\nbuild-arg %s=%s", arg.Name, arg.Value)
 	}
 	return ProjectImageRepository + ":" + hex.EncodeToString(h.Sum(nil))
 }
@@ -314,9 +359,13 @@ type dockerfileFacts struct {
 // content-derived tag or is refused by name. The three refusals matter
 // more than the parsing:
 //
-//   - A `FROM` naming its image through a variable cannot be resolved to a
-//     digest, so the tag would stop changing when that base changed. The
-//     project is told to pin it literally instead.
+//   - A `FROM` naming its image through a variable no declared build
+//     argument expands cannot be resolved to a digest, so the tag would
+//     stop changing when that base changed. The project is told to declare
+//     the argument under buildArgs, or to pin the base literally. One a
+//     declared build argument does expand is substituted first, so the base
+//     resolved, pulled, hashed and reported is the image the line actually
+//     names.
 //   - An `# escape=` parser directive changes which character continues a
 //     line, so this function would be reading a different file than docker
 //     does. Refused rather than parsed under the wrong rules.
@@ -324,9 +373,10 @@ type dockerfileFacts struct {
 //     every build carries, and docker resolves the context first - so the
 //     stage would be silently replaced by the repository under check.
 //     Refused by name, naming the line.
-func parseDockerfile(content string) (dockerfileFacts, error) {
+func parseDockerfile(content string, buildArgs []BuildArg) (dockerfileFacts, error) {
 	var facts dockerfileFacts
 	stages := map[string]bool{}
+	values := buildArgValues(buildArgs)
 	sawInstruction := false
 	sawFrom := false
 
@@ -356,6 +406,17 @@ func parseDockerfile(content string) (dockerfileFacts, error) {
 				return facts, err
 			}
 			sawFrom = true
+			// Before everything below it: a reference that needs
+			// expanding has to be expanded before it is compared with a
+			// stage name, with the repository context, or with scratch,
+			// and before it is resolved to the digest the tag hashes.
+			if strings.Contains(ref, "$") {
+				expanded := substituteBuildArgs(ref, values)
+				if strings.Contains(expanded, "$") {
+					return facts, fmt.Errorf("FROM %s names its base image through a variable inspector cannot expand; it tags the image it builds by that base's digest and cannot resolve a reference it has to expand first - declare the variable under \"buildArgs\" in this project's inspector configuration, so its value is read from the commit under check and hashed into the tag, or name the base literally, ideally pinned by digest", ref)
+				}
+				ref = expanded
+			}
 			if namesRepoContext(stage) {
 				return facts, fmt.Errorf("line %q declares a build stage named %q, which every check image build already carries as a build context holding the repository under check - docker resolves that context ahead of a stage of the same name, so this stage would be silently replaced by the repository. Rename the stage", strings.TrimSpace(line), stage)
 			}
@@ -376,9 +437,6 @@ func parseDockerfile(content string) (dockerfileFacts, error) {
 			if namesRepoContext(ref) {
 				facts.readsBuildContext = true
 				continue
-			}
-			if strings.Contains(ref, "$") {
-				return facts, fmt.Errorf("FROM %s names its base image through a variable; inspector tags the image it builds by that base's digest and cannot resolve one it has to expand first - name the base literally, ideally pinned by digest", ref)
 			}
 			facts.baseRefs = append(facts.baseRefs, ref)
 		case "COPY", "ADD":
